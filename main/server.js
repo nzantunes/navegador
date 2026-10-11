@@ -101,7 +101,7 @@ function sendForbiddenAdminResponse(res, isJson = false) {
 const MEDIA_DOWNLOADS_DIR = path.join(os.homedir(), '.papaleguas_downloads');
 try { fs.mkdirSync(MEDIA_DOWNLOADS_DIR, { recursive: true }); } catch (e) {}
 
-const SERVER_BUILD_VERSION = '2026.10.11-v20';
+const SERVER_BUILD_VERSION = '2026.10.11-v21';
 const querystring = require('querystring');
 const zlib = require('zlib');
 const http2 = require('http2');
@@ -2766,7 +2766,7 @@ async function searchYoutubeVideos(query, hl = 'pt-BR', sortByRecent = false, ti
         }
       }
     } catch (e) {}
-    return [];
+    // Se o Tor falhou ou foi bloqueado pelo YouTube, recorre à conexão direta para garantir resposta rápida
   }
 
   // Sem Tor: tenta conexão direta
@@ -4983,17 +4983,17 @@ function scoreVideoRelevance(video, ctx) {
   return score;
 }
 
-async function fetchRelatedYoutubeVideos(videoId, useTor = false) {
+async function fetchRelatedYoutubeVideos(videoId, useTor = false, hl = 'pt-BR', country = 'BR') {
   if (!videoId) return [];
   const shouldUseTor = Boolean(useTor);
-  const cacheKey = 'related__' + videoId + '__' + (shouldUseTor ? 'tor' : 'direct');
+  const cacheKey = 'related__' + videoId + '__' + (hl || 'pt-BR') + '__' + (country || 'BR') + '__' + (shouldUseTor ? 'tor' : 'direct');
   const cached = youtubeSearchCache.get(cacheKey);
   if (cached && (Date.now() - cached.timestamp < YT_CACHE_TTL) && cached.videos.length > 0) {
     return cached.videos;
   }
   try {
-    const url = 'https://www.youtube.com/watch?v=' + encodeURIComponent(videoId) + '&hl=pt-BR&gl=BR';
-    const res = await fetchYoutubeHtml(url, 'pt-BR', shouldUseTor);
+    const url = 'https://www.youtube.com/watch?v=' + encodeURIComponent(videoId) + '&hl=' + encodeURIComponent(hl || 'pt-BR') + '&gl=' + encodeURIComponent(country || 'BR');
+    const res = await fetchYoutubeHtml(url, hl || 'pt-BR', shouldUseTor);
     if (!res || !res.ok || !res.html) return [];
     const match = res.html.match(/var ytInitialData = ({.*?});<\/script>/);
     if (!match) return [];
@@ -5016,7 +5016,7 @@ async function fetchRelatedYoutubeVideos(videoId, useTor = false) {
       collectYoutubeRenderers(data, renderers);
       renderers.forEach(push);
     }
-    const sliced = videos.slice(0, 24);
+    const sliced = videos.slice(0, 30);
     if (sliced.length) youtubeSearchCache.set(cacheKey, { timestamp: Date.now(), videos: sliced });
     return sliced;
   } catch (e) {
@@ -5188,7 +5188,7 @@ function rotateThemeSearchQueries(theme, page = 1, country = 'BR') {
   };
 }
 
-async function getAiCuratorSuggestions({ type, currentQuery, currentTitle, currentChannel, currentVideoId, excludeTitles = [], page = 1, stayOnTheme = true, useAi = false, useTor = false, country = 'BR', clientIp = '' }) {
+async function getAiCuratorSuggestions({ type, currentQuery, currentTitle, currentChannel, currentVideoId, excludeTitles = [], page = 1, stayOnTheme = true, useAi = false, useTor = false, country = 'BR', clientIp = '', timeFilter = 'month' }) {
   const isCinema = type === 'filmes' || type === 'cinema';
   const cleanTitle = (currentTitle || '').trim();
   const cleanChannel = (currentChannel || '').trim();
@@ -5265,19 +5265,28 @@ async function getAiCuratorSuggestions({ type, currentQuery, currentTitle, curre
   }
   queries = queries.filter((q, i, arr) => q && arr.indexOf(q) === i).slice(0, 3);
 
-  // Vídeos relacionados da barra lateral do YouTube: só puxa se não estiver estritamente no tema
-  const relatedPromise = (currentVideoId && !stayOnTheme)
-    ? fetchRelatedYoutubeVideos(currentVideoId, useTor).catch(() => [])
+  const hl = getHlForCountry(country);
+  const effectiveClientIp = useTor ? '' : clientIp;
+
+  // 1. RECOMENDAÇÕES NATIVAS DIRETAS DO YOUTUBE:
+  // Se há um vídeo atual, puxa na hora os vídeos recomendados / Up Next direto do YouTube (~300ms)
+  const relatedPromise = currentVideoId
+    ? fetchRelatedYoutubeVideos(currentVideoId, useTor, hl, country).catch(() => [])
     : Promise.resolve([]);
 
-  // Filtros de tempo para SEMPRE priorizar vídeos novos
-  const timeCycle = ['week', 'month', 'day', 'week'];
-  const timeFilter = timeCycle[(Math.max(1, page) - 1) % timeCycle.length];
+  // 2. BUSCAS DIRETAS NO YOUTUBE EM PARALELO (~300ms)
+  const localSearchPromises = queries.slice(0, 3).map((q) =>
+    searchYoutubeVideos(q, hl, true, timeFilter, useTor, searchMode, country, effectiveClientIp).catch(() => [])
+  );
 
-  // IA sempre ativa quando há um vídeo em exibição: lê título + canal e devolve buscas
-  // específicas, palavras-chave para ranquear e o motivo da recomendação.
-  const videoAiPromise = hasVideoContext
-    ? askCuratorAiForVideo({
+  // IA ultra-rápida não-bloqueante (timeout de 600ms para nunca travar a resposta)
+  const fastAiRace = (promise) => Promise.race([
+    promise,
+    new Promise((resolve) => setTimeout(() => resolve(null), 600))
+  ]);
+
+  const videoAiPromise = (hasVideoContext && useAi)
+    ? fastAiRace(askCuratorAiForVideo({
         title: cleanTitle,
         channel: cleanChannel,
         theme: targetTheme || (stayOnTheme ? activeTheme : ''),
@@ -5286,30 +5295,33 @@ async function getAiCuratorSuggestions({ type, currentQuery, currentTitle, curre
         type,
         stayOnTheme,
         country
-      }).catch(() => null)
+      }).catch(() => null))
     : Promise.resolve(null);
 
-  // Sem vídeo em exibição, a IA por tema continua servindo o scroll infinito.
   const aiPromise = (useAi && !hasVideoContext)
-    ? askCuratorAiForThemeQueries({
+    ? fastAiRace(askCuratorAiForThemeQueries({
         theme: targetTheme || activeTheme,
         page,
         excludeList: Array.from(excludeSet),
         type,
         country
-      })
+      }).catch(() => null))
     : Promise.resolve(null);
 
-  const hl = getHlForCountry(country);
-  const effectiveClientIp = useTor ? '' : clientIp;
-  const localSearchPromises = queries.slice(0, 2).map((q) =>
-    searchYoutubeVideos(q, hl, true, timeFilter, useTor, searchMode, country, effectiveClientIp).catch(() => [])
-  );
+  const [videoAi, aiCurator, relatedVideos, ...localSearchResults] = await Promise.all([
+    videoAiPromise,
+    aiPromise,
+    relatedPromise
+  ].concat(localSearchPromises));
 
-  const [videoAi, aiCurator, relatedVideos, ...localSearchResults] = await Promise.all([videoAiPromise, aiPromise, relatedPromise].concat(localSearchPromises));
-
-  if (videoAi && videoAi.reason) defaultReason = videoAi.reason;
-  else if (aiCurator && aiCurator.reason) defaultReason = aiCurator.reason;
+  // Motivo da recomendação limpo e profissional direto do YouTube
+  if (hasVideoContext) {
+    defaultReason = `Recomendações do YouTube baseadas em "${cleanTitle.length > 40 ? cleanTitle.slice(0, 37) + '...' : cleanTitle}"`;
+  } else {
+    defaultReason = `Vídeos recomendados pelo YouTube sobre ${activeTheme === 'noticias' ? 'notícias recentes' : activeTheme}`;
+  }
+  if (videoAi && videoAi.reason && !videoAi.reason.toLowerCase().includes('novas buscas')) defaultReason = videoAi.reason;
+  else if (aiCurator && aiCurator.reason && !aiCurator.reason.toLowerCase().includes('novas buscas')) defaultReason = aiCurator.reason;
 
   const aiQueries = []
     .concat(videoAi && Array.isArray(videoAi.queries) ? videoAi.queries : [])
@@ -5320,7 +5332,7 @@ async function getAiCuratorSuggestions({ type, currentQuery, currentTitle, curre
   let extraSearchResults = [];
   if (aiQueries.length) {
     extraSearchResults = await Promise.all(
-      aiQueries.slice(0, 3).map((q) =>
+      aiQueries.slice(0, 2).map((q) =>
         searchYoutubeVideos(q, hl, true, timeFilter, useTor, searchMode, country, effectiveClientIp).catch(() => [])
       )
     );
@@ -5339,10 +5351,10 @@ async function getAiCuratorSuggestions({ type, currentQuery, currentTitle, curre
     seenIds.add(v.id);
     allVideos.push(v);
   };
-  // Priorizar resultados específicos da IA e buscas temáticas de 2026
-  extraSearchResults.forEach((list) => (list || []).forEach(pushVideo));
-  localSearchResults.forEach((list) => (list || []).forEach(pushVideo));
+  // Recomendações nativas diretas do YouTube entram em primeiro lugar
   (relatedVideos || []).forEach(pushVideo);
+  localSearchResults.forEach((list) => (list || []).forEach(pushVideo));
+  extraSearchResults.forEach((list) => (list || []).forEach(pushVideo));
 
   const rankCtx = hasVideoContext
     ? { title: cleanTitle, channel: cleanChannel, query: targetTheme || keyword || currentQuery }
@@ -5386,7 +5398,8 @@ async function getAiCuratorSuggestions({ type, currentQuery, currentTitle, curre
       useAi,
       useTor,
       country,
-      clientIp
+      clientIp,
+      timeFilter
     });
   }
 
@@ -7672,10 +7685,11 @@ function getDevicePlaylistsRoot(clientId, req) {
       const excludeTitles = (body && body.excludeTitles) || [];
       const page = parseInt((body && body.page) || reqUrl.searchParams.get('page') || '1', 10) || 1;
       const stayOnTheme = (body && body.stayOnTheme === true) || reqUrl.searchParams.get('stayOnTheme') === 'true';
-      const useAi = (body && body.useAi !== false) && reqUrl.searchParams.get('useAi') !== 'false';
+      const useAi = (body && body.useAi === true) || reqUrl.searchParams.get('useAi') === 'true';
       const clientId = req.headers['x-client-id'] || reqUrl.searchParams.get('clientId') || (body && body.clientId) || 'client_default';
       const clientSession = getOrCreateClientSession(clientId);
-      const useTor = isTorRoutingEnabled(clientSession);
+      // Recomendações e buscas do YouTube são sempre diretas para velocidade máxima
+      const useTor = false;
 
       const clientIpParam = reqUrl.searchParams.get('deviceIp') || (body && body.deviceIp) || req.headers['x-device-ip'] || req.headers['x-client-ip'] || '';
       const clientIp = extractRequestDeviceIp(req, clientIpParam);
@@ -7685,7 +7699,7 @@ function getDevicePlaylistsRoot(clientId, req) {
       if (clientCountryParam && /^[A-Z]{2}$/i.test(clientCountryParam)) {
         countryCode = clientCountryParam.toUpperCase();
       } else {
-        countryCode = await getClientCountryCode(req, clientIp, useTor).catch(() => 'BR');
+        countryCode = await getClientCountryCode(req, clientIp, false).catch(() => 'BR');
       }
 
       const result = await getAiCuratorSuggestions({
@@ -7698,9 +7712,9 @@ function getDevicePlaylistsRoot(clientId, req) {
         page,
         stayOnTheme,
         useAi,
-        useTor,
+        useTor: false,
         country: countryCode,
-        clientIp: useTor ? '' : clientIp
+        clientIp
       });
 
       res.writeHead(200);

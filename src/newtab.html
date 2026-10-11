@@ -3187,7 +3187,7 @@
     <!-- Loader de Scroll Infinito / Recomendação Papaléguas -->
     <div class="agent-scroll-loader" id="agent-scroll-loader" style="display: none;">
       <div class="agent-spinner"></div>
-      <span>🤖 O Papaléguas está selecionando novos vídeos exclusivos...</span>
+      <span>⚡ Carregando recomendações do YouTube...</span>
     </div>
 
   </main>
@@ -4813,6 +4813,7 @@
               deviceIp: detectedClientDeviceIp,
               page: pageCount,
               stayOnTheme: true,
+              useAi: false,
               country: detectedCountry,
               excludeTitles: exclude
             })
@@ -4952,7 +4953,7 @@
             currentVideoId: currentActiveVideoId,
             page: pageCount,
             stayOnTheme: true,
-            useAi: true,
+            useAi: false,
             country: detectedCountry,
             excludeTitles: Array.from(seenVideoIds)
           })
@@ -4960,14 +4961,14 @@
 
         if (requestId !== feedRequestId) return;
         if (res && res.success && Array.isArray(res.items) && res.items.length > 0) {
-          // Banner animado de curadoria Papaléguas
+          // Banner animado de recomendações do YouTube
           const banner = document.createElement('div');
           banner.className = 'agent-divider-banner';
           banner.innerHTML = `
             <div class="agent-icon-box">⚡</div>
             <div>
-              <div class="agent-header-title">IA Papaléguas • ${escapeHtml(themeHeadingLabel(searchTheme || activeCategory))}</div>
-              <div class="agent-reason-text">${escapeHtml(res.reason || ('Mais vídeos de ' + themeHeadingLabel(searchTheme || activeCategory) + ', no mesmo tema da pesquisa.'))}</div>
+              <div class="agent-header-title">Recomendações do YouTube • ${escapeHtml(themeHeadingLabel(searchTheme || activeCategory))}</div>
+              <div class="agent-reason-text">${escapeHtml(res.reason || ('Vídeos recomendados pelo YouTube sobre ' + themeHeadingLabel(searchTheme || activeCategory)))}</div>
             </div>
           `;
           homeYtGrid.appendChild(banner);

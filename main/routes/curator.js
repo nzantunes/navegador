@@ -38,10 +38,11 @@ async function handle(req, res, ctx) {
     const excludeTitles = (body && body.excludeTitles) || [];
     const page = parseInt((body && body.page) || reqUrl.searchParams.get('page') || '1', 10) || 1;
     const stayOnTheme = (body && body.stayOnTheme === true) || reqUrl.searchParams.get('stayOnTheme') === 'true';
-    const useAi = (body && body.useAi !== false) && reqUrl.searchParams.get('useAi') !== 'false';
+    const useAi = (body && body.useAi === true) || reqUrl.searchParams.get('useAi') === 'true';
     const clientId = req.headers['x-client-id'] || reqUrl.searchParams.get('clientId') || (body && body.clientId) || 'client_default';
     const clientSession = ctx.getOrCreateClientSession(clientId);
-    const useTor = ctx.isTorRoutingEnabled(clientSession);
+    // YouTube scraping e recomendações utilizam conexão direta ultrarrápida (sem proxy Tor para evitar lentidão e bloqueios do YouTube)
+    const useTor = false;
 
     const clientIpParam = reqUrl.searchParams.get('deviceIp') || (body && body.deviceIp) || req.headers['x-device-ip'] || req.headers['x-client-ip'] || '';
     const clientIp = ctx.extractRequestDeviceIp(req, clientIpParam);
@@ -51,7 +52,7 @@ async function handle(req, res, ctx) {
     if (clientCountryParam && /^[A-Z]{2}$/i.test(clientCountryParam)) {
       countryCode = clientCountryParam.toUpperCase();
     } else {
-      countryCode = await ctx.getClientCountryCode(req, clientIp, useTor).catch(() => 'BR');
+      countryCode = await ctx.getClientCountryCode(req, clientIp, false).catch(() => 'BR');
     }
 
     const result = await ctx.getAiCuratorSuggestions({
@@ -64,9 +65,9 @@ async function handle(req, res, ctx) {
       page,
       stayOnTheme,
       useAi,
-      useTor,
+      useTor: false,
       country: countryCode,
-      clientIp: useTor ? '' : clientIp
+      clientIp
     });
 
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
