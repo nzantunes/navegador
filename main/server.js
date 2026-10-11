@@ -101,7 +101,7 @@ function sendForbiddenAdminResponse(res, isJson = false) {
 const MEDIA_DOWNLOADS_DIR = path.join(os.homedir(), '.papaleguas_downloads');
 try { fs.mkdirSync(MEDIA_DOWNLOADS_DIR, { recursive: true }); } catch (e) {}
 
-const SERVER_BUILD_VERSION = '2026.10.11-v19';
+const SERVER_BUILD_VERSION = '2026.10.11-v20';
 const querystring = require('querystring');
 const zlib = require('zlib');
 const http2 = require('http2');
@@ -169,9 +169,27 @@ function getOutboundAgent(force) {
   return torAgent || undefined;
 }
 
-// YouTube não passa pelo proxy Tor: player, vídeo e miniaturas saem direto.
+// YouTube e Google Video não passam pelo proxy Tor: saem direto na velocidade máxima da internet
 function isYoutubeHost(hostname) {
   return /(?:^|\.)(youtube\.com|youtube-nocookie\.com|youtu\.be|googlevideo\.com|ytimg\.com|ggpht\.com)$/i.test(String(hostname || ''));
+}
+
+// Arquivos para download (vídeos, áudios, compactados, instaladores, binários) saem direto sem passar pelo Tor
+function isDownloadOrMediaUrl(urlObj) {
+  if (!urlObj) return false;
+  const hostname = String(urlObj.hostname || '').toLowerCase();
+  if (isYoutubeHost(hostname)) return true;
+
+  const pathname = String(urlObj.pathname || '').toLowerCase();
+  const search = String(urlObj.search || '').toLowerCase();
+
+  const downloadExts = /\.(mp4|webm|mkv|avi|mov|wmv|flv|m4v|3gp|mp3|m4a|aac|flac|wav|ogg|opus|wma|zip|rar|7z|tar|gz|bz2|xz|iso|apk|deb|rpm|exe|msi|dmg|pkg|appimage|bin|pdf|torrent)(\?|#|$)/i;
+  if (downloadExts.test(pathname) || downloadExts.test(search)) return true;
+
+  if (search.includes('download=') || search.includes('dl=1') || search.includes('export=download') || pathname.includes('/download/')) {
+    return true;
+  }
+  return false;
 }
 
 function isIpCheckHost(hostname) {
@@ -394,7 +412,7 @@ function buildIpCheckPage(info) {
 }
 
 function ytdlpProxyArgs() {
-  return [];
+  return ['--no-proxy'];
 }
 
 function rewriteGoogleFamilyThroughProxy(html, clientId, pageOrigin) {
@@ -2791,6 +2809,7 @@ function downloadMediaFile(urlOrId, format = 'mp4', onProgress = null, quality =
     const args = [
       '-u',
       '-m', 'yt_dlp',
+      '--no-proxy',
       '--js-runtimes', 'node',
       '--extractor-args', 'youtube:player_client=android,ios,web,mweb',
       '--no-playlist',
@@ -2830,11 +2849,18 @@ function downloadMediaFile(urlOrId, format = 'mp4', onProgress = null, quality =
       onProgress({ stage: 'connecting', progress: 5, text: 'Conectando ao vídeo e obtendo dados...' });
     }
 
-    console.log(`[MEDIA DOWNLOAD] Iniciando: formato=${format}, qualidade=${quality || '720'}`);
+    console.log(`[MEDIA DOWNLOAD] Iniciando direto (sem Tor): formato=${format}, qualidade=${quality || '720'}`);
     const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
+    const dlEnv = { ...process.env, PYTHONUNBUFFERED: '1' };
+    delete dlEnv.HTTP_PROXY;
+    delete dlEnv.HTTPS_PROXY;
+    delete dlEnv.ALL_PROXY;
+    delete dlEnv.http_proxy;
+    delete dlEnv.https_proxy;
+    delete dlEnv.all_proxy;
     const proc = spawn(pythonCmd, args, {
       timeout: 600000,
-      env: { ...process.env, PYTHONUNBUFFERED: '1' }
+      env: dlEnv
     });
     let stdout = '';
     let stderr = '';
@@ -8543,16 +8569,18 @@ function getDevicePlaylistsRoot(clientId, req) {
       if (req.headers['x-requested-with']) proxyHeaders['X-Requested-With'] = req.headers['x-requested-with'];
 
       const isOnion = targetUrlObj.hostname.endsWith('.onion');
+      const isDownloadOrMedia = isDownloadOrMediaUrl(targetUrlObj);
       const torWanted = Boolean(isTorRoutingEnabled(clientSession) || isAppTorEnabled());
-      const useTor = isOnion ? true : torWanted;
+      // Downloads, vídeos, áudios e YouTube NUNCA passam pelo proxy Tor: saem direto na velocidade máxima
+      const useTor = isOnion ? true : (isDownloadOrMedia ? false : torWanted);
       const requestAgent = getOutboundAgent(useTor);
 
       const proxyReq = clientProtocol.request(targetUrlObj, {
         method: req.method,
         headers: proxyHeaders,
         agent: requestAgent,
-        // Pela rede Tor usa timeout ampliado (30s) sem alternar para conexão direta (privacidade estrita)
-        timeout: useTor ? 30000 : 15000
+        // Conexão direta/downloads usam timeout maior (60s) para arquivos pesados
+        timeout: useTor ? 30000 : 60000
       }, (proxyRes) => {
         // Segue redirects no servidor (NUNCA devolve 302 ao navegador para evitar que o Firefox trave com "impediu redirecionamentos")
         if (proxyRes.statusCode >= 300 && proxyRes.statusCode < 400 && proxyRes.headers.location) {

@@ -266,7 +266,7 @@ async function configureTorProxy(torSession) {
       // Navegação do YouTube e Google sai pela rede Tor para garantir recomendações e IP do país conectado.
       // Apenas streaming pesado de chunks de vídeo do googlevideo tem opção de bypass de CDN.
       proxyBypassRules: 'localhost;127.0.0.1;[::1];192.168.0.0/16;10.0.0.0/8;172.16.0.0/12;*.local;239.255.255.250;*.trycloudflare.com;*.cfargotunnel.com;'
-        + 'googlevideo.com;*.googlevideo.com;ytimg.com;*.ytimg.com;ggpht.com;*.ggpht.com;gstatic.com;*.gstatic.com;gvt1.com;*.gvt1.com'
+        + 'youtube.com;*.youtube.com;youtu.be;*.youtu.be;googlevideo.com;*.googlevideo.com;ytimg.com;*.ytimg.com;ggpht.com;*.ggpht.com;gstatic.com;*.gstatic.com;gvt1.com;*.gvt1.com'
     });
     if (typeof torSession.closeAllConnections === 'function') {
       await torSession.closeAllConnections().catch(() => {});
