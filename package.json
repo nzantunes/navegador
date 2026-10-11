@@ -1,0 +1,26 @@
+{
+  "name": "navegador",
+  "version": "1.0.0",
+  "description": "",
+  "main": "main/main.js",
+  "scripts": {
+    "start": "electron --no-sandbox --no-zygote .",
+    "persistent": "bash ./start-persistent.sh start",
+    "supervisor:status": "bash ./start-persistent.sh status",
+    "ngrok": "bash ./start_ngrok.sh",
+    "tunnel:cloudflare": "bash ./start_tunnel.sh"
+  },
+
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "electron": "github:castlabs/electron-releases#v44.1.0+wvcus"
+  },
+  "dependencies": {
+    "chromecast-api": "^0.4.2",
+    "node-ssdp": "^4.0.1",
+    "puppeteer": "^25.10.0",
+    "socks-proxy-agent": "^10.1.0"
+  }
+}

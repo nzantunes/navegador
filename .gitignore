@@ -1,0 +1,17 @@
+node_modules/
+papaleguas/data/
+*.log
+app.log
+electron.log
+downloads/
+bin/
+widevine/
+cloudflared.deb
+.agents/
+.env
+.env.*
+*.key
+.xai_key
+__pycache__/
+*.pyc
+*.pyo

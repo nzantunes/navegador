@@ -1,0 +1,3167 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-5788322050130808"
+     crossorigin="anonymous"></script>
+  <title>Papaléguas Music</title>
+  <meta name="papaleguas-version" content="2026.10.11-v19">
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png?v=4">
+  <link rel="apple-touch-icon" sizes="192x192" href="/icon-192.png?v=4">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <script src="hybrid-bridge.js"></script>
+
+  <style>
+    /* Enquadramento Universal para qualquer aparelho (Mobile, Tablet, Desktop) */
+    * {
+      box-sizing: border-box;
+    }
+    
+    body, html {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      height: 100vh;
+      height: 100dvh;
+      max-height: 100%;
+      background: #0c0e14;
+      overflow: hidden;
+      font-family: 'Outfit', sans-serif;
+      -webkit-font-smoothing: antialiased;
+      position: fixed;
+      left: 0;
+      top: 0;
+      right: 0;
+      bottom: 0;
+    }
+    
+    .spotify-modal {
+      position: relative;
+      top: 0; left: 0; right: 0; bottom: 0;
+      width: 100% !important;
+      height: 100% !important;
+      max-height: 100% !important;
+      transform: none !important;
+      box-shadow: none !important;
+      border-radius: 0 !important;
+      display: flex !important;
+      flex-direction: column !important;
+      background: #0c0e14 !important;
+      overflow: hidden !important;
+      z-index: 1;
+    }
+
+    .fs-home-btn,
+    .sp-home-btn,
+    #btn-sp-home {
+      display: none !important;
+    }
+
+    .spotify-header-actions .sp-size-presets,
+    .spotify-header-actions #btn-spotify-minimize,
+    .spotify-header-actions #btn-spotify-expand,
+    .spotify-header-actions #btn-spotify-open-tab,
+    .spotify-header-actions #close-spotify-modal-btn,
+    .sp-top-bar .btn-spotify-open-tab,
+    .sp-restore-btn {
+      display: none !important;
+    }
+
+    .spotify-header {
+      padding: 6px 14px;
+      background: rgba(10, 12, 18, 0.98);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      flex-shrink: 0 !important;
+      display: flex !important;
+      align-items: center !important;
+      justify-content: flex-start !important;
+      gap: 14px !important;
+      position: relative;
+      z-index: 1000;
+      min-height: 52px;
+      box-sizing: border-box;
+      width: 100%;
+    }
+
+    .spotify-header-title {
+      display: none !important;
+    }
+
+    .sp-brand-heading {
+      font-size: 15px !important;
+      font-weight: 700 !important;
+      color: #ffffff !important;
+      white-space: nowrap !important;
+      margin: 0 !important;
+      letter-spacing: -0.2px;
+      display: inline-block !important;
+    }
+
+    .papaleguas-modal-icon {
+      width: 30px;
+      height: 30px;
+      object-fit: contain;
+      filter: drop-shadow(0 0 8px rgba(0, 240, 255, 0.75));
+      transition: transform 0.2s ease;
+    }
+    .papaleguas-modal-icon:hover {
+      transform: scale(1.1) rotate(-3deg);
+    }
+
+    .spotify-content.sp-layout {
+      flex: 1 1 0% !important;
+      display: flex !important;
+      flex-direction: column !important;
+      height: 100% !important;
+      min-height: 0 !important;
+      max-height: 100% !important;
+      overflow: hidden !important;
+      position: relative !important;
+      background: #0c0e14 !important;
+    }
+
+    /* Barra Superior de Busca */
+    .sp-top-bar {
+      padding: 8px 12px 4px 12px;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .sp-search-input-wrapper {
+      height: 38px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 500px;
+    }
+    .sp-search-input-wrapper:focus-within {
+      border-color: #1ed760;
+      box-shadow: 0 0 12px rgba(30, 215, 96, 0.25);
+    }
+    .sp-search-input {
+      font-size: 14px;
+      color: #fff;
+    }
+
+    /* Filtros e Gêneros Horizontais com Scroll Suave */
+    .sp-filter-chips {
+      padding: 4px 12px;
+      gap: 6px;
+      flex-shrink: 0;
+      overflow-x: auto;
+      scrollbar-width: none;
+      -webkit-overflow-scrolling: touch;
+    }
+    .sp-filter-chips::-webkit-scrollbar { display: none; }
+
+    .sp-offline-bar {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 0 14px 10px;
+    }
+
+    .sp-selected-playlist {
+      font-size: 15px;
+      font-weight: 800;
+      color: #fff;
+      letter-spacing: -0.02em;
+      line-height: 1.3;
+    }
+
+    .sp-offline-btn {
+      width: 100%;
+      padding: 10px 14px;
+      border-radius: 10px;
+      border: 1px solid rgba(0, 240, 255, 0.35);
+      background: rgba(0, 240, 255, 0.1);
+      color: #7de9ff;
+      font-size: 12.5px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .sp-offline-btn:hover { background: rgba(0, 240, 255, 0.2); }
+    .sp-offline-btn:disabled { opacity: 0.65; cursor: default; }
+
+    .sp-offline-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .sp-offline-actions .sp-offline-btn {
+      width: auto;
+      flex: 1 1 180px;
+    }
+
+    .sp-fav-btn {
+      border-color: rgba(30, 215, 96, 0.45);
+      background: rgba(30, 215, 96, 0.12);
+      color: #8ef0b0;
+    }
+
+    .sp-fav-btn:hover { background: rgba(30, 215, 96, 0.22); }
+
+    .sp-favorites-panel {
+      position: relative;
+      z-index: 1000;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 12px;
+      border-radius: 14px;
+      background: rgba(10, 15, 26, 0.96);
+      border: 1px solid rgba(30, 215, 96, 0.35);
+      backdrop-filter: blur(14px);
+      box-shadow: 0 12px 36px rgba(0, 0, 0, 0.7);
+    }
+
+    .sp-fav-path {
+      font-size: 11px;
+      line-height: 1.35;
+      color: #b7c0cc;
+      word-break: break-all;
+    }
+
+    .sp-session-warning-card {
+      background: linear-gradient(135deg, rgba(245, 158, 11, 0.14), rgba(217, 119, 6, 0.06));
+      border: 1px solid rgba(245, 158, 11, 0.4);
+      border-radius: 12px;
+      padding: 11px 13px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+    }
+    .sp-session-warning-header {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+    .sp-session-warning-icon {
+      font-size: 16px;
+      line-height: 1;
+    }
+    .sp-session-warning-title {
+      font-size: 12.5px;
+      font-weight: 800;
+      color: #fbbf24;
+      letter-spacing: -0.2px;
+    }
+    .sp-session-warning-desc {
+      font-size: 12px;
+      line-height: 1.45;
+      color: #e2e8f0;
+      margin: 0;
+    }
+    .sp-session-warning-desc strong {
+      color: #fef08a;
+    }
+    .sp-session-warning-desc u {
+      text-decoration-color: #fbbf24;
+      text-underline-offset: 2px;
+    }
+    .sp-session-warning-action-tip {
+      font-size: 11.5px;
+      line-height: 1.4;
+      color: #7de9ff;
+      background: rgba(0, 240, 255, 0.09);
+      border: 1px solid rgba(0, 240, 255, 0.25);
+      border-radius: 8px;
+      padding: 6px 10px;
+      margin-top: 2px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .sp-session-warning-action-tip b {
+      color: #fff;
+    }
+
+    .sp-favorites-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .sp-fav-item {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+      transition: all 0.2s ease;
+    }
+    .sp-fav-item:hover {
+      background: rgba(255, 255, 255, 0.07);
+      border-color: rgba(30, 215, 96, 0.35);
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5), 0 0 12px rgba(30, 215, 96, 0.1);
+    }
+
+    @keyframes spVibratePulse {
+      0% { transform: scale(1) translate(0, 0); box-shadow: 0 0 0 0 rgba(30, 215, 96, 0.7); }
+      15% { transform: scale(1.08) translate(-2px, 1px) rotate(-1.5deg); box-shadow: 0 0 16px 4px rgba(30, 215, 96, 0.9); }
+      30% { transform: scale(1.08) translate(2px, -1px) rotate(1.5deg); box-shadow: 0 0 22px 6px rgba(30, 215, 96, 0.95); }
+      45% { transform: scale(1.06) translate(-2px, -1px) rotate(-1deg); box-shadow: 0 0 18px 4px rgba(30, 215, 96, 0.85); }
+      60% { transform: scale(1.06) translate(2px, 1px) rotate(1deg); box-shadow: 0 0 12px 3px rgba(30, 215, 96, 0.75); }
+      75% { transform: scale(1.03) translate(-1px, 0) rotate(-0.5deg); box-shadow: 0 0 8px 2px rgba(30, 215, 96, 0.6); }
+      90% { transform: scale(1.01) translate(1px, 0) rotate(0.5deg); box-shadow: 0 0 4px 1px rgba(30, 215, 96, 0.3); }
+      100% { transform: scale(1) translate(0, 0); box-shadow: 0 0 0 0 rgba(30, 215, 96, 0); }
+    }
+
+    .sp-vibrate-pulse {
+      animation: spVibratePulse 0.55s cubic-bezier(0.36, 0.07, 0.19, 0.97) 3 !important;
+      border-color: #1ed760 !important;
+      color: #fff !important;
+      background: rgba(30, 215, 96, 0.28) !important;
+    }
+
+    @keyframes spCardVibrate {
+      0% { transform: translate(0, 0); border-color: rgba(30, 215, 96, 0.9); box-shadow: 0 0 18px rgba(30, 215, 96, 0.7); }
+      15% { transform: translate(-3px, 1px); }
+      30% { transform: translate(3px, -1px); }
+      45% { transform: translate(-2px, -1px); }
+      60% { transform: translate(2px, 1px); }
+      75% { transform: translate(-1px, 0); }
+      90% { transform: translate(1px, 0); }
+      100% { transform: translate(0, 0); border-color: rgba(30, 215, 96, 0.35); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35); }
+    }
+
+    .sp-fav-item.just-downloaded {
+      animation: spCardVibrate 0.5s ease-in-out 3;
+      border: 1.5px solid #1ed760 !important;
+      background: rgba(30, 215, 96, 0.14) !important;
+    }
+
+    .sp-fav-main-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      width: 100%;
+    }
+
+    .sp-fav-thumb-wrap {
+      position: relative;
+      width: 48px;
+      height: 48px;
+      border-radius: 10px;
+      overflow: hidden;
+      flex-shrink: 0;
+      cursor: pointer;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+      background: #181d28;
+    }
+    .sp-fav-thumb {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      transition: transform 0.2s ease;
+    }
+    .sp-fav-thumb-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.55);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+      color: #fff;
+    }
+    .sp-fav-thumb-wrap:hover .sp-fav-thumb-overlay {
+      opacity: 1;
+    }
+    .sp-fav-thumb-wrap:hover .sp-fav-thumb {
+      transform: scale(1.08);
+    }
+
+    .sp-fav-meta {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .sp-fav-name {
+      display: block;
+      color: #fff;
+      font-size: 14px;
+      font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .sp-fav-count {
+      display: block;
+      color: #9aa3af;
+      font-size: 11.5px;
+    }
+
+    .sp-fav-play {
+      color: #04140c;
+      background: #1ed760;
+      border: 0;
+      border-radius: 10px;
+      padding: 7px 14px;
+      font-size: 12px;
+      font-weight: 800;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      flex-shrink: 0;
+      box-shadow: 0 4px 12px rgba(30, 215, 96, 0.35);
+      transition: all 0.2s ease;
+    }
+    .sp-fav-play:hover {
+      background: #22e367;
+      transform: scale(1.04);
+      box-shadow: 0 6px 16px rgba(30, 215, 96, 0.5);
+    }
+
+    .sp-fav-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+      width: 100%;
+      padding-top: 8px;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .sp-fav-add {
+      background: rgba(46, 213, 115, 0.12);
+      border: 1px solid rgba(46, 213, 115, 0.38);
+      color: #55f3a0;
+      border-radius: 8px;
+      padding: 5px 10px;
+      font-size: 11.5px;
+      font-weight: 700;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      transition: all 0.18s ease;
+    }
+    .sp-fav-add:hover {
+      background: rgba(46, 213, 115, 0.24);
+      border-color: #55f3a0;
+      color: #fff;
+    }
+
+    .sp-fav-download {
+      border: 1px solid rgba(0, 240, 255, 0.35);
+      background: rgba(0, 240, 255, 0.12);
+      color: #7de9ff;
+      border-radius: 8px;
+      padding: 5px 10px;
+      font-size: 11.5px;
+      font-weight: 700;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      transition: all 0.18s ease;
+    }
+    .sp-fav-download:hover {
+      background: rgba(0, 240, 255, 0.24);
+      border-color: #7de9ff;
+      color: #fff;
+    }
+
+    .sp-fav-edit {
+      color: #cbd5e1;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 8px;
+      padding: 5px 10px;
+      font-size: 11.5px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      transition: all 0.18s ease;
+    }
+    .sp-fav-edit:hover {
+      background: rgba(255, 255, 255, 0.16);
+      color: #fff;
+    }
+
+    .sp-fav-cover-btn {
+      color: #ffd875;
+      background: rgba(255, 215, 0, 0.1);
+      border: 1px solid rgba(255, 215, 0, 0.3);
+      border-radius: 8px;
+      padding: 5px 9px;
+      font-size: 11.5px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      transition: all 0.18s ease;
+    }
+    .sp-fav-cover-btn:hover {
+      background: rgba(255, 215, 0, 0.22);
+      color: #fff;
+    }
+
+    .sp-fav-open {
+      color: #d7ffe8;
+      background: transparent;
+      border: 1px solid rgba(30, 215, 96, 0.35);
+      border-radius: 8px;
+      padding: 5px 9px;
+      font-size: 11.5px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      transition: all 0.18s ease;
+    }
+    .sp-fav-open:hover { background: rgba(30, 215, 96, 0.15); }
+
+    .sp-fav-del {
+      margin-left: auto;
+      color: #ff8585;
+      background: rgba(255, 75, 75, 0.1);
+      border: 1px solid rgba(255, 75, 75, 0.3);
+      border-radius: 8px;
+      padding: 5px 9px;
+      font-size: 11.5px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.18s ease;
+    }
+    .sp-fav-del:hover {
+      background: rgba(255, 75, 75, 0.25);
+      border-color: #ff5252;
+      color: #fff;
+    }
+
+    .sp-create-pl-btn {
+      width: 100%;
+      padding: 10px 14px;
+      font-size: 13px;
+      font-weight: 700;
+      border-radius: 10px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      color: #55f3a0 !important;
+      background: rgba(46, 213, 115, 0.12) !important;
+      border: 1px solid rgba(46, 213, 115, 0.4) !important;
+      transition: all 0.2s ease;
+    }
+    .sp-create-pl-btn:hover {
+      background: rgba(46, 213, 115, 0.22) !important;
+      border-color: #55f3a0 !important;
+      box-shadow: 0 0 14px rgba(46, 213, 115, 0.25);
+    }
+
+    .sp-add-related-btn {
+      color: #ffe670 !important;
+      background: rgba(255, 215, 0, 0.14) !important;
+      border-color: rgba(255, 215, 0, 0.45) !important;
+    }
+    .sp-add-related-btn:hover {
+      background: rgba(255, 215, 0, 0.25) !important;
+      box-shadow: 0 0 12px rgba(255, 215, 0, 0.3);
+    }
+
+    .sp-del-pl-btn {
+      color: #ff8585 !important;
+      background: rgba(255, 60, 60, 0.12) !important;
+      border-color: rgba(255, 60, 60, 0.35) !important;
+    }
+    .sp-del-pl-btn:hover {
+      background: rgba(255, 60, 60, 0.25) !important;
+    }
+
+    .sp-track-del-btn {
+      background: transparent;
+      border: 0;
+      color: #7a8698;
+      cursor: pointer;
+      padding: 6px;
+      border-radius: 6px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s ease;
+      opacity: 0.6;
+    }
+    .sp-track-del-btn:hover {
+      color: #ff5252;
+      background: rgba(255, 82, 82, 0.15);
+      opacity: 1;
+    }
+
+    .sp-related-modal-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(4, 7, 14, 0.85);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      z-index: 1000005 !important;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .sp-related-modal-overlay[hidden] { display: none !important; }
+
+    .sp-related-modal {
+      width: 100%;
+      max-width: 620px;
+      max-height: 85vh;
+      background: #0f131c;
+      border: 1px solid rgba(255, 215, 0, 0.3);
+      box-shadow: 0 25px 60px rgba(0, 0, 0, 0.9), 0 0 25px rgba(255, 215, 0, 0.12);
+      border-radius: 18px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      animation: spModalPop 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    @keyframes spModalPop {
+      from { opacity: 0; transform: scale(0.95) translateY(10px); }
+      to { opacity: 1; transform: scale(1) translateY(0); }
+    }
+
+    .sp-related-modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 18px 20px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .sp-related-modal-title {
+      font-size: 16px;
+      font-weight: 800;
+      color: #fff;
+      display: block;
+    }
+    .sp-related-modal-subtitle {
+      font-size: 12px;
+      color: #9aa3af;
+      margin-top: 2px;
+      display: block;
+    }
+    .sp-related-modal-close {
+      background: rgba(255, 255, 255, 0.08);
+      border: 0;
+      color: #ccc;
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      font-size: 14px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s;
+    }
+    .sp-related-modal-close:hover {
+      background: rgba(255, 255, 255, 0.18);
+      color: #fff;
+    }
+
+    .sp-related-search-bar {
+      display: flex;
+      gap: 8px;
+      padding: 12px 20px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      background: rgba(0, 0, 0, 0.2);
+    }
+    .sp-related-search-bar input {
+      flex: 1;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 13px;
+      color: #fff;
+      outline: none;
+    }
+    .sp-related-search-bar input:focus {
+      border-color: #1ed760;
+      background: rgba(255, 255, 255, 0.09);
+    }
+    .sp-related-search-bar button {
+      background: #1ed760;
+      border: 0;
+      color: #04140c;
+      font-weight: 700;
+      border-radius: 10px;
+      padding: 0 16px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .sp-related-search-bar button:hover { background: #22e367; }
+
+    .sp-related-tracks-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 14px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      max-height: 55vh;
+    }
+
+    .sp-related-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      transition: all 0.2s ease;
+    }
+    .sp-related-item:hover {
+      background: rgba(255, 255, 255, 0.07);
+      border-color: rgba(30, 215, 96, 0.25);
+    }
+    .sp-related-thumb {
+      width: 44px;
+      height: 44px;
+      border-radius: 8px;
+      object-fit: cover;
+      background: #1c212e;
+      flex-shrink: 0;
+    }
+    .sp-related-meta {
+      flex: 1;
+      min-width: 0;
+    }
+    .sp-related-name {
+      display: block;
+      color: #fff;
+      font-size: 13px;
+      font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .sp-related-artist {
+      display: block;
+      color: #9aa3af;
+      font-size: 11px;
+      margin-top: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .sp-related-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .sp-related-preview-btn {
+      border: 1px solid rgba(0, 240, 255, 0.45);
+      background: rgba(0, 240, 255, 0.12);
+      color: #7de9ff;
+      border-radius: 8px;
+      padding: 7px 11px;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      transition: all 0.2s ease;
+      white-space: nowrap;
+    }
+    .sp-related-preview-btn:hover {
+      background: rgba(0, 240, 255, 0.25);
+      border-color: #00f0ff;
+      color: #fff;
+    }
+    .sp-related-preview-btn.playing {
+      background: rgba(255, 60, 60, 0.2);
+      border-color: #ff5252;
+      color: #ff8585;
+      animation: spPulsePreview 1.2s infinite ease-in-out;
+    }
+    .sp-preview-spinner {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border: 2px solid rgba(0, 240, 255, 0.25);
+      border-top-color: #00f0ff;
+      border-radius: 50%;
+      animation: spSpinPreview 0.65s linear infinite;
+    }
+    .sp-related-preview-btn.is-loading {
+      background: rgba(0, 240, 255, 0.2) !important;
+      border-color: #00f0ff !important;
+      color: #7de9ff !important;
+      cursor: wait;
+    }
+    .sp-related-item.is-loading {
+      border-color: rgba(0, 240, 255, 0.45) !important;
+      background: rgba(0, 240, 255, 0.06) !important;
+    }
+    .sp-related-item.is-previewing {
+      border-color: rgba(255, 82, 82, 0.5) !important;
+      background: rgba(255, 82, 82, 0.08) !important;
+    }
+    @keyframes spSpinPreview {
+      to { transform: rotate(360deg); }
+    }
+    @keyframes spPulsePreview {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(255, 82, 82, 0.4); }
+      50% { box-shadow: 0 0 0 6px rgba(255, 82, 82, 0); }
+    }
+    .sp-related-add-btn {
+      border: 0;
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      color: #04140c;
+      background: #1ed760;
+      white-space: nowrap;
+      transition: all 0.2s;
+      flex-shrink: 0;
+    }
+    .sp-related-add-btn:hover { background: #22e367; }
+    .sp-related-add-btn:disabled {
+      background: rgba(255, 255, 255, 0.1);
+      color: #8892a0;
+      cursor: not-allowed;
+    }
+    .sp-related-loading, .sp-related-empty {
+      text-align: center;
+      padding: 30px 10px;
+      color: #9aa3af;
+      font-size: 13px;
+    }
+
+    .sp-cover-modal-body {
+      padding: 18px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      max-height: 60vh;
+      overflow-y: auto;
+    }
+    .sp-cover-current-box {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 14px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    #sp-cover-modal-preview {
+      width: 72px;
+      height: 72px;
+      border-radius: 10px;
+      object-fit: cover;
+      background: #161a24;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    .sp-cover-upload-area {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .sp-cover-upload-btn {
+      background: rgba(30, 215, 96, 0.15);
+      border: 1px solid rgba(30, 215, 96, 0.4);
+      color: #1ed760;
+      font-size: 13px;
+      font-weight: 700;
+      padding: 9px 16px;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .sp-cover-upload-btn:hover {
+      background: #1ed760;
+      color: #04140c;
+    }
+    .sp-cover-hint {
+      font-size: 11px;
+      color: #7a8698;
+    }
+    .sp-cover-tracks-section {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .sp-cover-section-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: #b7c0cc;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .sp-cover-tracks-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+      gap: 10px;
+    }
+    .sp-cover-track-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 6px;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .sp-cover-track-card:hover {
+      background: rgba(30, 215, 96, 0.14);
+      border-color: #1ed760;
+      transform: translateY(-2px);
+    }
+    .sp-cover-track-card img {
+      width: 60px;
+      height: 60px;
+      border-radius: 8px;
+      object-fit: cover;
+      background: #1c212e;
+    }
+    .sp-cover-track-card span {
+      font-size: 10px;
+      color: #ccc;
+      text-align: center;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 70px;
+    }
+
+    .sp-download-progress {
+      height: 6px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.08);
+      overflow: hidden;
+    }
+
+    .sp-download-notice {
+      font-size: 12px;
+      line-height: 1.35;
+      color: #fbbf24;
+      background: rgba(251, 191, 36, 0.12);
+      border: 1px solid rgba(251, 191, 36, 0.35);
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+
+    .sp-download-progress-bar {
+      height: 100%;
+      width: 0%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #00f0ff, #7de9ff);
+      transition: width 0.25s ease;
+    }
+
+    /* Papaléguas correndo enquanto a música toca */
+    .sp-runner {
+      position: relative;
+      width: 40px;
+      height: 40px;
+      flex-shrink: 0;
+      display: flex;
+      align-items: flex-end;
+      justify-content: center;
+      overflow: visible;
+    }
+    .sp-runner-img {
+      width: 34px;
+      height: 34px;
+      object-fit: contain;
+      filter: drop-shadow(0 0 6px rgba(0, 240, 255, 0.55));
+      transform-origin: 50% 100%;
+      transition: filter 0.3s ease;
+    }
+    .sp-runner-dust {
+      position: absolute;
+      left: -2px;
+      bottom: 5px;
+      width: 16px;
+      height: 10px;
+      opacity: 0;
+      pointer-events: none;
+      background:
+        radial-gradient(circle at 20% 50%, rgba(148, 163, 184, 0.9) 0 1.6px, transparent 2px),
+        radial-gradient(circle at 60% 30%, rgba(148, 163, 184, 0.7) 0 1.3px, transparent 1.8px),
+        radial-gradient(circle at 80% 75%, rgba(148, 163, 184, 0.8) 0 1.4px, transparent 1.9px);
+    }
+    .sp-runner::before,
+    .sp-runner::after {
+      content: '';
+      position: absolute;
+      left: -8px;
+      height: 2px;
+      width: 0;
+      border-radius: 2px;
+      background: linear-gradient(90deg, transparent, rgba(0, 240, 255, 0.9));
+      opacity: 0;
+      pointer-events: none;
+    }
+    .sp-runner::before { top: 12px; }
+    .sp-runner::after { top: 20px; }
+    .sp-bottom-player:not(.is-paused) .sp-runner-img {
+      animation: spRunnerRun 0.42s ease-in-out infinite;
+      filter: drop-shadow(0 0 10px rgba(0, 240, 255, 0.85));
+    }
+    .sp-bottom-player:not(.is-paused) .sp-runner-dust {
+      animation: spRunnerDust 0.6s ease-out infinite;
+    }
+    .sp-bottom-player:not(.is-paused) .sp-runner::before {
+      animation: spRunnerLine 0.55s linear infinite;
+    }
+    .sp-bottom-player:not(.is-paused) .sp-runner::after {
+      animation: spRunnerLine 0.55s linear infinite 0.22s;
+    }
+    .sp-runner.is-loading .sp-runner-img {
+      animation: spRunnerWarm 0.9s ease-in-out infinite;
+    }
+    @keyframes spRunnerRun {
+      0%   { transform: translate(0, 0) rotate(-4deg) scaleY(1); }
+      25%  { transform: translate(1.5px, -3px) rotate(0deg) scaleY(1.04); }
+      50%  { transform: translate(2px, 0) rotate(4deg) scaleY(0.96); }
+      75%  { transform: translate(0.5px, -2px) rotate(0deg) scaleY(1.03); }
+      100% { transform: translate(0, 0) rotate(-4deg) scaleY(1); }
+    }
+    @keyframes spRunnerDust {
+      0%   { opacity: 0; transform: translate(6px, 0) scale(0.5); }
+      30%  { opacity: 0.9; }
+      100% { opacity: 0; transform: translate(-10px, -4px) scale(1.4); }
+    }
+    @keyframes spRunnerLine {
+      0%   { width: 0; left: 4px; opacity: 0; }
+      30%  { opacity: 0.9; }
+      100% { width: 14px; left: -12px; opacity: 0; }
+    }
+    @keyframes spRunnerWarm {
+      0%, 100% { transform: translateY(0) scale(1); opacity: 0.7; }
+      50% { transform: translateY(-2px) scale(1.06); opacity: 1; }
+    }
+
+    .sp-eq-btn {
+      height: 28px;
+      min-width: 52px;
+      padding: 0 9px 0 7px;
+      border-radius: 9px;
+      border: 1px solid rgba(30, 215, 96, 0.45);
+      background: linear-gradient(180deg, rgba(30, 215, 96, 0.18), rgba(30, 215, 96, 0.08));
+      color: #4ade80;
+      font-size: 11.5px;
+      font-weight: 800;
+      letter-spacing: 0.6px;
+      cursor: pointer;
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      transition: all 0.2s ease;
+    }
+    .sp-eq-btn svg { width: 14px; height: 14px; }
+    .sp-eq-btn .sp-eq-bar { transform-origin: bottom; }
+    .sp-eq-btn.is-active .sp-eq-bar:nth-child(1) { animation: spEqBar 0.9s ease-in-out infinite; }
+    .sp-eq-btn.is-active .sp-eq-bar:nth-child(2) { animation: spEqBar 1.1s ease-in-out infinite 0.15s; }
+    .sp-eq-btn.is-active .sp-eq-bar:nth-child(3) { animation: spEqBar 0.8s ease-in-out infinite 0.3s; }
+    .sp-eq-btn.is-active .sp-eq-bar:nth-child(4) { animation: spEqBar 1s ease-in-out infinite 0.45s; }
+    @keyframes spEqBar {
+      0%, 100% { transform: scaleY(0.45); }
+      50% { transform: scaleY(1); }
+    }
+    .sp-eq-btn:hover {
+      border-color: #1ed760;
+      box-shadow: 0 0 14px rgba(30, 215, 96, 0.35);
+    }
+    .sp-eq-btn.is-open,
+    .sp-eq-btn.is-active {
+      background: linear-gradient(180deg, #34e07a, #17b854);
+      color: #04200e;
+      border-color: #1ed760;
+      box-shadow: 0 0 16px rgba(30, 215, 96, 0.45);
+    }
+
+    .sp-eq-panel {
+      position: absolute;
+      right: 0;
+      bottom: calc(100% + 8px);
+      width: min(360px, calc(100vw - 16px));
+      padding: 0;
+      border-radius: 18px;
+      background:
+        radial-gradient(120% 80% at 100% 0%, rgba(30, 215, 96, 0.14), transparent 55%),
+        linear-gradient(180deg, #0f1622, #080c14);
+      border: 1px solid rgba(30, 215, 96, 0.35);
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+      z-index: 1000002;
+      transform: translateY(14px) scale(0.98);
+      opacity: 0;
+      pointer-events: none;
+      transition: transform 0.28s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.22s ease;
+      overflow: hidden;
+      font-family: inherit;
+    }
+    .sp-bottom-player.eq-open .sp-eq-panel,
+    .sp-eq-panel.is-open {
+      transform: translateY(0) scale(1);
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .sp-eq-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 12px 14px 8px;
+    }
+    .sp-eq-title {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      min-width: 0;
+    }
+    .sp-eq-title-icon {
+      width: 30px;
+      height: 30px;
+      border-radius: 9px;
+      display: grid;
+      place-items: center;
+      background: linear-gradient(135deg, #1ed760, #0ea5e9);
+      color: #041a0c;
+      flex-shrink: 0;
+      box-shadow: 0 6px 16px rgba(30, 215, 96, 0.35);
+    }
+    .sp-eq-title strong {
+      display: block;
+      color: #fff;
+      font-size: 13.5px;
+      font-weight: 800;
+      letter-spacing: -0.2px;
+      line-height: 1.1;
+    }
+    .sp-eq-title small {
+      display: block;
+      color: #86efac;
+      font-size: 10.5px;
+      font-weight: 700;
+      margin-top: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .sp-eq-head-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    .sp-eq-power,
+    .sp-eq-reset {
+      height: 26px;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      background: rgba(255, 255, 255, 0.06);
+      color: #cbd5e1;
+      font-size: 11px;
+      font-weight: 800;
+      cursor: pointer;
+      padding: 0 9px;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      transition: all 0.2s ease;
+    }
+    .sp-eq-reset { width: 28px; padding: 0; justify-content: center; }
+    .sp-eq-power .sp-eq-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #64748b;
+      box-shadow: none;
+    }
+    .sp-eq-power.is-on {
+      border-color: rgba(30, 215, 96, 0.6);
+      background: rgba(30, 215, 96, 0.14);
+      color: #bbf7d0;
+    }
+    .sp-eq-power.is-on .sp-eq-dot {
+      background: #1ed760;
+      box-shadow: 0 0 8px #1ed760;
+    }
+    .sp-eq-curve-wrap {
+      margin: 0 12px;
+      border-radius: 12px;
+      background: rgba(2, 6, 12, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      overflow: hidden;
+      position: relative;
+    }
+    .sp-eq-curve {
+      display: block;
+      width: 100%;
+      height: 84px;
+    }
+    .sp-eq-curve-labels {
+      position: absolute;
+      left: 8px;
+      right: 8px;
+      bottom: 3px;
+      display: flex;
+      justify-content: space-between;
+      color: #64748b;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+      pointer-events: none;
+    }
+    .sp-eq-panel.is-off .sp-eq-curve-wrap,
+    .sp-eq-panel.is-off .sp-eq-bands,
+    .sp-eq-panel.is-off .sp-eq-presets {
+      opacity: 0.45;
+      filter: saturate(0.4);
+    }
+    .sp-eq-bands {
+      padding: 10px 14px 4px;
+      display: grid;
+      gap: 6px;
+    }
+    .sp-eq-row {
+      display: grid;
+      grid-template-columns: 74px 1fr 50px;
+      align-items: center;
+      gap: 10px;
+      color: #e2e8f0;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .sp-eq-name {
+      line-height: 1.05;
+    }
+    .sp-eq-name small {
+      display: block;
+      color: #7c8aa5;
+      font-size: 9.5px;
+      font-weight: 700;
+      margin-top: 2px;
+      letter-spacing: 0.2px;
+    }
+    .sp-eq-row input[type="range"] {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 26px;
+      margin: 0;
+      background: transparent;
+      cursor: pointer;
+      touch-action: pan-y;
+      --sp-fill-a: 50%;
+      --sp-fill-b: 50%;
+    }
+    .sp-eq-row input[type="range"]::-webkit-slider-runnable-track {
+      height: 6px;
+      border-radius: 999px;
+      background:
+        linear-gradient(90deg, transparent var(--sp-fill-a), #1ed760 var(--sp-fill-a), #1ed760 var(--sp-fill-b), transparent var(--sp-fill-b)),
+        linear-gradient(90deg, rgba(255,255,255,0.1), rgba(255,255,255,0.1));
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+      position: relative;
+    }
+    .sp-eq-row input[type="range"]::-moz-range-track {
+      height: 6px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.1);
+    }
+    .sp-eq-row input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 18px;
+      height: 18px;
+      margin-top: -6px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 35%, #ffffff, #cbd5e1);
+      border: 2px solid #1ed760;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.6), 0 0 10px rgba(30, 215, 96, 0.5);
+      transition: transform 0.15s ease;
+    }
+    .sp-eq-row input[type="range"]:active::-webkit-slider-thumb {
+      transform: scale(1.15);
+    }
+    .sp-eq-row input[type="range"]::-moz-range-thumb {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid #1ed760;
+    }
+    .sp-eq-db {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      color: #bbf7d0;
+      font-size: 11px;
+      font-weight: 800;
+      background: rgba(30, 215, 96, 0.1);
+      border: 1px solid rgba(30, 215, 96, 0.22);
+      border-radius: 7px;
+      padding: 3px 6px;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+    }
+    .sp-eq-db.is-neg {
+      color: #fca5a5;
+      background: rgba(248, 113, 113, 0.1);
+      border-color: rgba(248, 113, 113, 0.25);
+    }
+    .sp-eq-db.is-zero {
+      color: #94a3b8;
+      background: rgba(255, 255, 255, 0.05);
+      border-color: rgba(255, 255, 255, 0.1);
+    }
+    .sp-eq-presets {
+      display: flex;
+      gap: 6px;
+      padding: 8px 12px 12px;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+    .sp-eq-presets::-webkit-scrollbar { display: none; }
+    .sp-eq-presets button {
+      flex-shrink: 0;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: rgba(255, 255, 255, 0.05);
+      color: #e2e8f0;
+      border-radius: 999px;
+      padding: 6px 11px;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      transition: all 0.18s ease;
+    }
+    .sp-eq-presets button:hover {
+      border-color: rgba(30, 215, 96, 0.5);
+      background: rgba(30, 215, 96, 0.1);
+    }
+    .sp-eq-presets button.is-on {
+      background: linear-gradient(180deg, rgba(30, 215, 96, 0.32), rgba(30, 215, 96, 0.18));
+      border-color: #1ed760;
+      color: #dcfce7;
+      box-shadow: 0 0 12px rgba(30, 215, 96, 0.25);
+    }
+
+    @keyframes spLogoSpin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+
+    .sp-genres-bar {
+      padding: 4px 12px 6px 12px;
+      flex-shrink: 0;
+    }
+    .sp-genres-header {
+      margin-bottom: 4px;
+    }
+    .sp-genres-chips {
+      overflow-x: auto;
+      scrollbar-width: none;
+      -webkit-overflow-scrolling: touch;
+      padding-bottom: 2px;
+      gap: 6px;
+    }
+    .sp-genres-chips::-webkit-scrollbar { display: none; }
+    .sp-genre-btn {
+      padding: 6px 12px;
+      border-radius: 500px;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .sp-genre-btn.genre-gospel {
+      border-color: rgba(250, 204, 21, 0.45) !important;
+      background: rgba(250, 204, 21, 0.12) !important;
+      color: #fef08a !important;
+      font-weight: 600;
+    }
+    .sp-genre-btn.genre-gospel:hover {
+      border-color: #facc15 !important;
+      background: rgba(250, 204, 21, 0.25) !important;
+      box-shadow: 0 0 14px rgba(250, 204, 21, 0.4) !important;
+    }
+
+    /* Container de Rolagem Principal */
+    .sp-scroll-body {
+      flex: 1 1 0% !important;
+      min-height: 0 !important;
+      overflow-y: auto !important;
+      overflow-x: hidden !important;
+      -webkit-overflow-scrolling: touch !important;
+      padding: 6px 12px 16px 12px !important;
+      display: flex !important;
+      flex-direction: column !important;
+      gap: 12px !important;
+    }
+
+    /* CARD DE DESTAQUE OCULTADO POIS O MINI PLAYER PAPALÉGUAS MUSIC ESTÁ LOGO ABAIXO DA PESQUISA */
+    .sp-hero-card {
+      display: none !important;
+    }
+    .sp-hero-card:hover {
+      border-color: rgba(30, 215, 96, 0.6) !important;
+      box-shadow: 0 8px 28px rgba(30, 215, 96, 0.25) !important;
+      transform: translateY(-1px);
+    }
+    .sp-hero-img {
+      width: 58px !important;
+      height: 58px !important;
+      border-radius: 12px !important;
+      object-fit: cover !important;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.6) !important;
+      flex-shrink: 0 !important;
+      border: 1px solid rgba(255, 255, 255, 0.12) !important;
+    }
+    .sp-hero-info {
+      flex: 1 1 auto !important;
+      display: flex !important;
+      flex-direction: column !important;
+      gap: 3px !important;
+      overflow: hidden !important;
+      min-width: 0 !important;
+    }
+    .sp-hero-title {
+      font-size: 14.5px !important;
+      font-weight: 700 !important;
+      color: #ffffff !important;
+      white-space: nowrap !important;
+      overflow: hidden !important;
+      text-overflow: ellipsis !important;
+      letter-spacing: 0.2px;
+      margin: 0 !important;
+    }
+    .sp-hero-sub {
+      font-size: 12px !important;
+      color: #1ed760 !important;
+      white-space: nowrap !important;
+      overflow: hidden !important;
+      text-overflow: ellipsis !important;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      margin: 0 !important;
+      font-weight: 500;
+    }
+    .sp-hero-play-btn {
+      width: 48px !important;
+      height: 48px !important;
+      border-radius: 50% !important;
+      background: #1ed760 !important;
+      color: #000000 !important;
+      display: flex !important;
+      align-items: center !important;
+      justify-content: center !important;
+      box-shadow: 0 0 18px rgba(30, 215, 96, 0.5) !important;
+      flex-shrink: 0 !important;
+      border: none !important;
+      cursor: pointer;
+      transition: transform 0.2s ease, box-shadow 0.2s ease !important;
+    }
+    .sp-hero-play-btn:hover {
+      transform: scale(1.08) !important;
+      box-shadow: 0 0 24px rgba(30, 215, 96, 0.8) !important;
+    }
+
+    /* MINI PLAYER INTEGRADO NO CABEÇALHO AO LADO DE PAPALÉGUAS MUSIC */
+    .sp-bottom-player {
+      background: rgba(14, 18, 30, 0.95) !important;
+      backdrop-filter: blur(20px) !important;
+      border: 1px solid rgba(30, 215, 96, 0.35) !important;
+      border-radius: 12px !important;
+      padding: 2px 10px !important;
+      display: flex !important;
+      align-items: center !important;
+      justify-content: space-between !important;
+      gap: 10px !important;
+      min-height: 44px;
+      height: 44px;
+      box-sizing: border-box !important;
+      z-index: 1000 !important;
+      overflow: visible !important;
+      box-shadow: 0 4px 18px rgba(0, 0, 0, 0.55) !important;
+      flex-shrink: 0;
+      touch-action: auto;
+      transition: all 0.25s ease;
+    }
+    .sp-bottom-player:not(.is-floating) {
+      position: relative !important;
+      bottom: auto !important;
+      left: auto !important;
+      right: auto !important;
+      top: auto !important;
+      flex: 1 1 100% !important;
+      max-width: 100% !important;
+      min-width: 0 !important;
+      width: 100% !important;
+      margin: 0 !important;
+      height: 42px !important;
+      min-height: 42px !important;
+    }
+    .sp-player-progress-container {
+      position: absolute !important;
+      top: 0 !important;
+      left: 0 !important;
+      width: 100% !important;
+      height: 5px !important;
+      background: rgba(255, 255, 255, 0.15) !important;
+      cursor: pointer !important;
+      transition: height 0.15s ease !important;
+      z-index: 25 !important;
+    }
+    .sp-player-progress-container:hover {
+      height: 9px !important;
+    }
+    .sp-player-progress-bar {
+      height: 100% !important;
+      width: 0%;
+      background: linear-gradient(90deg, #10b981, #1ed760, #38bdf8) !important;
+      box-shadow: 0 0 10px #1ed760 !important;
+      position: relative !important;
+      border-radius: 0 3px 3px 0;
+    }
+    .sp-player-progress-thumb {
+      position: absolute !important;
+      right: -5px !important;
+      top: 50% !important;
+      transform: translateY(-50%) !important;
+      width: 12px !important;
+      height: 12px !important;
+      border-radius: 50% !important;
+      background: #ffffff !important;
+      border: 2px solid #1ed760 !important;
+      box-shadow: 0 0 8px rgba(0, 0, 0, 0.8), 0 0 10px #1ed760 !important;
+      opacity: 0;
+      transition: opacity 0.15s ease, transform 0.15s ease !important;
+    }
+    .sp-player-progress-container:hover .sp-player-progress-thumb {
+      opacity: 1 !important;
+      transform: translateY(-50%) scale(1.15) !important;
+    }
+    .sp-player-progress-tooltip {
+      position: absolute !important;
+      top: -26px !important;
+      left: 0;
+      transform: translateX(-50%);
+      background: rgba(15, 23, 42, 0.95) !important;
+      color: #38bdf8 !important;
+      border: 1px solid rgba(56, 189, 248, 0.4) !important;
+      padding: 2px 6px !important;
+      font-size: 11px !important;
+      font-weight: 700 !important;
+      font-family: monospace !important;
+      border-radius: 4px !important;
+      pointer-events: none !important;
+      display: none;
+      white-space: nowrap !important;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.8) !important;
+      z-index: 30 !important;
+    }
+    .sp-mini-meta-row {
+      display: flex !important;
+      align-items: center !important;
+      gap: 6px !important;
+      min-width: 0 !important;
+      overflow: hidden !important;
+    }
+    .sp-mini-progress-pill {
+      display: inline-flex !important;
+      align-items: center !important;
+      gap: 3px !important;
+      font-size: 11px !important;
+      font-family: 'JetBrains Mono', monospace, sans-serif !important;
+      font-weight: 700 !important;
+      color: #1ed760 !important;
+      background: rgba(30, 215, 96, 0.14) !important;
+      border: 1px solid rgba(30, 215, 96, 0.35) !important;
+      padding: 1px 7px !important;
+      border-radius: 6px !important;
+      white-space: nowrap !important;
+      flex-shrink: 0 !important;
+      letter-spacing: 0.3px !important;
+    }
+    .sp-mini-track-info {
+      display: flex !important;
+      align-items: center !important;
+      gap: 10px !important;
+      flex: 1 1 auto !important;
+      overflow: hidden !important;
+      min-width: 0 !important;
+    }
+    .sp-mini-thumb {
+      width: 44px !important;
+      height: 44px !important;
+      border-radius: 8px !important;
+      object-fit: cover !important;
+      flex-shrink: 0 !important;
+      border: 1px solid rgba(255, 255, 255, 0.1) !important;
+    }
+    .sp-mini-details {
+      display: flex !important;
+      flex-direction: column !important;
+      gap: 1px !important;
+      overflow: hidden !important;
+      min-width: 0 !important;
+    }
+    .sp-mini-title {
+      font-size: 13px !important;
+      color: #ffffff !important;
+      font-weight: 600 !important;
+      white-space: nowrap !important;
+      overflow: hidden !important;
+      text-overflow: ellipsis !important;
+    }
+    .sp-mini-artist {
+      font-size: 11px !important;
+      color: #94a3b8 !important;
+      white-space: nowrap !important;
+      overflow: hidden !important;
+      text-overflow: ellipsis !important;
+    }
+    .sp-controls-bar {
+      display: flex !important;
+      align-items: center !important;
+      gap: 8px !important;
+      flex-shrink: 0 !important;
+    }
+    .sp-ctrl-btn {
+      width: 34px !important;
+      height: 34px !important;
+      padding: 6px !important;
+      border-radius: 50% !important;
+      display: flex !important;
+      align-items: center !important;
+      justify-content: center !important;
+      color: #cbd5e1 !important;
+    }
+    .sp-play-main-btn {
+      width: 40px !important;
+      height: 40px !important;
+      border-radius: 50% !important;
+      background: #1ed760 !important;
+      color: #000000 !important;
+      display: flex !important;
+      align-items: center !important;
+      justify-content: center !important;
+      box-shadow: 0 0 14px rgba(30, 215, 96, 0.5) !important;
+      cursor: pointer;
+      transition: transform 0.15s ease, box-shadow 0.15s ease !important;
+    }
+    .sp-play-main-btn:hover {
+      transform: scale(1.06) !important;
+      box-shadow: 0 0 18px rgba(30, 215, 96, 0.8) !important;
+    }
+
+    /* MINI PLAYER INTEGRADO FIXO NO CABEÇALHO */
+    .sp-drag-handle {
+      display: none !important;
+    }
+    .sp-mini-toggle-btn {
+      width: 28px !important;
+      height: 28px !important;
+      border-radius: 50% !important;
+      background: rgba(255, 255, 255, 0.08) !important;
+      border: none !important;
+      color: #cbd5e1 !important;
+      display: flex !important;
+      align-items: center !important;
+      justify-content: center !important;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: all 0.2s ease;
+      margin-left: 2px;
+    }
+    .sp-mini-toggle-btn:hover {
+      background: rgba(30, 215, 96, 0.25) !important;
+      color: #1ed760 !important;
+    }
+    .sp-bottom-player.is-floating {
+      position: fixed !important;
+      width: min(520px, calc(100vw - 20px)) !important;
+      max-width: calc(100vw - 16px) !important;
+      border-radius: 16px !important;
+      border: 1px solid rgba(30, 215, 96, 0.4) !important;
+      box-shadow: 0 12px 35px rgba(0,0,0,0.9), 0 0 20px rgba(30, 215, 96, 0.25) !important;
+      z-index: 999999 !important;
+      box-sizing: border-box !important;
+    }
+    .sp-bottom-player.is-minimized {
+      width: 62px !important;
+      height: 62px !important;
+      min-height: 62px !important;
+      padding: 3px !important;
+      border-radius: 50% !important;
+      border: 3px solid transparent !important;
+      background: linear-gradient(#0a0c12, #0a0c12) padding-box,
+                  conic-gradient(#1ed760 var(--sp-progress-pct, 0%), rgba(255, 255, 255, 0.18) 0%) border-box !important;
+      box-shadow: 0 8px 30px rgba(0, 0, 0, 0.95), 0 0 20px rgba(30, 215, 96, 0.5) !important;
+      cursor: pointer;
+      overflow: visible !important;
+    }
+    .sp-mini-bubble-badge {
+      display: none;
+      position: absolute;
+      bottom: -9px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #090d16;
+      border: 1px solid #1ed760;
+      color: #1ed760;
+      font-size: 9.5px;
+      font-weight: 800;
+      font-family: monospace;
+      padding: 1px 5px;
+      border-radius: 10px;
+      white-space: nowrap;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.9);
+      z-index: 9999;
+      pointer-events: none;
+    }
+    .sp-bottom-player.is-minimized .sp-mini-bubble-badge {
+      display: block !important;
+    }
+    .sp-bottom-player.is-minimized .sp-drag-handle,
+    .sp-bottom-player.is-minimized .sp-player-progress-container,
+    .sp-bottom-player.is-minimized .sp-mini-details,
+    .sp-bottom-player.is-minimized .sp-controls-bar,
+    .sp-bottom-player.is-minimized .sp-mini-toggle-btn,
+    .sp-bottom-player.is-minimized .sp-pip-btn,
+    .sp-bottom-player.is-minimized .sp-eq-btn,
+    .sp-bottom-player.is-minimized .sp-eq-panel,
+    .sp-bottom-player.is-minimized .sp-runner {
+      display: none !important;
+    }
+    .sp-pip-btn.active {
+      background: rgba(30, 215, 96, 0.28) !important;
+      color: #1ed760 !important;
+    }
+    .sp-bottom-player.is-minimized .sp-mini-track-info {
+      width: 100% !important;
+      height: 100% !important;
+      justify-content: center !important;
+      align-items: center !important;
+      position: relative;
+    }
+    .sp-bottom-player.is-minimized .sp-mini-thumb {
+      width: 50px !important;
+      height: 50px !important;
+      border-radius: 50% !important;
+      animation: spinTrack 12s linear infinite;
+    }
+    .sp-bottom-player.is-minimized.is-paused .sp-mini-thumb {
+      animation-play-state: paused;
+    }
+    @keyframes spinTrack {
+      100% { transform: rotate(360deg); }
+    }
+
+    /* Infinite Scroll Loader */
+    .sp-infinite-loader {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      padding: 14px 12px 28px;
+      margin-top: 6px;
+      width: 100%;
+      box-sizing: border-box;
+      color: #94a3b8;
+      font-size: 13px;
+      font-weight: 500;
+      letter-spacing: 0.3px;
+    }
+    .sp-infinite-spinner {
+      width: 20px;
+      height: 20px;
+      border: 2.5px solid rgba(30, 215, 96, 0.2);
+      border-top-color: #1ed760;
+      border-radius: 50%;
+      animation: spinLoader 0.75s linear infinite;
+    }
+    @keyframes spinLoader {
+      to { transform: rotate(360deg); }
+    }
+
+    /* ==========================================================================
+       ENQUADRAMENTO DINÂMICO E RESPONSIVO DO MINI PLAYER AO TAMANHO DA TELA
+       ========================================================================== */
+    @media (max-width: 960px) {
+      #btn-sp-shuffle, #btn-sp-repeat {
+        display: none !important; /* Esconde botões secundários para priorizar controles essenciais */
+      }
+      .sp-bottom-player {
+        gap: 6px !important;
+      }
+    }
+
+    @media (max-width: 720px) {
+      .sp-mini-progress-pill {
+        display: none !important; /* Oculta pill de tempo para dar prioridade total ao nome da faixa e artista */
+      }
+      .sp-mini-thumb {
+        width: 34px !important;
+        height: 34px !important;
+      }
+      .sp-mini-title {
+        font-size: 12px !important;
+      }
+      .sp-mini-artist {
+        font-size: 10.5px !important;
+      }
+      .sp-ctrl-btn {
+        width: 28px !important;
+        height: 28px !important;
+        padding: 4px !important;
+      }
+      .sp-play-main-btn {
+        width: 34px !important;
+        height: 34px !important;
+      }
+    }
+
+    @media (max-width: 520px) {
+      .spotify-header {
+        padding: 4px 8px !important;
+        gap: 6px !important;
+      }
+      .sp-runner {
+        width: 30px;
+        height: 30px;
+      }
+      .sp-runner-img {
+        width: 26px;
+        height: 26px;
+      }
+      .sp-brand-heading {
+        font-size: 12.5px !important;
+        letter-spacing: -0.3px !important;
+      }
+      .sp-bottom-player:not(.is-floating) {
+        padding: 2px 6px !important;
+        gap: 4px !important;
+        height: 38px !important;
+        min-height: 38px !important;
+      }
+      .sp-drag-handle {
+        width: 14px !important;
+        padding: 0 !important;
+      }
+      .sp-mini-thumb {
+        width: 28px !important;
+        height: 28px !important;
+        border-radius: 4px !important;
+      }
+      .sp-mini-title {
+        font-size: 11px !important;
+      }
+      .sp-mini-artist {
+        font-size: 9.5px !important;
+      }
+      .sp-controls-bar {
+        gap: 2px !important;
+      }
+      .sp-ctrl-btn {
+        width: 26px !important;
+        height: 26px !important;
+        padding: 3px !important;
+      }
+      .sp-play-main-btn {
+        width: 30px !important;
+        height: 30px !important;
+      }
+      .sp-mini-toggle-btn,
+      .sp-pip-btn {
+        width: 24px !important;
+        height: 24px !important;
+      }
+      .sp-scroll-body {
+        padding-bottom: 20px !important;
+      }
+      .sp-related-modal-overlay {
+        padding: 8px !important;
+      }
+      .sp-related-modal {
+        max-height: 90vh !important;
+        border-radius: 14px !important;
+      }
+      .sp-related-modal-header {
+        padding: 12px 14px !important;
+      }
+      .sp-related-modal-title {
+        font-size: 15px !important;
+      }
+      .sp-related-modal-subtitle {
+        font-size: 11px !important;
+      }
+      .sp-playlists-modal-body {
+        padding: 10px !important;
+        gap: 10px !important;
+      }
+      .sp-fav-item {
+        padding: 10px 12px !important;
+        border-radius: 12px !important;
+        gap: 8px !important;
+      }
+      .sp-fav-main-row {
+        gap: 10px !important;
+      }
+      .sp-fav-thumb-wrap {
+        width: 44px !important;
+        height: 44px !important;
+        border-radius: 8px !important;
+      }
+      .sp-fav-name {
+        font-size: 13.5px !important;
+      }
+      .sp-fav-count {
+        font-size: 11px !important;
+      }
+      .sp-fav-play {
+        padding: 6px 12px !important;
+        font-size: 11px !important;
+      }
+      .sp-fav-actions {
+        gap: 5px !important;
+        padding-top: 7px !important;
+      }
+      .sp-fav-actions button {
+        padding: 5px 8px !important;
+        font-size: 11px !important;
+        border-radius: 7px !important;
+      }
+      .sp-session-warning-card {
+        padding: 9px 11px !important;
+        gap: 5px !important;
+      }
+      .sp-session-warning-title {
+        font-size: 12px !important;
+      }
+      .sp-session-warning-desc {
+        font-size: 11px !important;
+      }
+      .sp-session-warning-action-tip {
+        font-size: 10.5px !important;
+        padding: 5px 8px !important;
+      }
+    }
+
+    /* ==========================================================================
+       CHAT FLUTUANTE DO DJ PAPALÉGUAS IA
+       ========================================================================== */
+    .sp-dj-fab {
+      position: fixed;
+      bottom: 74px;
+      right: 18px;
+      width: 52px;
+      height: 52px;
+      border-radius: 50%;
+      padding: 0;
+      gap: 1px;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 990;
+      transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+      user-select: none;
+      box-sizing: border-box;
+      overflow: hidden;
+    }
+
+    body.is-editing-playlist .sp-dj-fab,
+    body.is-editing-playlist .sp-dj-chat-container {
+      z-index: 1 !important;
+      opacity: 0.08 !important;
+      pointer-events: none !important;
+      filter: grayscale(1) !important;
+      transform: scale(0.8);
+    }
+
+    /* Estado Ativo: AZUL NEON (Chat Aberto) */
+    .sp-dj-fab.active,
+    .sp-chip.sp-ai-chip.active {
+      background: linear-gradient(135deg, #0052d4, #00a8ff, #00f0ff) !important;
+      color: #ffffff !important;
+      border: 2px solid #00f0ff !important;
+      box-shadow: 0 0 16px rgba(0, 240, 255, 0.9), 0 0 35px rgba(0, 168, 255, 0.6), inset 0 0 12px rgba(0, 240, 255, 0.5) !important;
+      text-shadow: 0 0 8px rgba(0, 240, 255, 0.9), 0 1px 3px rgba(0, 0, 0, 0.7) !important;
+      animation: pulseNeonBlue 2.2s infinite ease-in-out !important;
+    }
+
+    /* Estado Inativo: BORDA VERMELHA (Chat Fechado) */
+    .sp-dj-fab.closed,
+    .sp-dj-fab:not(.active),
+    .sp-chip.sp-ai-chip.closed,
+    .sp-chip.sp-ai-chip:not(.active) {
+      background: rgba(15, 23, 42, 0.94) !important;
+      color: #fca5a5 !important;
+      border: 2px solid #ef4444 !important;
+      box-shadow: 0 0 14px rgba(239, 68, 68, 0.65), inset 0 0 8px rgba(239, 68, 68, 0.25) !important;
+      text-shadow: 0 0 6px rgba(239, 68, 68, 0.7) !important;
+      animation: none !important;
+    }
+
+    .sp-dj-fab:not(.active):hover,
+    .sp-chip.sp-ai-chip:not(.active):hover {
+      border-color: #f87171 !important;
+      box-shadow: 0 0 22px rgba(239, 68, 68, 0.95), inset 0 0 12px rgba(239, 68, 68, 0.4) !important;
+      color: #ffffff !important;
+      transform: scale(1.06);
+    }
+
+    .sp-dj-fab.active:hover,
+    .sp-chip.sp-ai-chip.active:hover {
+      box-shadow: 0 0 24px rgba(0, 240, 255, 1), 0 0 45px rgba(0, 168, 255, 0.8) !important;
+      transform: scale(1.06);
+    }
+
+    .sp-dj-fab-icon {
+      font-size: 16px;
+      line-height: 1;
+      margin: 0;
+    }
+    .sp-dj-fab-label {
+      font-size: 11px;
+      font-weight: 800;
+      color: #ffffff;
+      line-height: 1;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      margin: 0;
+      white-space: nowrap;
+      text-align: center;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+    }
+
+    @keyframes pulseNeonBlue {
+      0% {
+        box-shadow: 0 0 14px rgba(0, 240, 255, 0.8), 0 0 28px rgba(0, 168, 255, 0.5);
+        transform: scale(1);
+      }
+      50% {
+        box-shadow: 0 0 24px rgba(0, 240, 255, 1), 0 0 42px rgba(0, 168, 255, 0.75);
+        transform: scale(1.03);
+      }
+      100% {
+        box-shadow: 0 0 14px rgba(0, 240, 255, 0.8), 0 0 28px rgba(0, 168, 255, 0.5);
+        transform: scale(1);
+      }
+    }
+
+    .sp-dj-chat-container {
+      position: fixed;
+      bottom: 128px;
+      right: 16px;
+      width: 410px;
+      max-width: calc(100vw - 32px);
+      height: 510px;
+      max-height: calc(100vh - 190px);
+      background: rgba(11, 15, 25, 0.96);
+      backdrop-filter: blur(28px);
+      -webkit-backdrop-filter: blur(28px);
+      border: 1px solid rgba(0, 240, 255, 0.4);
+      border-radius: 20px;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.95), 0 0 25px rgba(0, 240, 255, 0.2);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      z-index: 99998;
+      transition: transform 0.32s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.25s ease, visibility 0.25s;
+    }
+    .sp-dj-chat-container.collapsed {
+      transform: translateY(24px) scale(0.92);
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+
+    .sp-dj-chat-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 14px;
+      background: linear-gradient(180deg, rgba(0, 240, 255, 0.16) 0%, rgba(15, 23, 42, 0.7) 100%);
+      border-bottom: 1px solid rgba(0, 240, 255, 0.2);
+      cursor: pointer;
+    }
+    .sp-dj-chat-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .sp-dj-avatar-glow {
+      position: relative;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #059669, #1ed760);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 0 14px rgba(30, 215, 96, 0.6);
+      flex-shrink: 0;
+    }
+    .sp-dj-avatar {
+      font-size: 20px;
+    }
+    .sp-dj-online-dot {
+      position: absolute;
+      bottom: 0;
+      right: 0;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #10b981;
+      border: 2px solid #0f172a;
+      box-shadow: 0 0 6px #10b981;
+    }
+    .sp-dj-header-info {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+    .sp-dj-name {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 700;
+      color: #ffffff;
+      letter-spacing: 0.3px;
+    }
+    .sp-dj-status-text {
+      font-size: 11px;
+      color: #94a3b8;
+    }
+    .sp-dj-btn-icon {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: #94a3b8;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .sp-dj-btn-icon:hover {
+      background: rgba(255, 255, 255, 0.2);
+      color: #ffffff;
+    }
+
+    .sp-dj-chat-body {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .sp-dj-chat-messages {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255,255,255,0.2) transparent;
+    }
+    .sp-dj-chat-messages::-webkit-scrollbar {
+      width: 5px;
+    }
+    .sp-dj-chat-messages::-webkit-scrollbar-thumb {
+      background: rgba(255,255,255,0.2);
+      border-radius: 4px;
+    }
+
+    .sp-dj-msg {
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+      max-width: 90%;
+      animation: fadeInMsg 0.25s ease;
+    }
+    @keyframes fadeInMsg {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .sp-dj-msg.user {
+      align-self: flex-end;
+      flex-direction: row-reverse;
+    }
+    .sp-dj-msg.dj {
+      align-self: flex-start;
+    }
+    .sp-dj-msg-avatar {
+      font-size: 16px;
+      flex-shrink: 0;
+      width: 28px;
+      height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(255,255,255,0.08);
+      border-radius: 50%;
+    }
+    .sp-dj-msg-bubble {
+      padding: 10px 14px;
+      border-radius: 14px;
+      font-size: 13px;
+      line-height: 1.45;
+      word-break: break-word;
+    }
+    .sp-dj-msg.user .sp-dj-msg-bubble {
+      background: linear-gradient(135deg, #0284c7, #0369a1);
+      color: #ffffff;
+      border-bottom-right-radius: 3px;
+      box-shadow: 0 4px 15px rgba(2, 132, 199, 0.35);
+    }
+    .sp-dj-msg.dj .sp-dj-msg-bubble {
+      background: rgba(30, 41, 59, 0.88);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: #f1f5f9;
+      border-bottom-left-radius: 3px;
+    }
+    .sp-dj-msg.dj.loading .sp-dj-msg-bubble {
+      color: #38bdf8;
+      background: rgba(15, 23, 42, 0.9);
+      border-color: rgba(56, 189, 248, 0.3);
+      animation: pulseLoading 1.5s infinite ease-in-out;
+    }
+    .sp-dj-options {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .sp-dj-option {
+      border: 1px solid rgba(56, 189, 248, 0.45);
+      background: rgba(14, 165, 233, 0.16);
+      color: #e0f2fe;
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .sp-dj-option:hover {
+      background: rgba(14, 165, 233, 0.32);
+    }
+    @keyframes pulseLoading {
+      0%, 100% { opacity: 0.75; }
+      50% { opacity: 1; }
+    }
+
+    /* Formulário de Input */
+    .sp-dj-preview {
+      margin: 0;
+      padding: 10px 12px;
+      font-size: 12.5px;
+      line-height: 1.4;
+      color: #d7ffe8;
+      background: rgba(30, 215, 96, 0.1);
+      border-bottom: 1px solid rgba(30, 215, 96, 0.28);
+    }
+    .sp-dj-count-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px 0;
+      color: #d7ffe8;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .sp-dj-count-row input {
+      width: 64px;
+      padding: 6px 8px;
+      border-radius: 8px;
+      border: 1px solid rgba(30, 215, 96, 0.45);
+      background: rgba(0, 0, 0, 0.35);
+      color: #fff;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .sp-dj-chat-form {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px;
+      background: rgba(10, 14, 23, 0.95);
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    .sp-dj-chat-input {
+      flex: 1;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 20px;
+      padding: 9px 14px;
+      color: #ffffff;
+      font-size: 13px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .sp-dj-chat-input:focus {
+      border-color: #1ed760;
+      box-shadow: 0 0 10px rgba(30, 215, 96, 0.3);
+    }
+    .sp-dj-chat-send {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: #1ed760;
+      border: none;
+      color: #000000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: transform 0.2s, background 0.2s;
+      flex-shrink: 0;
+    }
+    .sp-dj-chat-send:hover {
+      transform: scale(1.08);
+      background: #22c55e;
+    }
+    .sp-dj-chat-send:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    /* Botões de Microfone (Voz) */
+    .sp-dj-chat-mic {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: #1ed760;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: transform 0.2s, background 0.2s, color 0.2s;
+      flex-shrink: 0;
+    }
+    .sp-dj-chat-mic:hover {
+      background: rgba(30, 215, 96, 0.2);
+      color: #ffffff;
+      transform: scale(1.08);
+    }
+    .sp-dj-chat-mic.listening {
+      background: #ef4444 !important;
+      color: #ffffff !important;
+      border-color: #f87171 !important;
+      animation: pulseMicRecording 1.2s infinite ease-in-out !important;
+    }
+
+    .sp-search-mic-btn {
+      background: transparent;
+      border: none;
+      color: #94a3b8;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 4px;
+      border-radius: 50%;
+      transition: color 0.2s, background 0.2s;
+    }
+    .sp-search-mic-btn:hover {
+      color: #1ed760;
+      background: rgba(30, 215, 96, 0.15);
+    }
+    .sp-search-mic-btn.listening {
+      color: #ef4444 !important;
+      background: rgba(239, 68, 68, 0.2) !important;
+      animation: pulseMicRecording 1.2s infinite ease-in-out !important;
+    }
+
+    @keyframes pulseMicRecording {
+      0% {
+        box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
+        transform: scale(1);
+      }
+      50% {
+        box-shadow: 0 0 0 8px rgba(239, 68, 68, 0);
+        transform: scale(1.1);
+      }
+      100% {
+        box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
+        transform: scale(1);
+      }
+    }
+
+    /* EXPANDED PLAYER OVERLAY (Centro - Lado Direito) */
+    .sp-expanded-player {
+      position: fixed;
+      top: 50%;
+      right: 28px;
+      left: auto;
+      bottom: auto;
+      transform: translateY(-50%) scale(1);
+      width: min(440px, calc(100vw - 32px));
+      max-height: calc(100vh - 60px);
+      height: 680px;
+      z-index: 10000;
+      background: rgba(15, 20, 32, 0.94);
+      backdrop-filter: blur(28px);
+      -webkit-backdrop-filter: blur(28px);
+      border: 1px solid rgba(30, 215, 96, 0.35);
+      border-radius: 24px;
+      box-shadow: 0 25px 60px rgba(0, 0, 0, 0.85), 0 0 35px rgba(30, 215, 96, 0.18);
+      display: flex;
+      flex-direction: column;
+      transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.25s ease;
+      overflow: hidden;
+      opacity: 1;
+    }
+    .sp-expanded-player.hidden {
+      transform: translateY(-50%) scale(0.92) translateX(40px);
+      opacity: 0;
+      pointer-events: none;
+    }
+    .sp-expanded-bg {
+      position: absolute;
+      top: -10%; left: -10%; right: -10%; bottom: -10%;
+      background-size: cover;
+      background-position: center;
+      filter: blur(45px) brightness(0.35);
+      z-index: 0;
+      transition: background-image 0.5s ease;
+    }
+    .sp-expanded-content {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      padding: 20px 22px;
+      box-sizing: border-box;
+      overflow-y: auto;
+    }
+    .sp-expanded-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+    .sp-expanded-close, .sp-expanded-btn-action {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      color: #fff;
+      cursor: pointer;
+      padding: 7px;
+      border-radius: 10px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s ease;
+    }
+    .sp-expanded-close:hover, .sp-expanded-btn-action:hover {
+      background: rgba(30, 215, 96, 0.2);
+      border-color: rgba(30, 215, 96, 0.4);
+      color: #1ed760;
+      transform: scale(1.05);
+    }
+    .sp-expanded-top-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .sp-expanded-header-title {
+      font-size: 13px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; color: #1ed760; opacity: 0.95;
+    }
+    .sp-expanded-art-wrapper {
+      flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; margin-bottom: 16px;
+    }
+    .sp-expanded-art {
+      width: 100%; max-width: 320px; aspect-ratio: 1/1; object-fit: cover; border-radius: 16px;
+      box-shadow: 0 16px 40px rgba(0,0,0,0.65), 0 0 20px rgba(30, 215, 96, 0.15);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    .sp-expanded-info {
+      margin-bottom: 16px;
+      text-align: center;
+    }
+    .sp-expanded-title {
+      font-size: 20px; font-weight: 800; color: #fff; margin-bottom: 4px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .sp-expanded-artist {
+      font-size: 14px; color: #a1a1aa; font-weight: 500;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .sp-expanded-progress {
+      margin-bottom: 16px;
+    }
+    .sp-expanded-progress-bar-container {
+      height: 20px; display: flex; align-items: center; cursor: pointer; margin-bottom: 6px;
+    }
+    .sp-expanded-progress-bg {
+      flex: 1; height: 5px; background: rgba(255,255,255,0.18); border-radius: 3px; position: relative;
+    }
+    .sp-expanded-progress-fill {
+      position: absolute; left: 0; top: 0; bottom: 0; background: linear-gradient(90deg, #10b981, #1ed760); border-radius: 3px; width: 0%;
+      transition: width 0.1s linear;
+      box-shadow: 0 0 10px rgba(30, 215, 96, 0.6);
+    }
+    .sp-expanded-progress-thumb {
+      position: absolute; top: 50%; width: 13px; height: 13px; background: #fff; border-radius: 50%;
+      transform: translate(-50%, -50%); left: 0%;
+      transition: left 0.1s linear; opacity: 1;
+      border: 2px solid #1ed760;
+      box-shadow: 0 0 8px rgba(0,0,0,0.8);
+    }
+    .sp-expanded-time-row {
+      display: flex; justify-content: space-between; font-size: 12px; color: #a1a1aa; font-weight: 600; font-family: monospace;
+    }
+    .sp-expanded-controls {
+      display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 8px;
+    }
+    @media(max-width: 600px) {
+      .sp-expanded-player {
+        top: auto;
+        bottom: 20px;
+        right: 12px;
+        left: 12px;
+        width: auto;
+        transform: translateY(0);
+        height: min(580px, calc(100vh - 40px));
+      }
+      .sp-expanded-player.hidden {
+        transform: translateY(105%);
+      }
+    }
+
+  </style>
+</head>
+<body>
+  <!-- Player Completo do Papaléguas Music -->
+  <div class="circuit-modal spotify-modal" id="spotify-modal">
+    <div class="spotify-content sp-layout">
+      <!-- 1. Campo de Pesquisa no Topo -->
+      <div class="sp-top-bar">
+        <div class="sp-search-input-wrapper">
+          <svg class="sp-search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input type="text" id="spotify-search-input" class="sp-search-input" placeholder="O que você quer ouvir no Papaléguas Music?" value="" autocomplete="off" spellcheck="false" />
+          <button type="button" class="sp-search-mic-btn" id="btn-sp-search-mic" title="Falar por voz para buscar música">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+          </button>
+          <button class="sp-clear-btn" id="btn-sp-clear" title="Limpar">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- 2. LOGO ABAIXO DO CAMPO DE PESQUISA: Mini Player Integrado -->
+      <div class="circuit-header spotify-header" id="spotify-header">
+        <!-- Mini Player Integrado (Ocupa o espaço total do cabeçalho) -->
+        <div class="sp-bottom-player is-paused" id="sp-bottom-player">
+          <div class="sp-drag-handle" id="sp-drag-handle" title="Arraste para mover o mini player pela tela">
+            <svg width="14" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="8" cy="5" r="2"/><circle cx="16" cy="5" r="2"/><circle cx="8" cy="12" r="2"/><circle cx="16" cy="12" r="2"/><circle cx="8" cy="19" r="2"/><circle cx="16" cy="19" r="2"/></svg>
+          </div>
+          <!-- Barra de Progresso com Scrubber, Thumb e Tooltip de Tempo -->
+          <div class="sp-player-progress-container" id="sp-player-progress-container" title="Clique ou arraste para avançar/voltar">
+            <div class="sp-player-progress-bar" id="sp-player-progress-bar">
+              <div class="sp-player-progress-thumb" id="sp-player-progress-thumb"></div>
+            </div>
+            <div class="sp-player-progress-tooltip" id="sp-player-progress-tooltip">0:00</div>
+          </div>
+          <div class="sp-mini-track-info" id="sp-mini-track-info" title="Toque para restaurar se minimizado">
+            <span class="sp-runner" id="sp-runner" title="Papaléguas Music">
+              <span class="sp-runner-dust" aria-hidden="true"></span>
+              <img class="sp-runner-img" src="papaleguas_logo.png" alt="Papaléguas" onerror="if(!this.dataset.retried){this.dataset.retried='1';this.src='/papaleguas_logo.png';}" />
+            </span>
+            <img class="sp-mini-thumb" id="sp-mini-thumb" alt="" data-fallback="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='8' fill='%23111827'/%3E%3Cpath d='M26 44V22l20-4v18' fill='none' stroke='%231ed760' stroke-width='3'/%3E%3Ccircle cx='22' cy='44' r='4' fill='%231ed760'/%3E%3Ccircle cx='42' cy='36' r='4' fill='%231ed760'/%3E%3C/svg%3E" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='8' fill='%23111827'/%3E%3Cpath d='M26 44V22l20-4v18' fill='none' stroke='%231ed760' stroke-width='3'/%3E%3Ccircle cx='22' cy='44' r='4' fill='%231ed760'/%3E%3Ccircle cx='42' cy='36' r='4' fill='%231ed760'/%3E%3C/svg%3E" />
+            <!-- Badge de tempo na bolha minimizada -->
+            <div class="sp-mini-bubble-badge" id="sp-mini-bubble-badge">0:00</div>
+            <div class="sp-mini-details">
+              <span class="sp-mini-title" id="sp-mini-title">--</span>
+              <div class="sp-mini-meta-row">
+                <span class="sp-mini-artist" id="sp-mini-artist">--</span>
+                <span class="sp-mini-progress-pill" id="sp-mini-progress-pill" title="Tempo decorrido / Tempo total">
+                  <span id="sp-mini-cur-time">0:00</span> / <span id="sp-mini-dur-time">0:00</span>
+                </span>
+              </div>
+            </div>
+          </div>
+          <div class="sp-eq-panel" id="sp-eq-panel">
+            <div class="sp-eq-head">
+              <div class="sp-eq-title">
+                <span class="sp-eq-title-icon">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="5" y1="4" x2="5" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/><line x1="19" y1="4" x2="19" y2="20"/><circle cx="5" cy="14" r="2.4" fill="currentColor"/><circle cx="12" cy="8" r="2.4" fill="currentColor"/><circle cx="19" cy="16" r="2.4" fill="currentColor"/></svg>
+                </span>
+                <div>
+                  <strong>Equalizador</strong>
+                  <small id="sp-eq-status">Flat</small>
+                </div>
+              </div>
+              <div class="sp-eq-head-actions">
+                <button type="button" class="sp-eq-power is-on" id="sp-eq-power" title="Ligar ou desligar o equalizador"><span class="sp-eq-dot"></span>ON</button>
+                <button type="button" class="sp-eq-reset" id="sp-eq-reset" title="Zerar tudo">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><polyline points="3 4 3 9 8 9"/></svg>
+                </button>
+              </div>
+            </div>
+            <div class="sp-eq-curve-wrap">
+              <canvas class="sp-eq-curve" id="sp-eq-curve" width="680" height="168"></canvas>
+              <div class="sp-eq-curve-labels"><span>60</span><span>250</span><span>1k</span><span>4k</span><span>16k</span></div>
+            </div>
+            <div class="sp-eq-bands">
+              <label class="sp-eq-row">
+                <span class="sp-eq-name">Graves <small>80 Hz</small></span>
+                <input type="range" id="sp-eq-bass" data-band="bass" min="-12" max="12" step="0.5" value="0" />
+                <span class="sp-eq-db is-zero" id="sp-eq-bass-db">0 dB</span>
+              </label>
+              <label class="sp-eq-row">
+                <span class="sp-eq-name">Médios <small>1 kHz</small></span>
+                <input type="range" id="sp-eq-mid" data-band="mid" min="-12" max="12" step="0.5" value="0" />
+                <span class="sp-eq-db is-zero" id="sp-eq-mid-db">0 dB</span>
+              </label>
+              <label class="sp-eq-row">
+                <span class="sp-eq-name">Presença <small>3.2 kHz</small></span>
+                <input type="range" id="sp-eq-presence" data-band="presence" min="-12" max="12" step="0.5" value="0" />
+                <span class="sp-eq-db is-zero" id="sp-eq-presence-db">0 dB</span>
+              </label>
+              <label class="sp-eq-row">
+                <span class="sp-eq-name">Agudos <small>9 kHz</small></span>
+                <input type="range" id="sp-eq-treble" data-band="treble" min="-12" max="12" step="0.5" value="0" />
+                <span class="sp-eq-db is-zero" id="sp-eq-treble-db">0 dB</span>
+              </label>
+            </div>
+            <div class="sp-eq-presets" id="sp-eq-presets">
+              <button type="button" data-preset="flat">Flat</button>
+              <button type="button" data-preset="bass">🔊 Grave</button>
+              <button type="button" data-preset="deep">🎚️ Grave Profundo</button>
+              <button type="button" data-preset="treble">✨ Agudo</button>
+              <button type="button" data-preset="pop">🎤 Pop</button>
+              <button type="button" data-preset="rock">🎸 Rock</button>
+              <button type="button" data-preset="vocal">🗣️ Voz</button>
+              <button type="button" data-preset="club">🪩 Clube</button>
+            </div>
+          </div>
+          <div class="sp-controls-bar">
+            <button type="button" class="sp-eq-btn" id="btn-sp-eq" title="Equalizador profissional"><svg viewBox="0 0 24 24" fill="currentColor"><rect class="sp-eq-bar" x="2" y="10" width="3.5" height="12" rx="1"/><rect class="sp-eq-bar" x="8.2" y="4" width="3.5" height="18" rx="1"/><rect class="sp-eq-bar" x="14.4" y="8" width="3.5" height="14" rx="1"/><rect class="sp-eq-bar" x="20.5" y="13" width="3.5" height="9" rx="1"/></svg>EQ</button>
+            <button class="sp-ctrl-btn" id="btn-sp-shuffle" title="Aleatório">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
+            </button>
+            <button class="sp-ctrl-btn" id="btn-sp-prev" title="Anterior">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5" stroke="currentColor" stroke-width="2"/></svg>
+            </button>
+            <button class="sp-play-main-btn" id="btn-sp-play-pause" title="Play/Pause">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" id="sp-main-play-icon"><path d="M8 5v14l11-7z"/></svg>
+            </button>
+            <button class="sp-ctrl-btn" id="btn-sp-next" title="Próxima">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19" stroke="currentColor" stroke-width="2"/></svg>
+            </button>
+            <button class="sp-ctrl-btn" id="btn-sp-repeat" title="Repetir">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+            </button>
+          </div>
+          <button class="sp-mini-toggle-btn sp-pip-btn" id="btn-sp-pip" title="Picture-in-Picture" type="button">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><rect x="12" y="12" width="8" height="6" rx="1" fill="currentColor" stroke="none"/></svg>
+          </button>
+          <button class="sp-mini-toggle-btn" id="btn-sp-mini-toggle" title="Minimizar em bolha flutuante">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/></svg>
+          </button>
+        </div>
+
+        <div class="spotify-header-actions">
+          <!-- Ações do modal ocultadas via CSS -->
+        </div>
+      </div>
+
+      <!-- Filtros de Categorias (Tudo, Playlists, Músicas, Artistas, Álbuns, etc.) -->
+      <div class="sp-filter-chips">
+        <button class="sp-chip sp-ai-chip closed" id="btn-sp-ai-dj" data-type="ai" title="Ativar Chat do IA Recomenda">✨ IA Recomenda</button>
+        <button class="sp-chip" data-type="playlist" id="btn-sp-favorites" title="Abre o menu de playlists e pastas salvas">📁 Playlists ▾</button>
+        <button class="sp-chip active" data-type="all">Tudo</button>
+        <button class="sp-chip" data-type="track">Músicas</button>
+        <button class="sp-chip" data-type="artist">Artistas</button>
+        <button class="sp-chip" data-type="album">Álbuns</button>
+        <button class="sp-chip" data-type="podcast">Podcasts</button>
+      </div>
+
+      <!-- Barra compacta visível apenas ao visualizar faixas de uma playlist salva -->
+      <div class="sp-active-playlist-bar" id="sp-selected-playlist-bar" hidden>
+        <button class="sp-pl-back-btn" id="btn-sp-back-from-playlist" type="button" title="Voltar ao catálogo">← Todas as Músicas</button>
+        <div class="sp-pl-header-info">
+          <span class="sp-selected-playlist" id="sp-selected-playlist-name"></span>
+        </div>
+        <div class="sp-pl-header-actions">
+          <button class="sp-pl-head-btn" id="btn-sp-download-playlist" hidden title="Baixa todas as músicas desta playlist no aparelho">⬇ Baixar Playlist</button>
+          <button class="sp-pl-head-btn sp-pl-add-head-btn" id="btn-sp-header-add-more" type="button" title="Adicionar mais músicas nesta playlist">➕ Add Músicas</button>
+          <button class="sp-pl-head-btn sp-pl-rename-head-btn" id="btn-sp-rename-current-pl" hidden title="Renomear esta playlist">✏️ Renomear</button>
+          <button class="sp-pl-head-btn sp-pl-cover-head-btn" id="btn-sp-cover-current-pl" hidden title="Alterar capa / álbum da playlist">🖼️ Capa / Álbum</button>
+          <button class="sp-pl-head-btn" id="btn-sp-add-related" hidden title="Adicionar novas músicas relacionadas">✨ Relacionadas</button>
+          <button class="sp-pl-head-btn sp-pl-del-head-btn" id="btn-sp-delete-current-pl" hidden title="Excluir playlist inteira">🗑️ Excluir Playlist</button>
+        </div>
+      </div>
+
+      <!-- Floating Banner compacto quando em modo de adicionar músicas -->
+      <div class="sp-target-pl-banner" id="sp-target-pl-banner" hidden>
+        <div class="sp-target-pl-inner">
+          <div class="sp-target-pl-info">
+            <span class="sp-target-pl-icon">📁</span>
+            <div class="sp-target-pl-texts">
+              <span class="sp-target-pl-title" id="sp-target-pl-title">Adicionando em: <b>Playlist</b></span>
+              <span class="sp-target-pl-hint">Toque no <b>[+]</b> nas músicas</span>
+            </div>
+          </div>
+          <div class="sp-target-pl-actions">
+            <button type="button" class="sp-target-pl-view-btn" id="btn-sp-target-view" title="Ver músicas salvas nesta playlist">👁️ Ver</button>
+            <button type="button" class="sp-target-pl-download-btn" id="btn-sp-target-download" title="Baixar todas as músicas desta playlist no aparelho">⬇ Baixar</button>
+            <button type="button" class="sp-target-pl-done-btn" id="btn-sp-target-done" title="Concluir e fechar">✓ Concluir</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Notificação e progresso flutuantes (não ocupam espaço de tela) -->
+      <div class="sp-download-notice" id="sp-download-notice" hidden></div>
+      <div class="sp-download-progress" id="sp-download-progress" hidden>
+        <div class="sp-download-progress-bar" id="sp-download-progress-bar"></div>
+      </div>
+
+      <!-- Menu de Estilos Musicais em Modo Carrossel -->
+      <div class="sp-genres-bar" id="sp-genres-bar">
+        <div class="sp-genres-header">
+          <div class="sp-genres-header-left">
+            <span class="sp-genres-title">Gêneros & Estilos Musicais</span>
+            <span class="sp-genres-badge">🎵 Carrossel de Estilos</span>
+          </div>
+          <div class="sp-genres-carousel-controls">
+            <button class="sp-genres-arrow-btn" id="btn-sp-genres-prev" type="button" title="Gêneros anteriores" aria-label="Gêneros anteriores">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
+            </button>
+            <button class="sp-genres-arrow-btn" id="btn-sp-genres-next" type="button" title="Próximos gêneros" aria-label="Próximos gêneros">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="sp-genres-carousel-wrap" id="sp-genres-carousel-wrap">
+          <div class="sp-genres-chips" id="sp-genres-chips">
+            <!-- Novos Gêneros Solicitados com Queries Otimizadas -->
+            <button class="sp-genre-btn genre-dance" data-genre="dance" data-query="dance hits" title="Dance Music e Eurodance">
+              <span class="sp-genre-emoji">💃</span>
+              <span class="sp-genre-text">Dance</span>
+            </button>
+            <button class="sp-genre-btn genre-flashback" data-genre="flashback" data-query="flashback hits" title="Flashback 70s 80s 90s">
+              <span class="sp-genre-emoji">📻</span>
+              <span class="sp-genre-text">Flashback</span>
+            </button>
+            <button class="sp-genre-btn genre-hiphop" data-genre="hiphop" data-query="hip hop" title="Hip Hop e Rap Clássico">
+              <span class="sp-genre-emoji">🎧</span>
+              <span class="sp-genre-text">Hip Hop</span>
+            </button>
+            <button class="sp-genre-btn genre-psy" data-genre="psy" data-query="psytrance" title="Psytrance e Psy">
+              <span class="sp-genre-emoji">🌀</span>
+              <span class="sp-genre-text">Psy</span>
+            </button>
+            <!-- Gêneros Existentes Preservados -->
+            <button class="sp-genre-btn genre-gospel" data-genre="gospel" data-query="musica gospel louvores adoracao" title="Música Gospel e Louvores">
+              <span class="sp-genre-emoji">🙏</span>
+              <span class="sp-genre-text">Gospel</span>
+            </button>
+            <button class="sp-genre-btn genre-sertanejo" data-genre="sertanejo" data-query="sertanejo hits" title="Sertanejo Universitário e Modão">
+              <span class="sp-genre-emoji">🤠</span>
+              <span class="sp-genre-text">Sertanejo</span>
+            </button>
+            <button class="sp-genre-btn genre-pagode" data-genre="pagode" data-query="pagode samba sucessos" title="Pagode e Samba">
+              <span class="sp-genre-emoji">🥁</span>
+              <span class="sp-genre-text">Pagode & Samba</span>
+            </button>
+            <button class="sp-genre-btn genre-pop" data-genre="pop" data-query="pop hits sucessos" title="Pop Internacional e Nacional">
+              <span class="sp-genre-emoji">🌟</span>
+              <span class="sp-genre-text">Pop</span>
+            </button>
+            <button class="sp-genre-btn genre-eletronica" data-genre="eletronica" data-query="eletronica edm dance" title="Eletrônica e EDM">
+              <span class="sp-genre-emoji">⚡</span>
+              <span class="sp-genre-text">Eletrônica</span>
+            </button>
+            <button class="sp-genre-btn genre-funk" data-genre="funk" data-query="funk brasil hits" title="Funk Brasil e Batidão">
+              <span class="sp-genre-emoji">🔥</span>
+              <span class="sp-genre-text">Funk</span>
+            </button>
+            <button class="sp-genre-btn genre-forro" data-genre="forro" data-query="forro piseiro vaquejada" title="Forró e Piseiro">
+              <span class="sp-genre-emoji">🪗</span>
+              <span class="sp-genre-text">Forró & Piseiro</span>
+            </button>
+            <button class="sp-genre-btn genre-trap" data-genre="trap" data-query="trap rap hip hop" title="Trap e Rap">
+              <span class="sp-genre-emoji">🎤</span>
+              <span class="sp-genre-text">Trap / Rap</span>
+            </button>
+            <button class="sp-genre-btn genre-rock" data-genre="rock" data-query="rock classicos nacionais e internacionais" title="Rock Clássico e Alternativo">
+              <span class="sp-genre-emoji">🎸</span>
+              <span class="sp-genre-text">Rock</span>
+            </button>
+            <button class="sp-genre-btn genre-mpb" data-genre="mpb" data-query="mpb grandes sucessos" title="Música Popular Brasileira">
+              <span class="sp-genre-emoji">🇧🇷</span>
+              <span class="sp-genre-text">MPB</span>
+            </button>
+            <button class="sp-genre-btn genre-reggae" data-genre="reggae" data-query="reggae brasil vibes" title="Reggae e Good Vibes">
+              <span class="sp-genre-emoji">🌴</span>
+              <span class="sp-genre-text">Reggae</span>
+            </button>
+            <button class="sp-genre-btn genre-lofi" data-genre="lofi" data-query="lo-fi chill relax" title="Lo-Fi para relaxar e estudar">
+              <span class="sp-genre-emoji">🎧</span>
+              <span class="sp-genre-text">Lo-Fi</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Scrollable Main Container -->
+      <div class="sp-scroll-body" id="sp-scroll-body">
+        <!-- Banner de Insights do Agente IA -->
+        <div class="sp-ai-banner hidden" id="sp-ai-banner">
+          <div class="sp-ai-banner-header">
+            <div class="sp-ai-banner-badge">
+              <span class="sp-ai-sparkle">✨</span> DJ IA Papaléguas
+            </div>
+            <span class="sp-ai-banner-status" id="sp-ai-banner-status">Analisando estilo...</span>
+          </div>
+          <p class="sp-ai-banner-desc" id="sp-ai-banner-desc">Curadoria inteligente personalizada para você.</p>
+        </div>
+
+        <!-- Card de Destaque -->
+        <div class="sp-hero-card" id="sp-hero-card">
+          <img class="sp-hero-img" id="sp-hero-img" src="papaleguas_logo.png" alt="Papaléguas Music" onerror="if(!this.dataset.retried){this.dataset.retried='1';this.src='/papaleguas_logo.png';}" />
+          <div class="sp-hero-info">
+            <h4 class="sp-hero-title" id="sp-hero-title">PAPALÉGUAS MUSIC 🎵</h4>
+            <p class="sp-hero-sub" id="sp-hero-sub">Selecione o que você quer ouvir!</p>
+          </div>
+          <button class="sp-hero-play-btn" id="sp-hero-play-btn" title="Tocar">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+          </button>
+        </div>
+
+        <!-- Lista de Músicas -->
+        <div class="sp-track-list" id="sp-track-list"></div>
+
+        <!-- Indicador de Rolagem Infinita (Carregando Mais Faixas) -->
+        <div class="sp-infinite-loader" id="sp-infinite-loader" style="display: none;">
+          <div class="sp-infinite-spinner"></div>
+          <span class="sp-infinite-text" id="sp-infinite-text">Buscando mais faixas...</span>
+        </div>
+      </div>
+
+      <!-- Player de Áudio -->
+      <audio id="spotify-preview-audio" preload="auto" playsinline></audio>
+
+      <!-- Botão Flutuante FAB para abrir o DJ Chat -->
+      <button class="sp-dj-fab closed" id="btn-sp-dj-fab" title="Ativar Chat da IA">
+        <span class="sp-dj-fab-icon">✨</span>
+        <span class="sp-dj-fab-label">IA</span>
+        <span class="sp-dj-fab-pulse"></span>
+      </button>
+
+      <!-- Chat Flutuante do DJ Papaléguas IA -->
+      <div class="sp-dj-chat-container collapsed" id="sp-dj-chat-container">
+        <div class="sp-dj-chat-header" id="sp-dj-chat-toggle">
+          <div class="sp-dj-chat-title">
+            <div class="sp-dj-avatar-glow">
+              <span class="sp-dj-avatar">🎧</span>
+              <span class="sp-dj-online-dot"></span>
+            </div>
+            <div class="sp-dj-header-info">
+              <h4 class="sp-dj-name">DJ Papaléguas IA</h4>
+              <span class="sp-dj-status-text">Online • Grok</span>
+            </div>
+          </div>
+          <div class="sp-dj-header-actions">
+            <button class="sp-dj-btn-icon" id="btn-sp-dj-toggle" title="Minimizar chat">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="sp-dj-chat-body" id="sp-dj-chat-body">
+          <p class="sp-dj-preview" id="sp-dj-preview">Eu crio a playlist só com o que você pedir. Escolha a quantidade e diga a música, o artista ou o estilo. Não coloco nada além disso.</p>
+          <!-- Mensagens do Chat -->
+          <div class="sp-dj-chat-messages" id="sp-dj-chat-messages"></div>
+          <label class="sp-dj-count-row" for="sp-dj-track-count">
+            Quantidade
+            <input type="number" id="sp-dj-track-count" min="1" max="50" value="10" inputmode="numeric" />
+            músicas
+          </label>
+
+          <!-- Formulário de Envio -->
+          <form class="sp-dj-chat-form" id="sp-dj-chat-form">
+            <button type="button" id="btn-sp-dj-mic" class="sp-dj-chat-mic" title="Falar por voz com o DJ Papaléguas (pedir músicas)">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+            </button>
+            <input type="text" id="sp-dj-chat-input" class="sp-dj-chat-input" placeholder="Digite ou toque no microfone para falar..." autocomplete="off" />
+            <button type="submit" id="btn-sp-dj-send" class="sp-dj-chat-send" title="Enviar para o DJ">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+            </button>
+          </form>
+        </div>
+      </div>
+
+      <!-- Modal Menu de Playlists e Pastas -->
+      <div class="sp-related-modal-overlay" id="sp-playlists-modal-overlay" hidden>
+        <div class="sp-related-modal sp-playlists-menu-modal">
+          <div class="sp-related-modal-header">
+            <div class="sp-related-modal-title-group">
+              <span class="sp-related-modal-title">📁 Minhas Playlists</span>
+              <span class="sp-related-modal-subtitle">Playlists e músicas salvas no seu Papaléguas Music</span>
+            </div>
+            <button class="sp-related-modal-close" id="btn-sp-playlists-modal-close" type="button" title="Fechar menu de playlists">✕</button>
+          </div>
+          <div class="sp-playlists-modal-body">
+            <div class="sp-playlists-modal-toolbar">
+              <button class="sp-create-pl-btn" id="btn-sp-create-playlist" type="button" title="Criar uma nova pasta/playlist vazia">➕ Nova Playlist</button>
+            </div>
+            <div class="sp-favorites-panel" id="sp-favorites-panel"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Modal de Adicionar Músicas Relacionadas -->
+      <div class="sp-related-modal-overlay" id="sp-related-modal-overlay" hidden>
+        <div class="sp-related-modal">
+          <div class="sp-related-modal-header">
+            <div class="sp-related-modal-title-group">
+              <span class="sp-related-modal-title" id="sp-related-modal-title">✨ Músicas Relacionadas</span>
+              <span class="sp-related-modal-subtitle" id="sp-related-modal-subtitle">Adicione novas faixas ao seu repertório</span>
+            </div>
+            <button class="sp-related-modal-close" id="btn-sp-related-modal-close" type="button">✕</button>
+          </div>
+          <div class="sp-related-search-bar">
+            <input type="text" id="sp-related-search-input" placeholder="Pesquisar música ou artista para adicionar..." />
+            <button id="btn-sp-related-search" type="button">Buscar</button>
+          </div>
+          <div class="sp-related-tracks-list" id="sp-related-tracks-list">
+            <div class="sp-related-loading">Buscando músicas relacionadas ao estilo da playlist...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Modal para Definir Capa da Playlist Favorita -->
+      <div class="sp-related-modal-overlay" id="sp-cover-modal-overlay" hidden>
+        <div class="sp-related-modal sp-cover-modal">
+          <div class="sp-related-modal-header">
+            <div class="sp-related-modal-title-group">
+              <span class="sp-related-modal-title" id="sp-cover-modal-title">🖼️ Definir Capa da Playlist</span>
+              <span class="sp-related-modal-subtitle">Escolha uma foto do seu aparelho ou a capa de uma das músicas</span>
+            </div>
+            <button class="sp-related-modal-close" id="btn-sp-cover-modal-close" type="button">✕</button>
+          </div>
+          <div class="sp-cover-modal-body">
+            <div class="sp-cover-current-box">
+              <img id="sp-cover-modal-preview" src="papaleguas_logo.png" alt="Capa atual" />
+              <div class="sp-cover-upload-area">
+                <input type="file" id="sp-cover-file-input" accept="image/*" hidden />
+                <button type="button" class="sp-cover-upload-btn" id="btn-sp-cover-choose-file">
+                  📁 Escolher imagem do computador / celular
+                </button>
+                <span class="sp-cover-hint">Formatos: JPG, PNG, WebP (alta qualidade)</span>
+              </div>
+            </div>
+            <div class="sp-cover-tracks-section">
+              <div class="sp-cover-section-title">Ou escolha a capa de uma música desta playlist:</div>
+              <div class="sp-cover-tracks-grid" id="sp-cover-tracks-grid">
+                <!-- Preenchido via JS com as capas das músicas -->
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Modal: Adicionar Música a uma Playlist ou Criar Nova Pasta -->
+      <div class="sp-related-modal-overlay" id="sp-add-to-playlist-modal-overlay" hidden>
+        <div class="sp-related-modal sp-add-to-playlist-modal">
+          <div class="sp-related-modal-header">
+            <div class="sp-related-modal-title-group">
+              <span class="sp-related-modal-title">📁 Salvar na Playlist</span>
+              <span class="sp-related-modal-subtitle">Escolha onde deseja guardar esta música</span>
+            </div>
+            <button class="sp-related-modal-close" id="btn-sp-add-modal-close" type="button" title="Fechar">✕</button>
+          </div>
+          <div class="sp-add-modal-body">
+            <!-- Card da Música Selecionada -->
+            <div class="sp-add-modal-track-info">
+              <img id="sp-add-modal-track-thumb" class="sp-add-modal-thumb" src="papaleguas_logo.png" alt="" />
+              <div class="sp-add-modal-track-meta">
+                <span class="sp-add-modal-track-title" id="sp-add-modal-track-title">Nome da Música</span>
+                <span class="sp-add-modal-track-artist" id="sp-add-modal-track-artist">Artista</span>
+              </div>
+            </div>
+
+            <!-- Opção 1: Criar Nova Pasta / Playlist -->
+            <div class="sp-add-modal-create-section">
+              <div class="sp-add-modal-section-title">➕ Criar Nova Pasta / Playlist:</div>
+              <form class="sp-add-modal-create-form" id="sp-add-modal-create-form" onsubmit="return false;">
+                <input type="text" id="sp-add-modal-new-input" placeholder="Digite o nome da nova pasta..." autocomplete="off" />
+                <button type="submit" id="btn-sp-add-modal-create">Criar e Salvar</button>
+              </form>
+            </div>
+
+            <!-- Opção 2: Suas Pastas Existentes -->
+            <div class="sp-add-modal-existing-section">
+              <div class="sp-add-modal-section-title">📂 Ou selecione uma pasta existente:</div>
+              <div class="sp-add-modal-pl-list" id="sp-add-modal-pl-list">
+                <!-- Preenchido dinamicamente via JS -->
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Modal: Renomear Playlist -->
+      <div class="sp-related-modal-overlay" id="sp-rename-modal-overlay" hidden>
+        <div class="sp-related-modal sp-add-to-playlist-modal" style="max-width: 440px;">
+          <div class="sp-related-modal-header">
+            <div class="sp-related-modal-title-group">
+              <span class="sp-related-modal-title">✏️ Renomear Playlist</span>
+              <span class="sp-related-modal-subtitle">Altere o nome da playlist e da sua pasta</span>
+            </div>
+            <button class="sp-related-modal-close" id="btn-sp-rename-modal-close" type="button" title="Fechar">✕</button>
+          </div>
+          <div class="sp-add-modal-body" style="padding: 20px;">
+            <form id="sp-rename-form" onsubmit="return false;">
+              <label style="display:block; font-size:12px; font-weight:700; color:#94a3b8; margin-bottom:6px;">Novo Nome da Playlist:</label>
+              <input type="text" id="sp-rename-input" style="width:100%; box-sizing:border-box; background:#1e293b; border:1px solid #334155; color:#fff; padding:10px 14px; border-radius:10px; font-size:14px; outline:none; margin-bottom:16px;" placeholder="Digite o novo nome..." />
+              <div style="display:flex; justify-content:flex-end; gap:8px;">
+                <button type="button" id="btn-sp-rename-cancel" style="background:#334155; border:0; color:#cbd5e1; padding:8px 16px; border-radius:8px; font-weight:600; cursor:pointer;">Cancelar</button>
+                <button type="submit" id="btn-sp-rename-save" style="background:#fbbf24; border:0; color:#0f172a; padding:8px 18px; border-radius:8px; font-weight:700; cursor:pointer;">✓ Salvar Nome</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+
+
+      <!-- Expanded Player Overlay -->
+      <div class="sp-expanded-player hidden" id="sp-expanded-player">
+        <div class="sp-expanded-bg" id="sp-expanded-bg"></div>
+        <div class="sp-expanded-content">
+          <div class="sp-expanded-top">
+            <button class="sp-expanded-close" id="btn-sp-expanded-close" type="button" title="Minimizar para o Mini Player">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
+            <div class="sp-expanded-header-title">Tocando Agora</div>
+            <div class="sp-expanded-top-actions">
+              <button class="sp-expanded-btn-action" id="btn-sp-expanded-pip" type="button" title="Picture-in-Picture">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><rect x="12" y="12" width="8" height="6" rx="1" fill="currentColor" stroke="none"/></svg>
+              </button>
+              <button class="sp-expanded-btn-action" id="btn-sp-expanded-bubble" type="button" title="Minimizar em bolha flutuante">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/></svg>
+              </button>
+            </div>
+          </div>
+          
+          <div class="sp-expanded-art-wrapper">
+            <img class="sp-expanded-art" id="sp-expanded-art" src="papaleguas_logo.png" alt="Capa" onerror="this.src='/papaleguas_logo.png'" />
+          </div>
+
+          <div class="sp-expanded-info">
+            <div class="sp-expanded-title" id="sp-expanded-title">--</div>
+            <div class="sp-expanded-artist" id="sp-expanded-artist">--</div>
+          </div>
+
+          <div class="sp-expanded-progress">
+            <div class="sp-expanded-progress-bar-container" id="sp-expanded-progress-bar-container">
+              <div class="sp-expanded-progress-bg">
+                <div class="sp-expanded-progress-fill" id="sp-expanded-progress-fill"></div>
+                <div class="sp-expanded-progress-thumb" id="sp-expanded-progress-thumb"></div>
+              </div>
+            </div>
+            <div class="sp-expanded-time-row">
+              <span id="sp-expanded-time-cur">0:00</span>
+              <span id="sp-expanded-time-dur">0:00</span>
+            </div>
+          </div>
+
+          <div class="sp-expanded-controls">
+            <button class="sp-ctrl-btn" id="btn-sp-expanded-shuffle">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
+            </button>
+            <button class="sp-ctrl-btn" id="btn-sp-expanded-prev">
+              <svg width="36" height="36" viewBox="0 0 24 24" fill="currentColor"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5" stroke="currentColor" stroke-width="2"/></svg>
+            </button>
+            <button class="sp-play-main-btn" id="btn-sp-expanded-play" style="width:72px; height:72px; background:#1ed760; color:#000; border-radius:50%; border:0; display:flex; align-items:center; justify-content:center; cursor:pointer;">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor" id="sp-expanded-play-icon"><path d="M8 5v14l11-7z"/></svg>
+            </button>
+            <button class="sp-ctrl-btn" id="btn-sp-expanded-next">
+              <svg width="36" height="36" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19" stroke="currentColor" stroke-width="2"/></svg>
+            </button>
+            <button class="sp-ctrl-btn" id="btn-sp-expanded-repeat">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Modal: Editar Informações da Música -->
+      <div class="sp-related-modal-overlay" id="sp-edit-track-modal-overlay" hidden>
+        <div class="sp-related-modal sp-add-to-playlist-modal" style="max-width: 460px;">
+          <div class="sp-related-modal-header">
+            <div class="sp-related-modal-title-group">
+              <span class="sp-related-modal-title">✏️ Editar Música</span>
+              <span class="sp-related-modal-subtitle">Modifique o título e o nome do artista</span>
+            </div>
+            <button class="sp-related-modal-close" id="btn-sp-edit-track-close" type="button" title="Fechar">✕</button>
+          </div>
+          <div class="sp-add-modal-body" style="padding: 20px;">
+            <form id="sp-edit-track-form" onsubmit="return false;">
+              <label style="display:block; font-size:12px; font-weight:700; color:#94a3b8; margin-bottom:6px;">Título da Música:</label>
+              <input type="text" id="sp-edit-track-title-input" style="width:100%; box-sizing:border-box; background:#1e293b; border:1px solid #334155; color:#fff; padding:10px 14px; border-radius:10px; font-size:14px; outline:none; margin-bottom:12px;" placeholder="Nome da música..." />
+              <label style="display:block; font-size:12px; font-weight:700; color:#94a3b8; margin-bottom:6px;">Artista / Cantor(a):</label>
+              <input type="text" id="sp-edit-track-artist-input" style="width:100%; box-sizing:border-box; background:#1e293b; border:1px solid #334155; color:#fff; padding:10px 14px; border-radius:10px; font-size:14px; outline:none; margin-bottom:18px;" placeholder="Nome do artista..." />
+              <div style="display:flex; justify-content:flex-end; gap:8px;">
+                <button type="button" id="btn-sp-edit-track-cancel" style="background:#334155; border:0; color:#cbd5e1; padding:8px 16px; border-radius:8px; font-weight:600; cursor:pointer;">Cancelar</button>
+                <button type="submit" id="btn-sp-edit-track-save" style="background:#1ed760; border:0; color:#040d12; padding:8px 18px; border-radius:8px; font-weight:700; cursor:pointer;">✓ Salvar</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="auto-update.js?v=19"></script>
+  <script src="musica.js?v=19"></script>
+</body>
+</html>

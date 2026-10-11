@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover">
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-5788322050130808"
+     crossorigin="anonymous"></script>
+  <meta name="theme-color" content="#07090e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Papaléguas • Painel Administrativo VIP</title>
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png?v=4">
+  <link rel="apple-touch-icon" sizes="192x192" href="/icon-192.png?v=4">
+  <link rel="stylesheet" href="/papaleguas/admin.css">
+</head>
+<body>
+
+  <!-- Barra Superior Fixa e Responsiva -->
+  <header class="admin-header" id="admin-header">
+    <div class="admin-header-top">
+      <a href="/papaleguas" class="brand-box">
+        <img src="/icon-192.png?v=4" alt="Papaléguas" class="brand-logo" style="width:38px;height:38px;border-radius:50%;object-fit:cover;box-shadow:0 0 12px rgba(56,189,248,0.5);border:1px solid rgba(56,189,248,0.3);" />
+        <div class="brand-info">
+          <div class="brand-title">PAPALÉGUAS ADMIN</div>
+          <div class="brand-subtitle">Relatório de Tráfego & Aceitação</div>
+        </div>
+      </a>
+
+      <!-- Ações rápidas visíveis no topo mobile -->
+      <div class="header-mobile-controls">
+        <div class="status-indicator">
+          <span class="status-dot"></span>
+          <span class="status-text">Ativo</span>
+        </div>
+        <button type="button" class="btn-header btn-header-compact" onclick="loadMetrics(true)" title="Atualizar Métricas Agora">🔄</button>
+        <button type="button" class="btn-mobile-toggle" id="btn-mobile-menu" onclick="toggleMobileMenu(event)" aria-label="Abrir Menu de Ações" title="Menu de Ações">
+          <span class="hamburger-bar"></span>
+          <span class="hamburger-bar"></span>
+          <span class="hamburger-bar"></span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Painel de Ações / Gaveta Mobile & Desktop Bar -->
+    <div class="admin-header-actions" id="admin-header-actions">
+      <!-- Configuração de Intervalo de Atualização (5 min até 24h) -->
+      <div class="refresh-interval-container" id="refresh-interval-container">
+        <label for="refresh-interval-select" class="refresh-label" title="Intervalo de atualização automática das métricas">
+          <span class="refresh-clock-icon">⏱️</span>
+          <span class="refresh-label-text">Auto-Atualizar:</span>
+        </label>
+        <select id="refresh-interval-select" class="refresh-select" title="Escolha a frequência de atualização das métricas">
+          <option value="3000" selected>⚡ Tempo Real (3s)</option>
+          <option value="5000">⚡ Tempo Real (5s)</option>
+          <option value="10000">A cada 10s</option>
+          <option value="30000">A cada 30s</option>
+          <option value="60000">A cada 1 min</option>
+          <option value="300000">A cada 5 min</option>
+          <option value="600000">A cada 10 min</option>
+          <option value="900000">A cada 15 min</option>
+          <option value="1800000">A cada 30 min</option>
+          <option value="3600000">A cada 1 hora</option>
+          <option value="7200000">A cada 2 horas</option>
+          <option value="14400000">A cada 4 horas</option>
+          <option value="21600000">A cada 6 horas</option>
+          <option value="43200000">A cada 12 horas</option>
+          <option value="86400000">A cada 24 horas</option>
+          <option value="0">Desativado (Manual)</option>
+        </select>
+        <div class="refresh-countdown-box" id="refresh-countdown-box" title="Tempo restante até a próxima atualização automática">
+          <span class="countdown-spinner"></span>
+          <span id="refresh-countdown-text">0:03</span>
+        </div>
+      </div>
+
+      <!-- Caixa Seletora: Pausar/Ativar Logs do Terminal do Servidor -->
+      <div class="server-logs-container" id="server-logs-container">
+        <label for="server-logs-select" class="refresh-label" title="Pausar ou ativar a exibição de logs e prints no terminal do servidor Node.js">
+          <span class="refresh-clock-icon">🖥️</span>
+          <span class="refresh-label-text">Logs Terminal:</span>
+        </label>
+        <select id="server-logs-select" class="refresh-select" onchange="handleServerLogsSelect(this.value)" title="Pausar ou ativar mensagens no terminal do servidor">
+          <option value="enabled" selected>🟢 Ativos</option>
+          <option value="paused">⏸️ Pausados</option>
+        </select>
+      </div>
+
+      <!-- Indicador e Link do ngrok Fixo Ativo -->
+      <div class="ngrok-tunnel-container" id="ngrok-tunnel-container" style="display: none;">
+        <span class="ngrok-pulse" title="Túnel ngrok Fixo Conectado"></span>
+        <span class="ngrok-icon">🚀</span>
+        <a id="ngrok-tunnel-link" class="ngrok-link" href="#" title="Abrir no Papaléguas via ngrok">
+          <span id="ngrok-tunnel-url-text">ngrok Ativo</span>
+        </a>
+        <button type="button" class="btn-copy-cf" onclick="copyNgrokUrl(event)" title="Copiar URL pública do ngrok">📋</button>
+      </div>
+
+
+
+      <button type="button" class="btn-header btn-tracking" id="btn-toggle-tracking" onclick="toggleTracking()" title="Clique para pausar ou retomar o registro de requisições e logs">
+        <span class="tracking-dot" id="tracking-status-dot"></span>
+        <span id="tracking-status-text">Registro Ativo</span>
+      </button>
+
+      <button type="button" class="btn-header btn-tor connected" id="btn-toggle-admin-tor" onclick="toggleAdminTor()" title="Desconecta a saída da rede Tor e volta para a internet direta">
+        <span class="tracking-dot" id="admin-tor-dot"></span>
+        <span id="admin-tor-text">Desconectar Tor</span>
+      </button>
+
+      <button type="button" class="btn-header btn-header-danger" id="btn-clear-data" onclick="promptClearAllData()" title="Excluir todos os registros gravados de log e requisições (começar do 0)">
+        🗑️ Zerar Dados (0)
+      </button>
+
+      <button class="btn-header btn-desktop-refresh" id="btn-manual-refresh" onclick="loadMetrics(true)" title="Atualizar Métricas Agora">🔄 Atualizar</button>
+      <button class="btn-header" onclick="exportDataJson()" title="Exportar Relatório em JSON">💾 Exportar</button>
+      <button class="btn-header btn-logout" onclick="handleLogout()" title="Sair do Painel">🚪 Sair</button>
+    </div>
+  </header>
+
+  <!-- ============================================== -->
+  <!-- TELA 1: SETUP INICIAL (CRIAR CONTA ADMIN)      -->
+  <!-- ============================================== -->
+  <main class="auth-container" id="screen-setup" style="display: none;">
+    <div class="auth-card">
+      <div class="auth-header">
+        <div class="auth-icon">👑</div>
+        <h1 class="auth-title">Criar Conta Master</h1>
+        <p class="auth-subtitle">Configure o acesso do Administrador Papaléguas</p>
+      </div>
+
+      <div class="auth-alert" id="alert-setup"></div>
+
+      <form class="auth-form" id="form-setup">
+        <div class="form-group">
+          <label class="form-label" for="setup-user">Usuário Administrador</label>
+          <input type="text" id="setup-user" class="form-input" placeholder="Ex: admin ou seu nome" required autocomplete="username">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="setup-pass">Senha Master</label>
+          <input type="password" id="setup-pass" class="form-input" placeholder="Mínimo 4 caracteres" required autocomplete="new-password">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="setup-pass-confirm">Confirmar Senha</label>
+          <input type="password" id="setup-pass-confirm" class="form-input" placeholder="Repita a senha" required autocomplete="new-password">
+        </div>
+
+        <button type="submit" class="btn-submit">🚀 Criar Administrador & Acessar</button>
+      </form>
+    </div>
+  </main>
+
+  <!-- ============================================== -->
+  <!-- TELA 2: LOGIN DO ADMINISTRADOR                 -->
+  <!-- ============================================== -->
+  <main class="auth-container" id="screen-login" style="display: none;">
+    <div class="auth-card auth-card-clean">
+      <div class="auth-logo-center">
+        <div class="auth-icon-logo">⚡</div>
+        <div class="auth-logo-text">PAPALÉGUAS</div>
+      </div>
+
+      <div class="auth-alert" id="alert-login"></div>
+
+      <form class="auth-form" id="form-login">
+        <div class="form-input-wrap">
+          <span class="form-input-icon">👤</span>
+          <input type="text" id="login-user" class="form-input" placeholder="Usuário" required autocomplete="username">
+        </div>
+
+        <div class="form-input-wrap">
+          <span class="form-input-icon">🔒</span>
+          <input type="password" id="login-pass" class="form-input" placeholder="Senha" required autocomplete="current-password">
+        </div>
+
+        <button type="submit" class="btn-submit">Entrar</button>
+      </form>
+    </div>
+  </main>
+
+  <!-- ============================================== -->
+  <!-- TELA 3: DASHBOARD PRINCIPAL COM MÉTRICAS       -->
+  <!-- ============================================== -->
+  <main class="admin-main" id="screen-dashboard">
+
+    <!-- Saudação e Admin Conectado -->
+    <div class="dashboard-welcome">
+      <div class="welcome-text-wrap">
+        <h1 class="welcome-title">Painel de Controle em Tempo Real</h1>
+        <p class="welcome-subtitle">Conectado como <b id="admin-username-display" class="admin-username-tag">Admin</b> • Monitorando tráfego do túnel e rede local</p>
+      </div>
+      <div class="welcome-portal-buttons">
+        <a href="/filmes" class="btn-header btn-portal" style="text-decoration:none;" onclick="event.preventDefault(); var u=this.getAttribute('href'); try { if (window.parent && window.parent !== window) { window.parent.postMessage({ type: 'navigate-current-tab', url: u }, '*'); return; } } catch (e) {} location.href=u;">🍿 Abrir Filmes</a>
+        <a href="/youtube" class="btn-header btn-portal" style="text-decoration:none;" onclick="event.preventDefault(); var u=this.getAttribute('href'); try { if (window.parent && window.parent !== window) { window.parent.postMessage({ type: 'navigate-current-tab', url: u }, '*'); return; } } catch (e) {} location.href=u;">📺 Abrir BaixaTube</a>
+      </div>
+    </div>
+
+    <!-- Banner de Alerta quando o Registro de Requisições estiver Pausado -->
+    <div class="tracking-paused-banner" id="tracking-paused-banner" style="display: none;">
+      <div class="paused-banner-left">
+        <span class="paused-banner-icon">⏸️</span>
+        <div>
+          <div class="paused-banner-title">O Registro de Logs e Requisições está PAUSADO</div>
+          <div class="paused-banner-sub">Nenhum novo acesso, requisição ou dispositivo está sendo gravado nas estatísticas.</div>
+        </div>
+      </div>
+      <button type="button" class="btn-resume-tracking" onclick="toggleTracking()">▶️ Retomar Registro</button>
+    </div>
+
+    <!-- Card de Links de Conexão Externa (ngrok Fixo, Cloudflare e Wi-Fi Local) -->
+    <div class="tunnel-links-dashboard-card" id="tunnel-links-dashboard-card">
+      <div class="tunnel-links-header">
+        <div class="tunnel-links-title">
+          <span style="font-size:18px;">🌐</span>
+          <strong>Links de Acesso Remoto & Celular</strong>
+        </div>
+        <span class="tunnel-links-badge-status" id="tunnel-links-badge-status">Conexões Ativas</span>
+      </div>
+      <div class="tunnel-links-grid">
+        <!-- Item Ngrok Fixo -->
+        <div class="tunnel-link-item highlight-ngrok">
+          <div class="tunnel-link-item-top">
+            <span class="tli-tag tag-fixed">DNS FIXO PERMANENTE</span>
+            <span class="tli-service">🚀 ngrok</span>
+          </div>
+          <a id="dash-ngrok-link" class="tli-url" href="https://papaleguas.ngrok.app" target="_blank">https://papaleguas.ngrok.app</a>
+          <div class="tli-actions">
+            <button type="button" class="btn-tli-copy" onclick="copyNgrokUrl(event)">📋 Copiar Link Fixo</button>
+            <a id="dash-ngrok-btn-open" class="btn-tli-open" href="https://papaleguas.ngrok.app" target="_blank">🔗 Abrir</a>
+          </div>
+        </div>
+
+
+
+        <!-- Item Rede Local -->
+        <div class="tunnel-link-item">
+          <div class="tunnel-link-item-top">
+            <span class="tli-tag tag-lan">REDE LOCAL / WI-FI</span>
+            <span class="tli-service">🏠 Wi-Fi Local</span>
+          </div>
+          <a id="dash-lan-link" class="tli-url" href="http://192.168.1.35:8080" target="_blank">http://192.168.1.35:8080</a>
+          <div class="tli-actions">
+            <button type="button" class="btn-tli-copy" onclick="copyLanUrl(event)">📋 Copiar IP Wi-Fi</button>
+            <a id="dash-lan-btn-open" class="btn-tli-open" href="http://192.168.1.35:8080" target="_blank">🔗 Abrir</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Cards de KPIs Principais -->
+    <section class="kpi-grid">
+      <div class="kpi-card highlight-online">
+        <div class="kpi-icon-box" style="background: rgba(16, 185, 129, 0.15); color: #10b981;">🟢</div>
+        <div>
+          <div class="kpi-value" id="kpi-online-ips" style="color: #10b981;">0</div>
+          <div class="kpi-label">IPs Conectados Agora</div>
+        </div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-icon-box" style="background: rgba(0, 240, 255, 0.12); color: #00f0ff;">👁️</div>
+        <div>
+          <div class="kpi-value" id="kpi-total-visits">0</div>
+          <div class="kpi-label">Total de Visitas</div>
+        </div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-icon-box" style="background: rgba(245, 158, 11, 0.12); color: #f59e0b;">🌍</div>
+        <div>
+          <div class="kpi-value" id="kpi-unique-ips">0</div>
+          <div class="kpi-label">IPs Únicos Gravados</div>
+        </div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-icon-box" style="background: rgba(236, 72, 153, 0.12); color: #ec4899;">🔄</div>
+        <div>
+          <div class="kpi-value" id="kpi-retention">0%</div>
+          <div class="kpi-label">Taxa de Retenção</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Seção de Evolução & Métrica de Aceitação -->
+    <section class="metrics-section">
+      <!-- Termômetro de Aceitação -->
+      <div class="dashboard-box">
+        <div class="box-header">
+          <h2 class="box-title">🏆 Aceitação do Público</h2>
+          <span style="font-size:11px;color:var(--text-muted);">Índice Composto</span>
+        </div>
+
+        <div class="acceptance-display">
+          <div class="gauge-circle" id="acceptance-gauge">
+            <div class="gauge-inner">
+              <span class="gauge-percent" id="acceptance-percent">0%</span>
+              <span class="gauge-unit">Score de Aceitação</span>
+            </div>
+          </div>
+          <div class="acceptance-badge" id="acceptance-badge">Calculando...</div>
+          <p class="acceptance-desc" id="acceptance-desc">Acompanhando visitantes recorrentes, downloads e tempo de uso.</p>
+        </div>
+      </div>
+
+      <!-- Gráfico de Evolução dos Últimos 7 Dias -->
+      <div class="dashboard-box">
+        <div class="box-header">
+          <h2 class="box-title">📈 Evolução de Tráfego (7 Dias)</h2>
+          <span style="font-size:11px;color:var(--text-muted);">Acessos diários</span>
+        </div>
+
+        <div class="evolution-chart-wrap" id="evolution-chart">
+          <!-- Gerado dinamicamente via JS -->
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted);padding-top:4px;">
+          <span>7 dias atrás</span>
+          <span style="color:var(--primary);font-weight:700;">Hoje (Tempo Real)</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Relatório Detalhado de IPs e Localização -->
+    <section class="dashboard-box">
+      <div class="box-header">
+        <div>
+          <h2 class="box-title">📍 Relatório de IPs e Geolocalização</h2>
+          <span style="font-size:11px;color:var(--text-muted);">Origem geográfica e URLs completas acessadas por cada IP</span>
+        </div>
+      </div>
+
+      <!-- Barra de Filtros e Busca de IPs e URLs -->
+      <div class="ip-filter-toolbar">
+        <div class="ip-filter-buttons" id="ip-filter-buttons">
+          <button type="button" class="ip-filter-btn active" data-filter="all">
+            <span>🌍 Todos os IPs</span>
+            <span class="filter-count" id="count-all">0</span>
+          </button>
+          <button type="button" class="ip-filter-btn" data-filter="online">
+            <span>🟢 Conectados Agora</span>
+            <span class="filter-count" id="count-online" style="background:#10b981;color:#020617;">0</span>
+          </button>
+          <button type="button" class="ip-filter-btn" data-filter="external">
+            <span>⚡ Rede Externa</span>
+            <span class="filter-count" id="count-external">0</span>
+          </button>
+          <button type="button" class="ip-filter-btn" data-filter="local">
+            <span>🏠 Wi-Fi / Local</span>
+            <span class="filter-count" id="count-local">0</span>
+          </button>
+          <button type="button" class="ip-filter-btn" data-filter="ipv4">
+            <span>🌐 Somente IPv4</span>
+            <span class="filter-count" id="count-ipv4">0</span>
+          </button>
+          <button type="button" class="ip-filter-btn" data-filter="ipv6">
+            <span>🟣 Somente IPv6</span>
+            <span class="filter-count" id="count-ipv6">0</span>
+          </button>
+        </div>
+
+        <div class="ip-search-wrap">
+          <span class="ip-search-icon">🔍</span>
+          <input type="text" id="ip-search-input" class="ip-search-input" placeholder="Filtrar por IP, país, cidade, provedor ou aparelho...">
+          <button type="button" id="ip-search-clear" class="ip-search-clear" title="Limpar busca" style="display:none;">✕</button>
+        </div>
+      </div>
+
+      <div class="table-responsive">
+        <table class="ip-table">
+          <thead>
+            <tr>
+              <th>Status & IP Conectado</th>
+              <th>Origem & Localização</th>
+              <th>Dispositivo / Aparelho</th>
+              <th>Total de Acessos</th>
+              <th>Downloads</th>
+              <th>Última Conexão</th>
+            </tr>
+          </thead>
+          <tbody id="ip-table-body">
+            <!-- Linhas inseridas via admin.js -->
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Modal de Confirmação para Zerar Dados -->
+  <div class="modal-backdrop" id="modal-clear-data" style="display: none;">
+    <div class="modal-dialog">
+      <div class="modal-icon-wrap danger">
+        <span>⚠️</span>
+      </div>
+      <h2 class="modal-title">Zerar Todos os Dados e Logs?</h2>
+      <p class="modal-text">
+        Esta ação irá <b>excluir permanentemente</b> todo o histórico de acessos, estatísticas de IPs, contadores de visitas, requisições gravadas e arquivos de log.
+      </p>
+      <div class="modal-warning-box">
+        <b>🚨 Atenção:</b> Todos os contadores e listas voltarão imediatamente para <b>ZERO (0)</b>. Esta operação não pode ser revertida.
+      </div>
+      <div class="modal-buttons">
+        <button type="button" class="btn-modal-cancel" onclick="closeClearModal()">Cancelar</button>
+        <button type="button" class="btn-modal-danger" id="btn-confirm-clear" onclick="executeClearAllData()">
+          🗑️ Sim, Zerar Tudo (Começar do 0)
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Notificação Flutuante Toast -->
+  <div id="admin-toast" class="admin-toast" style="display: none;"></div>
+
+  <footer class="admin-footer">
+    Papaléguas Inteligência e Mídia • Monitoramento Ativo com Geolocalização
+  </footer>
+
+  <script src="/papaleguas/admin.js"></script>
+</body>
+</html>

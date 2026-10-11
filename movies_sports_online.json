@@ -1,0 +1,66 @@
+[
+  [
+    "Band Sports (720p)",
+    "http://45.162.64.114/BAND_SPORTS/index.m3u8"
+  ],
+  [
+    "Band Sports (720p)",
+    "http://170.83.16.50/BAND_SPORTS/index.m3u8"
+  ],
+  [
+    "Band Sports (720p)",
+    "http://170.83.49.66:8083/BANDSPORTSHD/index.m3u8"
+  ],
+  [
+    "ESPN (1080p)",
+    "http://181.78.197.59:8000/play/a07z/index.m3u8"
+  ],
+  [
+    "ESPN 3 (720p)",
+    "http://181.78.197.59:8000/play/a081/index.m3u8"
+  ],
+  [
+    "ESPN 4 (1080p)",
+    "http://181.78.197.59:8000/play/a07n/index.m3u8"
+  ],
+  [
+    "Gospel Movie TV (360p)",
+    "https://stmv1.srvif.com/gospelf/gospelf/playlist.m3u8"
+  ],
+  [
+    "Kuriakos Cine (1080p)",
+    "https://w2.manasat.com/kcine/smil:kcine.smil/playlist.m3u8"
+  ],
+  [
+    "N Sports (1080p)",
+    "https://ogc-nsprt-tcl-roku-syndication.otteravision.com/ogc/nsprt/nsprt.m3u8"
+  ],
+  [
+    "Sony Channel (720p)",
+    "http://170.83.16.50/SONY_CHANNEL/index.m3u8"
+  ],
+  [
+    "Sony Movies (720p)",
+    "http://45.162.64.114/SONY_MOVIES/index.m3u8"
+  ],
+  [
+    "Sony Movies (720p)",
+    "http://45.177.114.115/SONY_MOVIES/index.m3u8"
+  ],
+  [
+    "Sony Movies (720p)",
+    "http://168.197.104.22/SONY_MOVIES/index.m3u8"
+  ],
+  [
+    "Sony Movies (720p)",
+    "http://170.83.16.50/SONY_MOVIES/index.m3u8"
+  ],
+  [
+    "SporTV 3 (720p)",
+    "http://170.83.49.66:8083/SPORTV3HD/index.m3u8"
+  ],
+  [
+    "TV Universal (480p)",
+    "https://644398c.ha.azioncdn.net/primary/tvuniversal_480p.sdp/playlist.m3u8"
+  ]
+]

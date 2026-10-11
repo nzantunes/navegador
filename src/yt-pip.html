@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mini player • Papaléguas</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #070b14;
+      font-family: Outfit, Inter, system-ui, sans-serif;
+      color: #fff;
+      border-radius: 14px;
+    }
+    .pip {
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      height: 100%;
+      background: #0b1220;
+      border: 1px solid rgba(255,255,255,0.14);
+      box-sizing: border-box;
+    }
+    .pip-chrome {
+      height: 30px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 8px 0 10px;
+      background: linear-gradient(180deg, rgba(239, 68, 68, 0.28), rgba(15, 23, 42, 0.98));
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      -webkit-app-region: drag;
+      user-select: none;
+      flex-shrink: 0;
+    }
+    .pip-title {
+      font-size: 11px;
+      font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex: 1;
+      min-width: 0;
+    }
+    .pip-actions {
+      display: flex;
+      gap: 4px;
+      -webkit-app-region: no-drag;
+      flex-shrink: 0;
+    }
+    .pip-btn {
+      background: rgba(255, 255, 255, 0.08);
+      border: none;
+      color: #e2e8f0;
+      width: 22px;
+      height: 22px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+      line-height: 1;
+    }
+    .pip-btn:hover { background: rgba(255, 255, 255, 0.2); color: #fff; }
+    .pip-btn.close:hover { background: rgba(239, 68, 68, 0.9); }
+    .pip-stage {
+      position: relative;
+      flex: 1;
+      background: #000;
+      min-height: 0;
+    }
+    .pip-stage iframe, .pip-thumb {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border: none;
+      object-fit: cover;
+    }
+    .pip-thumb { z-index: 0; }
+    iframe { z-index: 1; background: transparent; }
+  </style>
+</head>
+<body>
+  <div class="pip">
+    <div class="pip-chrome">
+      <div class="pip-title" id="pip-title">BaixaTube</div>
+      <div class="pip-actions">
+        <button class="pip-btn" id="btn-restore" title="Voltar ao navegador">▢</button>
+        <button class="pip-btn close" id="btn-close" title="Fechar">✕</button>
+      </div>
+    </div>
+    <div class="pip-stage">
+      <img class="pip-thumb" id="pip-thumb" alt="Miniatura do vídeo">
+      <iframe id="pip-iframe" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen></iframe>
+    </div>
+  </div>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const videoId = params.get('v') || '';
+    const start = parseInt(params.get('t') || '0', 10) || 0;
+    const title = params.get('title') || 'BaixaTube';
+    const origin = (location.origin && location.origin.indexOf('http') === 0) ? location.origin : 'http://127.0.0.1:8080';
+    document.getElementById('pip-title').textContent = title;
+    document.title = title;
+    const iframe = document.getElementById('pip-iframe');
+    if (videoId) {
+      document.getElementById('pip-thumb').src = 'https://i.ytimg.com/vi/' + encodeURIComponent(videoId) + '/hqdefault.jpg';
+      iframe.src = 'https://www.youtube.com/embed/' + encodeURIComponent(videoId) +
+        '?autoplay=1&start=' + start + '&enablejsapi=1&playsinline=1&rel=0&origin=' +
+        encodeURIComponent(origin) + '&widget_referrer=' + encodeURIComponent(origin);
+    }
+    function pipCommand(func) {
+      try {
+        iframe.contentWindow.postMessage(JSON.stringify({ event: 'command', func: func, args: '' }), '*');
+      } catch (e) {}
+    }
+    iframe.addEventListener('load', () => {
+      setTimeout(() => pipCommand('playVideo'), 400);
+      setTimeout(() => pipCommand('playVideo'), 1400);
+    });
+    if ('mediaSession' in navigator && videoId) {
+      try {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: title,
+          artist: 'Papaléguas BaixaTube',
+          album: 'Papaléguas Navegador',
+          artwork: [
+            { src: 'https://i.ytimg.com/vi/' + encodeURIComponent(videoId) + '/hqdefault.jpg', sizes: '480x360', type: 'image/jpeg' }
+          ]
+        });
+        navigator.mediaSession.playbackState = 'playing';
+        navigator.mediaSession.setActionHandler('play', () => { pipCommand('playVideo'); navigator.mediaSession.playbackState = 'playing'; });
+        navigator.mediaSession.setActionHandler('pause', () => { pipCommand('pauseVideo'); navigator.mediaSession.playbackState = 'paused'; });
+      } catch (e) {}
+    }
+    document.getElementById('btn-restore').onclick = () => {
+      if (window.torBrowserAPI && window.torBrowserAPI.restoreMainFromPip) {
+        window.torBrowserAPI.restoreMainFromPip();
+      }
+    };
+    document.getElementById('btn-close').onclick = () => {
+      if (window.torBrowserAPI && window.torBrowserAPI.closePipAndQuit) {
+        window.torBrowserAPI.closePipAndQuit();
+      } else {
+        window.close();
+      }
+    };
+  </script>
+</body>
+</html>

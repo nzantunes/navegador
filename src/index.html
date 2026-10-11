@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Papaléguas - Navegador Privado, Filmes Online e Músicas</title>
+  <meta name="description" content="Papaléguas Browser - Navegador privado com streaming de filmes online, músicas sem anúncios e download direto de vídeos em alta velocidade.">
+  <meta name="keywords" content="papaleguas, navegador privado, filmes online, assistir filmes, musicas gratis, download de videos, baixa tube">
+  <meta name="robots" content="index, follow">
+  <link rel="canonical" href="https://papaleguas.ngrok.app/">
+  <meta name="google-site-verification" content="SJH0DPmzrPqP6IQsWjyW-z1b_rAyECfY8s3XKWeyiD0" />
+  <meta name="google-site-verification" content="google4acffdc77e16ecda" />
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-5788322050130808"
+     crossorigin="anonymous"></script>
+  <meta property="og:title" content="Papaléguas - Navegador Privado, Filmes Online e Músicas">
+  <meta property="og:description" content="Navegador privado com streaming de filmes online, músicas sem anúncios e download direto de vídeos.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://papaleguas.ngrok.app/">
+  <meta property="og:image" content="https://papaleguas.ngrok.app/icon-512.png">
+  <meta name="theme-color" content="#0b0d14">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Papaléguas">
+  <meta name="ngrok-skip-browser-warning" content="1">
+  <meta name="papaleguas-version" content="2026.10.11-v19">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" type="image/x-icon" href="favicon.ico">
+  <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png?v=4">
+  <link rel="icon" type="image/png" sizes="512x512" href="icon-512.png?v=4">
+  <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png?v=4">
+  <link rel="apple-touch-icon" sizes="512x512" href="icon-512.png?v=4">
+  <script>
+    try {
+      document.cookie = 'ngrok-skip-browser-warning=1; path=/; max-age=31536000; SameSite=Lax';
+      document.cookie = 'ngrok-skip-browser-warning=true; path=/; max-age=31536000; SameSite=Lax';
+    } catch (e) {}
+  </script>
+
+  <script>
+    (function () {
+      var ua = navigator.userAgent || '';
+      var uaMobile = !!(navigator.userAgentData && navigator.userAgentData.mobile);
+      var isElectron = /Electron/i.test(ua);
+      var isInstalled = false;
+      try {
+        isInstalled = localStorage.getItem('papaleguas_app_installed') === 'true';
+      } catch (e) {}
+      var standalone = isInstalled || (window.matchMedia && (window.matchMedia('(display-mode: standalone)').matches || window.matchMedia('(display-mode: fullscreen)').matches || window.matchMedia('(display-mode: minimal-ui)').matches)) || window.navigator.standalone === true || (document.referrer && document.referrer.includes('android-app://'));
+      var host = (location.hostname || '').toLowerCase();
+      var onTunnel = host.indexOf('trycloudflare.com') !== -1 || host.indexOf('cfargotunnel.com') !== -1;
+      var isPhone = !isElectron && (uaMobile || /Android.+Mobile|iPhone|iPod|Opera Mini|IEMobile|webOS|BlackBerry/i.test(ua) || (/iPad|Android/i.test(ua) && Math.min(screen.width || 1200, innerWidth || 1200) <= 900));
+      var root = document.documentElement;
+      root.classList.add(isPhone ? 'client-phone' : 'client-pc');
+      root.classList.add(isElectron ? 'client-electron' : 'client-hosted');
+      if (standalone) {
+        root.classList.add('client-standalone', 'app-installed');
+        root.setAttribute('data-app-installed', 'true');
+        try { localStorage.setItem('papaleguas_app_installed', 'true'); } catch (e) {}
+      }
+      if (onTunnel) root.classList.add('client-on-tunnel');
+
+      if (isPhone) {
+        var isLandscape = (window.innerWidth > window.innerHeight) || (screen.orientation && String(screen.orientation.type || '').indexOf('landscape') !== -1) || (Math.abs(window.orientation || 0) === 90);
+        if (isLandscape && window.innerHeight <= 640) {
+          root.classList.add('phone-landscape-fs');
+        }
+      }
+    })();
+  </script>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <script src="hybrid-bridge.js"></script>
+</head>
+<body>
+  <!-- OVERLAY DE VOZ -->
+  <div id="voice-overlay" class="voice-overlay" style="display: none;">
+    <div class="voice-overlay-content">
+      <div class="mic-icon-large" id="mic-icon-large">🎙️</div>
+      <h2 id="voice-overlay-text">Estou te ouvindo...</h2>
+      <p id="voice-overlay-sub">Fale seu comando. Detectarei automaticamente quando você terminar.</p>
+      <div style="margin: 18px auto 8px auto; width: 260px; height: 8px; background: rgba(255,255,255,0.08); border-radius: 6px; overflow: hidden;">
+        <div id="voice-meter-bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, var(--accent), var(--priv-green)); transition: width 0.05s ease; border-radius: 6px;"></div>
+      </div>
+      <div id="voice-volume-hint" style="font-size: 13px; color: var(--text-muted); margin-bottom: 20px;">Aguardando sua voz...</div>
+      <div style="display: flex; gap: 12px; justify-content: center;">
+        <button id="btn-voice-finish" class="voice-action-btn voice-confirm">Concluir e Enviar</button>
+        <button id="btn-voice-cancel" class="voice-action-btn voice-cancel">Cancelar</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="browser-container">
+
+    <!-- HEADER: Tabs + Window Controls -->
+    <header class="browser-header">
+      <div class="private-mode-pill" id="private-mode-pill" title="Modo Privado Ativo">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        <span>Privado</span>
+      </div>
+      <div class="tabs-container" id="tabs-container"></div>
+      <button class="new-tab-btn" id="new-tab-btn" title="Nova Aba">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      </button>
+      <div class="header-status-area">
+        <div class="tor-badge" id="tor-badge">
+          <span class="status-dot" id="status-dot"></span>
+          <span class="badge-text" id="badge-text">Tor: Desconectado</span>
+        </div>
+        <button type="button" class="cf-badge cf-connecting" id="cf-badge" title="Túnel Cloudflare" style="display:none;">
+          <span class="status-dot pulse" id="cf-status-dot"></span>
+          <span class="badge-text" id="cf-badge-text">Cloudflare...</span>
+        </button>
+        <div class="ads-counter-pill" id="ads-counter-pill" title="Rastreadores bloqueados nesta sessão">
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+          <span id="ads-blocked-count">0</span>
+        </div>
+        <div class="window-controls">
+          <button class="win-btn win-min" id="btn-win-min" title="Minimizar">
+            <svg width="11" height="11" viewBox="0 0 12 12"><rect y="5.5" width="12" height="1.5" fill="currentColor"/></svg>
+          </button>
+          <button class="win-btn win-max" id="btn-win-max" title="Maximizar / Restaurar">
+            <svg width="11" height="11" viewBox="0 0 12 12"><rect x="1.5" y="1.5" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+          </button>
+          <button class="win-btn win-close" id="btn-win-close" title="Fechar">
+            <svg width="11" height="11" viewBox="0 0 12 12"><path d="M2 2L10 10M10 2L2 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- TOOLBAR: Nav + Address Bar + Actions -->
+    <nav class="browser-toolbar">
+      <div class="nav-controls">
+        <button class="nav-btn" id="btn-back" title="Voltar" disabled>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
+        <button class="nav-btn" id="btn-forward" title="Avancar" disabled>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+        </button>
+        <button class="nav-btn" id="btn-reload" title="Recarregar">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+        </button>
+        <button class="nav-btn" id="btn-home" title="Inicio">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+        </button>
+      </div>
+
+      <div class="address-bar-wrap" id="address-bar-wrap">
+      <div class="address-bar-container" id="address-bar-container">
+        <div class="security-badge" id="security-badge" title="Status de Privacidade">
+          <svg class="security-icon" id="security-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+        </div>
+        <input type="text" id="url-input" class="url-input"
+          placeholder="Pesquise com privacidade ou acesse um site..."
+          spellcheck="false" autocomplete="off" />
+        <span class="url-loading-chip" id="url-loading-chip" hidden>
+          <span class="url-loading-spin"></span>
+          <span class="url-loading-bars" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span id="url-loading-chip-text">Tor</span>
+        </span>
+        <button type="button" class="url-clear-btn" id="btn-clear-search" title="Limpar pesquisa" hidden>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+        <button class="mic-btn" id="btn-mic" title="Comando de Voz">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+            <line x1="12" y1="19" x2="12" y2="23"></line>
+            <line x1="8" y1="23" x2="16" y2="23"></line>
+          </svg>
+        </button>
+        <button class="go-btn" id="btn-go" title="Ir">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+        </button>
+        <button class="bookmark-btn" id="btn-bookmark" title="Adicionar Favorito">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" id="bookmark-icon"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>
+        </button>
+        <button class="bookmark-btn" id="btn-open-external" title="Abrir página em nova aba">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+        </button>
+      </div>
+      <div class="url-suggest-panel" id="url-suggest-panel" hidden>
+        <div class="url-suggest-list" id="url-suggest-list"></div>
+        <div class="url-suggest-status" id="url-suggest-status" hidden>Carregando mais sugestões…</div>
+      </div>
+      </div>
+
+      <div class="toolbar-actions">
+        <button class="tor-toggle-btn active" id="btn-toggle-tor" title="Rede Tor Ativa (Proteção Permanente Obrigatória)">
+          <span class="tor-toggle-dot"></span>
+          <span id="tor-toggle-label">Tor: Conectado</span>
+        </button>
+        <button class="icon-action-btn adblock-btn" id="btn-adblock" title="Bloqueador de Anúncios Desativado. Clique para ativar.">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+          <span id="adblock-label">Anúncios Permitidos</span>
+        </button>
+
+        <button class="icon-action-btn mobile-mode-btn" id="btn-mobile-mode" title="Reconhecimento automático Celular / PC">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="3" ry="3"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
+          <span id="mobile-mode-label">Auto</span>
+        </button>
+
+        <button class="icon-action-btn install-app-btn" id="btn-install-app" title="Baixar e Instalar App no Celular com ícone Papaléguas">
+          <img src="icon-192.png" class="papaleguas-btn-icon" alt="Papaléguas" onerror="this.onerror=null;this.src='papaleguas_icon.png';" />
+          <span id="install-app-label">Baixar App</span>
+        </button>
+        <button class="icon-action-btn spotify-btn" id="btn-spotify" title="Músicas">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="music-btn-icon">
+            <path d="M9 18V5l12-2v13"></path>
+            <circle cx="6" cy="18" r="3" fill="currentColor"></circle>
+            <circle cx="18" cy="16" r="3" fill="currentColor"></circle>
+          </svg>
+        </button>
+        <button class="icon-action-btn movies-btn" id="btn-movies" title="Filmes Online">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"></rect><line x1="7" y1="2" x2="7" y2="22"></line><line x1="17" y1="2" x2="17" y2="22"></line><line x1="2" y1="12" x2="22" y2="12"></line></svg>
+          <span>Filmes</span>
+        </button>
+        <button class="icon-action-btn youtube-btn" id="btn-youtube" title="BaixaTube">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect width="24" height="24" rx="5.5" fill="url(#btgrad)" />
+            <path d="M8.5 7C8.5 6 9.5 5.5 10.3 6L17.2 10.5C18 11 18 12 17.2 12.5L10.3 17C9.5 17.5 8.5 17 8.5 16V7Z" fill="white" />
+            <path d="M10.8 9.5H12.2V12.5H13.5L11.5 15L9.5 12.5H10.8V9.5Z" fill="#cc0000" />
+            <defs>
+              <linearGradient id="btgrad" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+                <stop stop-color="#ff1a1a"/>
+                <stop offset="1" stop-color="#b30000"/>
+              </linearGradient>
+            </defs>
+          </svg>
+          <span>BaixaTube</span>
+        </button>
+        <button class="icon-action-btn circuit-btn" id="btn-circuit" title="Circuito Tor e IP">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/><path d="M2 12h20"/></svg>
+          <span>Circuito</span>
+        </button>
+      </div>
+    </nav>
+
+    <!-- BOOKMARKS BAR -->
+    <div class="quick-shortcuts-bar" id="quick-shortcuts-bar">
+      <div class="tabs-menu-wrap" id="tabs-menu-wrap">
+        <button class="shortcut-item-btn add-bookmark-btn" id="btn-add-bookmark" title="Abas abertas e favoritos">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          <span>Adicionar</span>
+        </button>
+        <div class="tabs-menu" id="tabs-menu" hidden>
+          <div class="tabs-menu-head">
+            <span>Abas abertas</span>
+            <button type="button" class="tabs-menu-new" id="tabs-menu-new">Nova aba</button>
+          </div>
+          <div class="tabs-menu-list" id="tabs-menu-list"></div>
+          <button type="button" class="tabs-menu-save-all" id="tabs-menu-save-all">Salvar todas como favoritas</button>
+        </div>
+      </div>
+      <div class="bookmarks-separator" id="bookmarks-separator" style="display:block;">|</div>
+      <div class="bookmarks-bar-items" id="bookmarks-bar-items" style="display:flex; gap:8px;"></div>
+    </div>
+
+    <!-- MODAL BAIXAR / INSTALAR APP NO CELULAR -->
+    <div class="circuit-modal hidden" id="install-app-modal">
+      <div class="circuit-header">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <img src="icon-192.png" alt="Papaléguas" style="width:26px;height:26px;border-radius:8px;object-fit:cover;box-shadow:0 0 10px rgba(56,189,248,0.5);" onerror="this.onerror=null;this.src='papaleguas_icon.png';" />
+          <h3 style="font-size:15px;margin:0;">Baixar App no Celular</h3>
+        </div>
+        <button class="close-modal-btn" id="close-install-modal-btn">&times;</button>
+      </div>
+      <div class="circuit-content" style="padding:16px;">
+        <div style="display:flex;align-items:center;gap:14px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:14px;padding:12px;margin-bottom:14px;">
+          <img src="icon-192.png" alt="Papaléguas" style="width:52px;height:52px;border-radius:12px;box-shadow:0 4px 16px rgba(2,132,199,0.35);flex-shrink:0;" onerror="this.onerror=null;this.src='papaleguas_icon.png';" />
+          <div>
+            <h4 style="margin:0 0 4px 0;font-size:15px;color:#f8fafc;font-weight:700;">Papaléguas BaixaTube <span id="install-modal-app-version" style="font-size:11px;color:#10b981;margin-left:6px;font-weight:bold;background:rgba(16,185,129,0.18);padding:2px 8px;border-radius:6px;border:1px solid rgba(16,185,129,0.35);">Versão 2026.10.11-v19 (Atualizada)</span></h4>
+            <p style="margin:0;font-size:12px;color:#94a3b8;line-height:1.35;">Central de entretenimento e vídeos com zero anúncios na tela inicial do seu celular.</p>
+          </div>
+        </div>
+
+        <div id="pwa-install-action-box" style="margin-bottom:14px;text-align:center;">
+          <button type="button" id="btn-trigger-pwa-install" class="pwa-primary-install-btn">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            <span>Instalar no Celular Agora</span>
+          </button>
+        </div>
+
+        <div id="install-external-link-card" style="margin-bottom:14px;background:rgba(2,132,199,0.12);border:1px solid rgba(56,189,248,0.35);border-radius:12px;padding:12px;text-align:center;">
+          <span style="font-size:11.5px;color:#94a3b8;display:block;margin-bottom:6px;">Link fixo para abrir e instalar no celular:</span>
+          <a id="install-external-link" href="#" target="_blank" style="font-size:12.5px;color:#38bdf8;font-weight:700;word-break:break-all;text-decoration:none;">Carregando link Ngrok...</a>
+          <div style="margin-top:8px;">
+            <button type="button" id="btn-copy-install-link" style="padding:4px 12px;font-size:11px;font-weight:700;color:#fff;background:rgba(56,189,248,0.25);border:1px solid rgba(56,189,248,0.5);border-radius:6px;cursor:pointer;">📋 Copiar Link do Celular</button>
+          </div>
+        </div>
+
+        <div class="install-instructions-card">
+          <strong style="color:#38bdf8;display:block;margin-bottom:8px;font-size:12.5px;">📲 Como instalar pelo navegador do celular:</strong>
+          <div class="install-step-item">
+            <span class="install-step-badge">1</span>
+            <span>Toque nos <strong>três pontinhos (⋮)</strong> no canto superior do Google Chrome.</span>
+          </div>
+          <div class="install-step-item">
+            <span class="install-step-badge">2</span>
+            <span>Toque em <strong>"Instalar aplicativo"</strong> ou <strong>"Adicionar à tela inicial"</strong>.</span>
+          </div>
+          <div class="install-step-item">
+            <span class="install-step-badge">3</span>
+            <span>O ícone do <strong>Papaléguas</strong> aparecerá na tela do seu celular, abrindo em tela cheia super rápido!</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Cast Modal -->
+    <div class="circuit-modal hidden" id="cast-modal">
+      <div class="circuit-header">
+        <h3>Transmitir e Espelhar Tela</h3>
+        <button class="close-modal-btn" id="close-cast-modal-btn">&times;</button>
+      </div>
+      <div class="circuit-content">
+        <div class="cast-current-media" id="cast-current-media">
+          <div class="cast-media-badge">VIDEO DETECTADO NA ABA ATIVA</div>
+          <div class="cast-media-title" id="cast-media-title">Nenhum video em reproducao no momento</div>
+          <div class="cast-media-url" id="cast-media-url">Carregue um video ou filme para transmitir</div>
+        </div>
+        <p class="modal-subtitle">Smart TVs e Receptores na rede local Wi-Fi:</p>
+        <div class="devices-list" id="cast-devices-list">
+          <div class="scanning-text">Procurando Smart TVs na rede...</div>
+        </div>
+        <div class="cast-feedback hidden" id="cast-feedback"></div>
+        <div class="cast-agent-card" id="cast-agent-card">
+          <div class="cast-agent-header">
+            <div class="cast-agent-avatar">AI</div>
+            <div class="cast-agent-meta">
+              <span class="cast-agent-title">Agente Inteligente de Transmissao</span>
+              <span class="cast-agent-badge" id="cast-agent-badge">Pronto para Conectar</span>
+            </div>
+          </div>
+          <div class="cast-agent-body" id="cast-agent-status-text">
+            O Agente analisa o filme, acha a melhor rota na sua Smart TV e conecta automaticamente.
+          </div>
+          <div class="cast-agent-steps" id="cast-agent-steps"></div>
+        </div>
+        <div class="screen-mirror-section">
+          <div class="mirror-title">Espelhamento de Tela (Miracast / AirPlay)</div>
+          <p class="mirror-desc">Para projetar a imagem e som de todo o seu PC na sua Roku TV:</p>
+          <button class="mirror-btn" id="btn-open-screen-mirror">Abrir Configuracoes de Espelhamento</button>
+        </div>
+        <div class="modal-actions">
+          <button class="secondary-btn" id="btn-refresh-cast">Atualizar Lista</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Privacy & Tor Circuit Modal -->
+    <div class="circuit-modal hidden" id="circuit-modal">
+      <div class="circuit-header">
+        <h3>Privacidade e Rede Tor</h3>
+        <button class="close-modal-btn" id="close-modal-btn">&times;</button>
+      </div>
+      <div class="circuit-content">
+        <div class="privacy-status-grid">
+          <div class="priv-status-card">
+            <div class="priv-status-label">Roteamento Tor</div>
+            <div class="priv-status-value" id="tor-mode-text">Ativo (SOCKS5: 9050)</div>
+          </div>
+          <div class="priv-status-card">
+            <div class="priv-status-label" id="tor-ip-label">IPv4 do cliente</div>
+            <div class="priv-status-value code-val" id="tor-ip-display">Consultando...</div>
+          </div>
+          <div class="priv-status-card">
+            <div class="priv-status-label">Status Tor Project</div>
+            <div class="priv-status-value status-badge" id="tor-check-status">Verificando...</div>
+          </div>
+          <div class="priv-status-card">
+            <div class="priv-status-label">Protecao WebRTC</div>
+            <div class="priv-status-value text-success">Ativa (Sem vazamento de IP)</div>
+          </div>
+          <div class="priv-status-card">
+            <div class="priv-status-label">Rastreadores Bloqueados</div>
+            <div class="priv-status-value text-success" id="modal-ads-count">0 nesta sessao</div>
+          </div>
+          <div class="priv-status-card">
+            <div class="priv-status-label">Modo Privado</div>
+            <div class="priv-status-value text-success">Ativo -- Sem historico local</div>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="secondary-btn tor-action-btn connect" id="btn-modal-toggle-tor" title="Conectar este dispositivo à rede Tor">Conectar este Dispositivo ao Tor</button>
+          <button class="secondary-btn" id="btn-refresh-ip">Checar IP Atual</button>
+          <button class="secondary-btn" id="btn-check-tor-web">Abrir check.torproject.org</button>
+        </div>
+      </div>
+    </div>
+
+
+
+    <!-- Main Content -->
+    <main class="webviews-container" id="webviews-container">
+      <!-- Webviews generated per tab -->
+      <div class="page-tor-loading" id="page-tor-loading" hidden>
+        <div class="page-tor-loading-card">
+          <div class="page-tor-orb" id="page-tor-orb">
+            <div class="page-tor-ring"></div>
+            <div class="page-tor-core">🧅</div>
+          </div>
+          <div class="page-direct-orb" id="page-direct-orb" hidden>
+            <div class="page-direct-bars"><i></i><i></i><i></i><i></i></div>
+          </div>
+          <div class="page-tor-title" id="page-tor-loading-title">Carregando via Tor</div>
+          <div class="page-tor-url" id="page-tor-loading-url"></div>
+          <div class="page-tor-hint" id="page-tor-loading-hint">A conexão está saindo pela rede Tor. Isso pode levar alguns segundos.</div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Video Sniffer Bar -->
+    <div class="video-sniffer-bar" id="video-sniffer-bar" style="display: none;">
+      <div class="vsniff-left">
+        <div class="vsniff-icon-pulse">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.2"><rect x="2" y="2" width="20" height="20" rx="2.18"/><polygon points="10 8 16 12 10 16 10 8"/></svg>
+        </div>
+        <div class="vsniff-text">
+          <div class="vsniff-badge">VIDEO DETECTADO</div>
+          <div class="vsniff-title" id="vsniff-title">Video na pagina</div>
+        </div>
+      </div>
+      <div class="vsniff-actions">
+        <button class="vsniff-btn vsniff-watch" id="vsniff-btn-watch">Assistir</button>
+        <button class="vsniff-btn vsniff-mp4" id="vsniff-btn-mp4">Baixar MP4</button>
+        <button class="vsniff-btn vsniff-mp3" id="vsniff-btn-mp3">Audio MP3</button>
+        <button class="vsniff-close" id="vsniff-btn-close">x</button>
+      </div>
+    </div>
+
+    <div class="page-player" id="page-player" hidden>
+      <div class="page-player-card">
+        <div class="page-player-top">
+          <div class="page-player-heading">
+            <div class="page-player-badge">Player Papaléguas</div>
+            <div class="page-player-title" id="page-player-title">Vídeo</div>
+          </div>
+          <button type="button" class="page-player-close" id="page-player-close" title="Fechar e voltar para a página">✕</button>
+        </div>
+        <div class="page-player-stage">
+          <iframe id="page-player-frame" hidden allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen></iframe>
+          <video id="page-player-video" hidden controls playsinline></video>
+          <div class="page-player-status" id="page-player-status">Abrindo no player do Papaléguas…</div>
+        </div>
+        <div class="page-player-actions">
+          <button type="button" id="page-player-mp4">🎬 Baixar MP4</button>
+          <button type="button" id="page-player-mp3">🎵 Baixar MP3</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Media Download Modal -->
+    <div class="circuit-modal hidden" id="global-media-download-modal">
+      <div class="circuit-header">
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span style="font-size:20px;" id="gmedia-modal-icon">Download</span>
+          <h3 id="gmedia-modal-title">Download de Video / Audio</h3>
+        </div>
+        <button class="close-modal-btn" id="close-gmedia-modal-btn">&times;</button>
+      </div>
+      <div class="circuit-content" style="padding:16px;">
+        <div id="gmedia-loading" style="padding:10px 0;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <span id="gmedia-status-text" style="color:var(--text-primary);font-weight:700;font-size:13px;">Conectando ao video...</span>
+            <span id="gmedia-progress-pct" style="font-size:12px;font-weight:800;color:var(--accent);background:var(--accent-dim);border:1px solid var(--accent-glow);padding:2px 8px;border-radius:6px;">0%</span>
+          </div>
+          <div style="width:100%;height:8px;background:rgba(255,255,255,0.06);border-radius:4px;overflow:hidden;margin-bottom:8px;">
+            <div id="gmedia-progress-fill" style="height:100%;width:0%;background:linear-gradient(90deg,var(--accent),var(--priv-green));border-radius:4px;transition:width 0.25s ease;"></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;">
+            <span id="gmedia-progress-speed" style="font-size:11px;color:var(--accent-light);font-weight:600;">Iniciando motor de download...</span>
+            <span id="gmedia-progress-total" style="font-size:11px;color:var(--text-secondary);"></span>
+          </div>
+        </div>
+        <div id="gmedia-success" style="display:none;">
+          <div style="background:rgba(255,255,255,0.04);padding:12px;border-radius:10px;margin-bottom:12px;border:1px solid var(--border-color);">
+            <div id="gmedia-file-title" style="font-weight:700;font-size:13px;color:var(--text-primary);">Nome do Arquivo</div>
+            <div id="gmedia-file-meta" style="font-size:11px;color:var(--text-secondary);margin-top:2px;">Duracao: --:--</div>
+          </div>
+          <audio id="gmedia-audio-player" controls style="display:none;width:100%;margin-bottom:12px;"></audio>
+          <video id="gmedia-video-player" controls style="display:none;width:100%;max-height:200px;border-radius:8px;margin-bottom:12px;"></video>
+          <a id="gmedia-save-link" href="#" class="primary-btn" style="display:flex;align-items:center;justify-content:center;gap:8px;text-decoration:none;padding:10px;border-radius:8px;font-weight:700;" download>Salvar Arquivo</a>
+        </div>
+      </div>
+    </div>
+
+    <!-- Mini Player Flutuante Global do Papaléguas Music (Arrastável sobre qualquer aba) -->
+    <div class="global-music-mini-player hidden" id="global-music-mini-player">
+      <div class="gm-drag-header" id="gm-drag-header" title="Segure e arraste para posicionar onde quiser na tela">
+        <div class="gm-brand">
+          <img src="papaleguas_icon.png" class="gm-brand-icon" alt="" onerror="if(!this.dataset.retry){this.dataset.retry='1';this.src='/papaleguas_icon.png';}" />
+        </div>
+        <div class="gm-window-actions">
+          <button class="gm-action-btn" id="gm-btn-maximize" title="Maximizar / Ir para a aba da música">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+          </button>
+          <button class="gm-action-btn gm-close-btn" id="gm-btn-close" title="Fechar Mini Player">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="gm-content">
+        <img src="papaleguas_icon.png" class="gm-track-thumb" id="gm-track-thumb" alt="Capa da música" onerror="if(!this.dataset.retry){this.dataset.retry='1';this.src='/papaleguas_icon.png';}" />
+        <div class="gm-track-details">
+          <div class="gm-track-title" id="gm-track-title">--</div>
+          <div class="gm-track-artist" id="gm-track-artist">Nenhuma faixa tocando</div>
+          <div class="gm-progress-container" id="gm-progress-container" title="Clique para avançar/voltar">
+            <div class="gm-progress-bar" id="gm-progress-bar"></div>
+          </div>
+        </div>
+        <div class="gm-controls">
+          <button class="gm-ctrl-btn" id="gm-btn-prev" title="Faixa Anterior">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5" stroke="currentColor" stroke-width="2"/></svg>
+          </button>
+          <button class="gm-ctrl-btn gm-play-btn" id="gm-btn-play" title="Reproduzir / Pausar">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" id="gm-play-icon"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          </button>
+          <button class="gm-ctrl-btn" id="gm-btn-next" title="Próxima Faixa">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19" stroke="currentColor" stroke-width="2"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="global-yt-mini-player hidden" id="global-yt-mini-player">
+      <div class="gyt-chrome" id="gyt-drag-header">
+        <span class="gyt-label">BaixaTube</span>
+        <div class="gyt-actions">
+          <button type="button" class="gm-action-btn" id="gyt-btn-expand" title="Voltar ao vídeo">▢</button>
+          <button type="button" class="gm-action-btn gm-close-btn" id="gyt-btn-close" title="Fechar">✕</button>
+        </div>
+      </div>
+      <div class="gyt-video-box">
+        <img id="gyt-thumb" class="gyt-thumb" alt="Vídeo">
+        <iframe id="gyt-iframe" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe>
+      </div>
+      <div class="gyt-meta">
+        <div id="gyt-title" class="gyt-title">BaixaTube</div>
+        <div class="gyt-controls">
+          <button type="button" id="gyt-btn-play" class="gm-ctrl-btn gm-play-btn" title="Reproduzir / Pausar">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" id="gyt-play-icon"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+    <button type="button" class="fs-home-btn" id="fs-home-btn" title="Voltar para a Home">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 10.5L12 3l9 7.5"/><path d="M5 10v10h5v-6h4v6h5V10"/></svg>
+      <span>Home</span>
+    </button>
+    <audio id="yt-notify-audio" playsinline webkit-playsinline></audio>
+    <video id="yt-pip-video" playsinline webkit-playsinline muted disablepictureinpicture="false" style="position:fixed;width:160px;height:90px;left:-200px;bottom:0;opacity:0.02;pointer-events:none;z-index:0;"></video>
+
+    <!-- Status Bar -->
+    <footer class="browser-footer">
+      <div class="footer-left">
+        <div class="footer-privacy-dot"></div>
+        <span id="footer-status">Pronto</span>
+      </div>
+      <div class="footer-right">
+        <span class="safe-badge" id="safe-badge">Modo Privado -- Sem rastreamento</span>
+      </div>
+    </footer>
+
+  </div>
+
+  <!-- Aba de pesquisa em tela cheia: abre ao clicar no campo de busca -->
+  <div class="search-fs" id="search-fs" hidden>
+    <div class="search-fs-top">
+      <button type="button" class="search-fs-close" id="search-fs-close" title="Fechar pesquisa (Esc)">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+      <div class="search-fs-field">
+        <svg class="search-fs-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="text" id="search-fs-input" class="search-fs-input" placeholder="Pesquise na web ou digite um endereço" spellcheck="false" autocomplete="off" />
+        <button type="button" class="search-fs-clear" id="search-fs-clear" title="Limpar" hidden>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+        <button type="button" class="search-fs-mic" id="search-fs-mic" title="Pesquisar por voz">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1"/><line x1="12" y1="18" x2="12" y2="22"/></svg>
+          <span class="search-fs-mic-wave" id="search-fs-mic-wave"></span>
+        </button>
+        <button type="button" class="search-fs-go" id="search-fs-go" title="Pesquisar">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+        </button>
+      </div>
+      <span class="search-fs-net" id="search-fs-net">Conexão direta</span>
+    </div>
+    <div class="search-fs-body" id="search-fs-body">
+      <section class="search-fs-section" id="search-fs-recent-box" hidden>
+        <h3 class="search-fs-heading">Pesquisas desta sessão</h3>
+        <div class="search-fs-chips" id="search-fs-recent"></div>
+      </section>
+      <div class="search-fs-list" id="search-fs-list"></div>
+      <div class="search-fs-status" id="search-fs-status" hidden></div>
+    </div>
+  </div>
+
+  <button id="btn-open-system-browser" style="display:none;"></button>
+  <script>
+    try {
+      document.cookie = "ngrok-skip-browser-warning=1; path=/; max-age=31536000; SameSite=Lax";
+    } catch (e) {}
+  </script>
+  <script src="auto-update.js?v=19"></script>
+  <script src="hls.min.js"></script>
+  <script src="fab-drag.js?v=1"></script>
+  <script src="client-cast.js?v=9"></script>
+  <script src="renderer.js?v=19"></script>
+</body>
+</html>
