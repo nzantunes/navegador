@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Papaléguas BaixaTube - Vídeos Sem Anúncios e Downloads em MP4 e MP3</title>
-  <meta name="papaleguas-version" content="2026.10.12-v22">
+  <meta name="papaleguas-version" content="2026.10.12-v23">
   <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-5788322050130808"
      crossorigin="anonymous"></script>
   <link rel="manifest" href="manifest.json">
@@ -4019,10 +4019,19 @@
       hasMore = true;
       seenVideoIds.clear();
       allFeedVideos = [];
-      if (query === 'noticias') {
-        currentTimeFilter = 'hour';
-        const filterSelect = document.getElementById('time-filter-select');
-        if (filterSelect) filterSelect.value = 'hour';
+      const isNewsCat = (query === 'noticias' || query === 'noticia' || query === 'urgente' || query === 'jornal');
+      if (isNewsCat) {
+        if (!currentTimeFilter || currentTimeFilter === 'none') {
+          currentTimeFilter = 'hour';
+          const filterSelect = document.getElementById('time-filter-select');
+          if (filterSelect) filterSelect.value = 'hour';
+        }
+      } else {
+        if (currentTimeFilter === 'hour' && !isUserSearch) {
+          currentTimeFilter = 'none';
+          const filterSelect = document.getElementById('time-filter-select');
+          if (filterSelect) filterSelect.value = 'none';
+        }
       }
       updateFeedHeading(query);
 
@@ -5366,9 +5375,10 @@
           c.classList.toggle('active', c.getAttribute('data-q') === q);
         });
         closeHomePlayer();
-        currentTimeFilter = 'hour';
+        const isNews = (q === 'noticias' || q === 'noticia' || q === 'urgente' || q === 'jornal');
+        currentTimeFilter = isNews ? 'hour' : 'none';
         const fs = document.getElementById('time-filter-select');
-        if (fs) fs.value = 'hour';
+        if (fs) fs.value = currentTimeFilter;
         loadRecentYouTubeFeed(q, true);
       }
 

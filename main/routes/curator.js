@@ -148,6 +148,10 @@ async function handle(req, res, ctx) {
     const isNews = ctx.isNewsYoutubeCategory(qParam || 'noticias');
     if (isNews) {
       if (!reqUrl.searchParams.has('time')) timeFilter = 'hour';
+    } else {
+      if (timeFilter === 'none') {
+        sortByRecent = false;
+      }
     }
     
     if (isCustomQuery && (timeFilter === 'hour' || timeFilter === 'day')) {
@@ -162,13 +166,14 @@ async function handle(req, res, ctx) {
 
     let videos = [];
     const feedWait = useTor ? 16000 : 7000;
+    const extraWait = useTor ? 9000 : 3500;
     try {
       if (!isCustomQuery && searchMode === 'trending') {
         videos = await Promise.race([
           ctx.fetchTrendingVideos({ useTor, country: countryCode, clientIp: effectiveClientIp }).catch(() => []),
           new Promise((resolve) => setTimeout(() => resolve([]), feedWait))
         ]);
-        if (!videos || videos.length < 6) {
+        if (!videos || videos.length < 12) {
           const extra = await ctx.searchYoutubeVideos(dynamicQuery, hl, false, timeFilter, useTor, 'trending', countryCode, effectiveClientIp).catch(() => []);
           const seen = new Set((videos || []).map((v) => v && v.id));
           for (const v of extra || []) {
@@ -180,15 +185,81 @@ async function handle(req, res, ctx) {
           videos = ctx.filterYoutubeModeResults(videos, 'trending');
         }
       } else {
-        videos = await ctx.searchYoutubeVideos(dynamicQuery, hl, sortByRecent, timeFilter, useTor, searchMode, countryCode, effectiveClientIp).catch(() => []);
+        videos = await Promise.race([
+          ctx.searchYoutubeVideos(dynamicQuery, hl, sortByRecent, timeFilter, useTor, searchMode, countryCode, effectiveClientIp).catch(() => []),
+          new Promise((resolve) => setTimeout(() => resolve([]), feedWait))
+        ]);
       }
     } catch (errFeed) {
       videos = [];
     }
 
-    if (!videos || videos.length === 0) {
-      const fallbackQuery = `${qParam || 'noticias'} ${countryCode === 'BR' ? 'brasil' : countryCode}`;
-      videos = await ctx.searchYoutubeVideos(fallbackQuery, hl, false, 'none', useTor, searchMode, countryCode, effectiveClientIp).catch(() => []);
+    const countryRelevanceFilter = (typeof ctx.filterVideosByCountryRelevance === 'function')
+      ? ctx.filterVideosByCountryRelevance
+      : (vList, cCode) => {
+          if (!Array.isArray(vList) || vList.length === 0) return [];
+          const c = String(cCode || 'BR').toUpperCase();
+          if (c === 'BR' || c === 'PT') {
+            const foreignSpanishRegex = /(?:[¿¡]|\ben España\b|\ben espana\b|\bmerece la pena\b|\bcuánto cuesta\b|\bcuanto cuesta\b|\blo que hace\b|\blo que falla\b|\bte contamos qué es\b|\bsuscríbete\b|\ben directo\b|\bde la jornada\b|\bel resumen\b|\blos goles de\b|\ben vivo noticias\b|\bprobamos\b|\bpara qué sirve\b)/i;
+            const localVideos = [];
+            const foreignVideos = [];
+            for (const v of vList) {
+              if (!v) continue;
+              const text = `${v.title || ''} ${v.description || ''} ${v.channel || ''}`;
+              if (foreignSpanishRegex.test(text)) {
+                foreignVideos.push(v);
+              } else {
+                localVideos.push(v);
+              }
+            }
+            return localVideos.length >= 4 ? localVideos : [...localVideos, ...foreignVideos];
+          }
+          return vList;
+        };
+
+    videos = countryRelevanceFilter(videos, countryCode);
+
+    // AUTO-EXPANSÃO / AUTO-PREENCHIMENTO:
+    // Se a busca retornou poucos vídeos (menos de 12), expandimos automaticamente para garantir feed cheio (15 a 30 vídeos)
+    if (!videos || videos.length < 12) {
+      const seenIds = new Set((videos || []).map(v => v && v.id));
+      const widerFilters = [];
+      if (timeFilter === 'hour') widerFilters.push('day', 'week', 'none');
+      else if (timeFilter === 'day') widerFilters.push('week', 'none');
+      else if (timeFilter === 'week') widerFilters.push('none');
+
+      for (const wider of widerFilters) {
+        if (videos.length >= 15) break;
+        const extra = await Promise.race([
+          ctx.searchYoutubeVideos(dynamicQuery, hl, wider !== 'none', wider, useTor, searchMode, countryCode, effectiveClientIp).catch(() => []),
+          new Promise((resolve) => setTimeout(() => resolve([]), extraWait))
+        ]);
+        const filteredExtra = countryRelevanceFilter(extra || [], countryCode);
+        for (const v of filteredExtra) {
+          if (v && v.id && !seenIds.has(v.id)) {
+            seenIds.add(v.id);
+            videos.push(v);
+          }
+        }
+      }
+    }
+
+    // Se ainda tiver menos de 12 vídeos, busca usando consulta com nome do país explícito
+    if (!videos || videos.length < 12) {
+      const seenIds = new Set((videos || []).map(v => v && v.id));
+      const countryKeyword = countryCode === 'BR' ? 'brasil' : (countryCode === 'PT' ? 'portugal' : countryCode);
+      const fallbackQuery = `${qParam || 'noticias'} ${countryKeyword}`;
+      const fallback = await Promise.race([
+        ctx.searchYoutubeVideos(fallbackQuery, hl, false, 'none', useTor, searchMode, countryCode, effectiveClientIp).catch(() => []),
+        new Promise((resolve) => setTimeout(() => resolve([]), extraWait))
+      ]);
+      const filteredFallback = countryRelevanceFilter(fallback || [], countryCode);
+      for (const f of filteredFallback) {
+        if (f && f.id && !seenIds.has(f.id)) {
+          seenIds.add(f.id);
+          videos.push(f);
+        }
+      }
     }
 
     const headingQuery = searchMode === 'trending'
