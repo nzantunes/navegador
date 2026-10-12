@@ -47,9 +47,13 @@
   navigator.serviceWorker.addEventListener('controllerchange', function () {
     if (refreshing) return;
     var lastReload = parseInt(sessionStorage.getItem('pl_pwa_reload_ts') || '0', 10);
-    if (Date.now() - lastReload < 15000) return;
+    // Cooldown de 30s entre reloads para evitar loops
+    if (Date.now() - lastReload < 30000) return;
 
+    if (sessionStorage.getItem('pl_pwa_controller_reloaded')) return;
+    sessionStorage.setItem('pl_pwa_controller_reloaded', 'true');
     sessionStorage.setItem('pl_pwa_reload_ts', String(Date.now()));
+
     refreshing = true;
     showUpdateToast('Nova versão pronta! Atualizando...');
     setTimeout(function () {
@@ -68,65 +72,76 @@
     }
   }
 
-  // Checa a versão do servidor e atualiza imediatamente no celular
+  // Checa a versão do servidor e atualiza imediatamente no celular com trava anti-loop
   function checkServerVersion(isManual) {
+    if (refreshing) return;
+
     fetch('/api/session-info?_pl_upd=' + Date.now(), { cache: 'no-store' })
       .then(function (r) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
       })
       .then(function (data) {
-        if (data && data.serverVersion) {
-          var serverVer = data.serverVersion;
-          var stored = localStorage.getItem('pl_app_version');
-          var metaEl = document.querySelector('meta[name="papaleguas-version"]');
-          var runningVer = metaEl ? metaEl.getAttribute('content') : null;
+        if (!data || !data.serverVersion) return;
+        var serverVer = String(data.serverVersion).trim();
+        var stored = localStorage.getItem('pl_app_version');
+        var metaEl = document.querySelector('meta[name="papaleguas-version"]');
+        var runningVer = metaEl ? String(metaEl.getAttribute('content') || '').trim() : null;
 
-          // Atualiza também o badge do modal de instalação se estiver presente na tela
-          var modalVerEl = document.getElementById('install-modal-app-version');
-          if (modalVerEl) {
-            modalVerEl.textContent = 'Versão ' + serverVer + ' (Atualizada)';
-          }
-
-          // Se a versão atual na página é antiga (ou ausente) ou o localStorage é diferente:
-          var isOutdated = (runningVer && runningVer !== serverVer) || (!runningVer && stored !== serverVer) || (stored && stored !== serverVer);
-
-          if (!stored && runningVer === serverVer) {
-            // Primeiro acesso limpo e já está na versão certa
-            localStorage.setItem('pl_app_version', serverVer);
-            return;
-          }
-
-          if (isOutdated) {
-            var lastReload = parseInt(sessionStorage.getItem('pl_pwa_reload_ts') || '0', 10);
-            if (Date.now() - lastReload < 10000) return; // Cooldown contra loop
-
-            console.log('[PWA AutoUpdate] Nova versão disponível:', serverVer, '(atual:', runningVer || stored || 'antiga', ')');
-            showUpdateToast('Baixando atualizações da nova versão...');
-            localStorage.setItem('pl_app_version', serverVer);
-            sessionStorage.setItem('pl_pwa_reload_ts', String(Date.now()));
-
-            // Invalida caches do Service Worker
-            clearObsoleteCaches();
-
-            navigator.serviceWorker.getRegistration().then(function (reg) {
-              if (reg) {
-                reg.update().then(function () {
-                  if (reg.waiting) reg.waiting.postMessage({ type: 'SKIP_WAITING' });
-                  if (reg.installing) reg.installing.postMessage({ type: 'SKIP_WAITING' });
-                }).catch(function () {});
-              }
-              setTimeout(function () {
-                showUpdateToast('Versão ' + serverVer + ' instalada! Recarregando...');
-                setTimeout(function () {
-                  window.location.reload();
-                }, 400);
-              }, 600);
-            }).catch(function () {
-              setTimeout(function () { window.location.reload(); }, 900);
-            });
-          }
+        // Atualiza também o badge do modal de instalação se estiver presente na tela
+        var modalVerEl = document.getElementById('install-modal-app-version');
+        if (modalVerEl) {
+          modalVerEl.textContent = 'Versão ' + serverVer + ' (Atualizada)';
         }
+
+        // REGRA 1: Se a página em execução já possui a mesma versão que o servidor, NUNCA recarrega!
+        if (runningVer && runningVer === serverVer) {
+          localStorage.setItem('pl_app_version', serverVer);
+          return;
+        }
+
+        // REGRA 2: Se não há meta tag, mas o localStorage já é igual ao servidor, NUNCA recarrega!
+        if (!runningVer && stored === serverVer) {
+          return;
+        }
+
+        // REGRA 3: Trava anti-loop por versão na sessão.
+        // Se já tentamos atualizar para ESTA versão nesta sessão, NUNCA tenta novamente!
+        var reloadAttemptKey = 'pl_reload_attempted_' + serverVer;
+        if (sessionStorage.getItem(reloadAttemptKey)) {
+          console.warn('[PWA AutoUpdate] Atualização para ' + serverVer + ' já tentada nesta sessão. Evitando loop de recarregamento.');
+          return;
+        }
+
+        // REGRA 4: Cooldown geral de reload (mínimo 20 segundos)
+        var lastReload = parseInt(sessionStorage.getItem('pl_pwa_reload_ts') || '0', 10);
+        if (Date.now() - lastReload < 20000) return;
+
+        // Marca a tentativa e cooldown antes de qualquer recarregamento
+        sessionStorage.setItem(reloadAttemptKey, 'true');
+        sessionStorage.setItem('pl_pwa_reload_ts', String(Date.now()));
+        localStorage.setItem('pl_app_version', serverVer);
+        refreshing = true;
+
+        console.log('[PWA AutoUpdate] Atualizando para versão:', serverVer, '(atual:', runningVer || stored || 'antiga', ')');
+        showUpdateToast('Atualizando para versão ' + serverVer + '...');
+
+        // Invalida caches do Service Worker
+        clearObsoleteCaches();
+
+        navigator.serviceWorker.getRegistration().then(function (reg) {
+          if (reg) {
+            reg.update().then(function () {
+              if (reg.waiting) reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+              if (reg.installing) reg.installing.postMessage({ type: 'SKIP_WAITING' });
+            }).catch(function () {});
+          }
+          setTimeout(function () {
+            window.location.reload();
+          }, 600);
+        }).catch(function () {
+          setTimeout(function () { window.location.reload(); }, 600);
+        });
       })
       .catch(function () {});
   }
