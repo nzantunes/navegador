@@ -1416,6 +1416,7 @@ function createTab(initialUrl = DEFAULT_URL) {
     function buildFrame(url) {
       const frame = document.createElement('iframe');
       frame.className = 'web-client-frame';
+      frame.title = 'Conteúdo da Página Papaléguas';
       frame.setAttribute('allow', 'autoplay; encrypted-media; fullscreen; picture-in-picture; screen-wake-lock; clipboard-write; camera; microphone; web-share');
       frame.setAttribute('allowfullscreen', 'true');
       // Sem allow-top-navigation a página não toma a janela do app.

@@ -12849,7 +12849,21 @@ function getDevicePlaylistsRoot(clientId, req) {
       const acceptEncoding = (req.headers && req.headers['accept-encoding']) || '';
       const isCompressible = /text|javascript|json|xml|svg/i.test(contentType);
 
-      if (isCompressible && acceptEncoding.includes('gzip')) {
+      if (isCompressible && acceptEncoding.includes('br') && typeof zlib.brotliCompress === 'function') {
+        headers['Content-Encoding'] = 'br';
+        zlib.brotliCompress(content, (brErr, compressed) => {
+          if (!brErr && compressed) {
+            headers['Content-Length'] = compressed.length;
+            res.writeHead(200, headers);
+            res.end(compressed);
+          } else {
+            headers['Content-Length'] = content.length;
+            delete headers['Content-Encoding'];
+            res.writeHead(200, headers);
+            res.end(content);
+          }
+        });
+      } else if (isCompressible && acceptEncoding.includes('gzip')) {
         headers['Content-Encoding'] = 'gzip';
         zlib.gzip(content, (gzipErr, compressed) => {
           if (!gzipErr && compressed) {

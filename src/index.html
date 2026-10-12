@@ -2,7 +2,7 @@
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Papaléguas - Navegador Privado, Filmes Online e Músicas</title>
   <meta name="description" content="Papaléguas Browser - Navegador privado com streaming de filmes online, músicas sem anúncios e download direto de vídeos em alta velocidade.">
   <meta name="keywords" content="papaleguas, navegador privado, filmes online, assistir filmes, musicas gratis, download de videos, baixa tube">
@@ -10,8 +10,15 @@
   <link rel="canonical" href="https://papaleguas.ngrok.app/">
   <meta name="google-site-verification" content="SJH0DPmzrPqP6IQsWjyW-z1b_rAyECfY8s3XKWeyiD0" />
   <meta name="google-site-verification" content="google4acffdc77e16ecda" />
-  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-5788322050130808"
-     crossorigin="anonymous"></script>
+  <script>
+    window.addEventListener('load', function() {
+      var s = document.createElement('script');
+      s.src = 'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-5788322050130808';
+      s.async = true;
+      s.crossOrigin = 'anonymous';
+      document.head.appendChild(s);
+    });
+  </script>
   <meta property="og:title" content="Papaléguas - Navegador Privado, Filmes Online e Músicas">
   <meta property="og:description" content="Navegador privado com streaming de filmes online, músicas sem anúncios e download direto de vídeos.">
   <meta property="og:type" content="website">
@@ -22,7 +29,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="Papaléguas">
   <meta name="ngrok-skip-browser-warning" content="1">
-  <meta name="papaleguas-version" content="2026.10.12-v22">
+  <meta name="papaleguas-version" content="2026.10.12-v23">
   <link rel="manifest" href="manifest.json">
   <link rel="icon" type="image/x-icon" href="favicon.ico">
   <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png?v=4">
@@ -66,11 +73,13 @@
       }
     })();
   </script>
-  <link rel="stylesheet" href="styles.css?v=22">
+  <link rel="stylesheet" href="styles.css?v=23">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-  <script src="hybrid-bridge.js"></script>
+  <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@300;400;500;600;700&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@300;400;500;600;700&display=swap" media="print" onload="this.media='all'">
+  <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@300;400;500;600;700&display=swap"></noscript>
+  <script defer src="hybrid-bridge.js"></script>
 </head>
 <body>
   <!-- OVERLAY DE VOZ -->
@@ -605,10 +614,9 @@
       document.cookie = "ngrok-skip-browser-warning=1; path=/; max-age=31536000; SameSite=Lax";
     } catch (e) {}
   </script>
-  <script src="auto-update.js?v=22"></script>
-  <script src="hls.min.js"></script>
-  <script src="fab-drag.js?v=1"></script>
-  <script src="client-cast.js?v=9"></script>
-  <script src="renderer.js?v=22"></script>
+  <script defer src="auto-update.js?v=23"></script>
+  <script defer src="fab-drag.js?v=1"></script>
+  <script defer src="client-cast.js?v=9"></script>
+  <script defer src="renderer.js?v=23"></script>
 </body>
 </html>
