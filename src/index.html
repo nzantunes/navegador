@@ -22,7 +22,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="Papaléguas">
   <meta name="ngrok-skip-browser-warning" content="1">
-  <meta name="papaleguas-version" content="2026.10.11-v21">
+  <meta name="papaleguas-version" content="2026.10.12-v22">
   <link rel="manifest" href="manifest.json">
   <link rel="icon" type="image/x-icon" href="favicon.ico">
   <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png?v=4">
@@ -47,8 +47,7 @@
       } catch (e) {}
       var standalone = isInstalled || (window.matchMedia && (window.matchMedia('(display-mode: standalone)').matches || window.matchMedia('(display-mode: fullscreen)').matches || window.matchMedia('(display-mode: minimal-ui)').matches)) || window.navigator.standalone === true || (document.referrer && document.referrer.includes('android-app://'));
       var host = (location.hostname || '').toLowerCase();
-      var onTunnel = host.indexOf('trycloudflare.com') !== -1 || host.indexOf('cfargotunnel.com') !== -1;
-      var isPhone = !isElectron && (uaMobile || /Android.+Mobile|iPhone|iPod|Opera Mini|IEMobile|webOS|BlackBerry/i.test(ua) || (/iPad|Android/i.test(ua) && Math.min(screen.width || 1200, innerWidth || 1200) <= 900));
+      var isPhone = !isElectron && (uaMobile || /Android|iPhone|iPod|iPad|Mobile|Opera Mini|IEMobile|webOS|BlackBerry/i.test(ua) || (window.matchMedia && window.matchMedia('(max-width: 900px)').matches) || Math.min(screen.width || 1200, window.innerWidth || 1200) <= 900);
       var root = document.documentElement;
       root.classList.add(isPhone ? 'client-phone' : 'client-pc');
       root.classList.add(isElectron ? 'client-electron' : 'client-hosted');
@@ -67,7 +66,7 @@
       }
     })();
   </script>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=22">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -606,10 +605,10 @@
       document.cookie = "ngrok-skip-browser-warning=1; path=/; max-age=31536000; SameSite=Lax";
     } catch (e) {}
   </script>
-  <script src="auto-update.js?v=21"></script>
+  <script src="auto-update.js?v=22"></script>
   <script src="hls.min.js"></script>
   <script src="fab-drag.js?v=1"></script>
   <script src="client-cast.js?v=9"></script>
-  <script src="renderer.js?v=21"></script>
+  <script src="renderer.js?v=22"></script>
 </body>
 </html>

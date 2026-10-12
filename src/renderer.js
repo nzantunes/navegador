@@ -366,7 +366,7 @@ function detectClientPlatform() {
   const ua = navigator.userAgent || '';
   const uaMobile = !!(navigator.userAgentData && navigator.userAgentData.mobile);
   const isElectron = !!(window.torBrowserAPI && window.torBrowserAPI.isElectron) || /Electron/i.test(ua);
-  const phoneUa = /Android.+Mobile|iPhone|iPod|Opera Mini|IEMobile|webOS|BlackBerry/i.test(ua);
+  const phoneUa = /Android|iPhone|iPod|iPad|Mobile|Opera Mini|IEMobile|webOS|BlackBerry/i.test(ua);
   const tabletUa = /iPad|Android(?!.*Mobile)|Tablet/i.test(ua);
   const touch = (navigator.maxTouchPoints || 0) > 1 || ('ontouchstart' in window);
   const narrow = Math.min(window.innerWidth || 1200, (window.screen && window.screen.width) || 1200) <= 900;
@@ -819,7 +819,7 @@ async function prefetchCastDevices(onFound) {
 // Helper para abrir o Papaléguas Music em uma aba e tocar a música pedida
 function isPortalTabUrl(url) {
   const u = String(url || '').toLowerCase();
-  return u.includes('/musica') || u.includes('musica.html') || u.includes('/filmes') || u.includes('/youtube');
+  return u.includes('/musica') || u.includes('musica.html') || u.includes('/filmes') || u.includes('/youtube') || u.includes('/baixatube');
 }
 
 function syncPortalHomeButton(url) {
@@ -870,9 +870,18 @@ function goHomeFromFullscreen() {
     window.location.href = DEFAULT_URL;
   }
   setAddressBar('');
+  if (window.history && typeof window.history.pushState === 'function' && !isElectronApp()) {
+    try {
+      if (window.location.pathname !== '/' && window.location.pathname !== '/index.html') {
+        window.history.pushState({ portal: 'home' }, '', '/');
+      }
+    } catch (e) {}
+  }
 }
 
 function enterMenuPortalFullscreen() {
+  const isPhone = isNativePhone || isMobileMode || (document.documentElement && document.documentElement.classList.contains('client-phone')) || (Math.min(window.innerWidth || 1200, (window.screen && window.screen.width) || 1200) <= 900);
+  if (isPhone) return;
   document.documentElement.classList.add('video-true-fs');
   document.body.classList.add('video-true-fs');
 }
@@ -912,6 +921,13 @@ function openPapaleguasMusic(searchQuery = '', autoplay = true) {
   }
   setAddressBar(publicAppOrigin() + '/musica');
   syncPortalHomeButton('/musica');
+  if (window.history && typeof window.history.pushState === 'function' && !isElectron) {
+    try {
+      if (window.location.pathname !== '/musica') {
+        window.history.pushState({ portal: 'musica' }, '', '/musica');
+      }
+    } catch (e) {}
+  }
 }
 
 // Tab Management
@@ -1377,7 +1393,7 @@ function createTab(initialUrl = DEFAULT_URL) {
         if (q) params.set('q', q);
         if (vid) params.set('v', vid);
         const qs = params.toString();
-        return '/youtube' + (qs ? '?' + qs : '');
+        return '/baixatube' + (qs ? '?' + qs : '');
       }
 
       if (u.startsWith('http://') || u.startsWith('https://')) {
@@ -2070,6 +2086,20 @@ function navigateToUrl(rawInput) {
   let target = rawInput.trim();
   if (!target) return;
   if (typeof hideUrlSuggestions === 'function') hideUrlSuggestions();
+
+  const cleanNavCmd = target.toLowerCase().replace(/^\/+/, '').trim();
+  if (cleanNavCmd === 'baixatube' || cleanNavCmd === 'youtube') {
+    openYoutube('');
+    return;
+  }
+  if (cleanNavCmd === 'filmes' || cleanNavCmd === 'filmes online') {
+    openFilmesOnline('');
+    return;
+  }
+  if (cleanNavCmd === 'musica' || cleanNavCmd === 'musicas' || cleanNavCmd === 'spotify') {
+    openPapaleguasMusic('');
+    return;
+  }
 
   // Intercepta qualquer tentativa de navegar para o Spotify para abrir direto o mini player em tela cheia
   if (target.includes('open.spotify.com')) {
@@ -3167,9 +3197,11 @@ btnReload.addEventListener('click', () => {
   }
 });
 
-btnHome.addEventListener('click', () => {
-  goHomeFromFullscreen();
-});
+if (btnHome) {
+  bindMenuTouchAndClick(btnHome, () => {
+    goHomeFromFullscreen();
+  });
+}
 
 (function trapHostedBrowserBack() {
   if (isElectronApp()) return;
@@ -3242,15 +3274,36 @@ const btnSpotify = document.getElementById('btn-spotify');
 const btnYoutube = document.getElementById('btn-youtube');
 const btnAddBookmark = document.getElementById('btn-add-bookmark');
 const bookmarksBarItems = document.getElementById('bookmarks-bar-items');
+
+function bindMenuTouchAndClick(el, fn) {
+  if (!el) return;
+  let handledTime = 0;
+  el.addEventListener('touchend', (e) => {
+    handledTime = Date.now();
+    e.preventDefault();
+    fn();
+  }, { passive: false });
+  el.addEventListener('click', (e) => {
+    if (Date.now() - handledTime < 450) return;
+    fn();
+  });
+}
+
 if (btnSpotify) {
-  btnSpotify.addEventListener('click', () => {
+  bindMenuTouchAndClick(btnSpotify, () => {
     openPapaleguasMusic('');
     enterMenuPortalFullscreen();
   });
 }
 if (btnYoutube) {
-  btnYoutube.addEventListener('click', () => {
+  bindMenuTouchAndClick(btnYoutube, () => {
     openYoutube('');
+    enterMenuPortalFullscreen();
+  });
+}
+if (btnMovies) {
+  bindMenuTouchAndClick(btnMovies, () => {
+    openFilmesOnline('');
     enterMenuPortalFullscreen();
   });
 }
@@ -3280,6 +3333,14 @@ function openFilmesOnline(searchQuery = '') {
   }
   setAddressBar(publicAppOrigin() + '/filmes');
   syncPortalHomeButton('/filmes');
+  if (window.history && typeof window.history.pushState === 'function' && !isElectron) {
+    try {
+      const targetPath = '/filmes' + (searchQuery && searchQuery.trim() ? '?q=' + encodeURIComponent(searchQuery.trim()) : '');
+      if (window.location.pathname !== '/filmes') {
+        window.history.pushState({ portal: 'filmes' }, '', targetPath);
+      }
+    } catch (e) {}
+  }
 }
 window.openFilmesOnline = openFilmesOnline;
 window.openPapaleguasMusic = openPapaleguasMusic;
@@ -3292,31 +3353,48 @@ function openYoutube(searchQuery = '', videoId = '') {
   if (cleanQ) params.set('q', cleanQ);
   if (videoId) params.set('v', videoId);
   const qs = params.toString();
-  const ytUrl = baseUrl + '/youtube' + (qs ? '?' + qs : '');
+  const baixatubeUrl = baseUrl + '/baixatube' + (qs ? '?' + qs : '');
 
-  const existingTab = tabs.find((t) => t.url && (t.url.includes('/youtube') || t.url.includes('/baixatube') || t.url.includes('newtab.html') || t.url.includes('youtube.com')));
+  // Procura se já existe uma aba de BaixaTube aberta (que nem o Filmes Online)
+  const existingTab = tabs.find((t) => t.url && (t.url.includes('/baixatube') || t.url.includes('/youtube')));
   if (existingTab) {
+    existingTab.url = baixatubeUrl;
     activateTab(existingTab.id);
-    if (existingTab.webview && typeof existingTab.webview.loadURL === 'function') {
-      existingTab.webview.loadURL(ytUrl);
-    } else if (existingTab.webview) {
-      existingTab.webview.src = ytUrl;
+    if (cleanQ || videoId) {
+      if (existingTab.webview && typeof existingTab.webview.loadURL === 'function') {
+        existingTab.webview.loadURL(baixatubeUrl);
+      } else if (existingTab.webview) {
+        existingTab.webview.src = baixatubeUrl;
+      }
     }
   } else {
     const activeTab = getActiveTab();
     if (activeTab && activeTab.url && activeTab.url.includes('newtab.html') && activeTab.webview) {
-      if (typeof activeTab.webview.loadURL === 'function') {
-        activeTab.webview.loadURL(ytUrl);
-      } else {
-        activeTab.webview.src = ytUrl;
+      activeTab.url = baixatubeUrl;
+      if (cleanQ || videoId) {
+        if (typeof activeTab.webview.loadURL === 'function') {
+          activeTab.webview.loadURL(baixatubeUrl);
+        } else {
+          activeTab.webview.src = baixatubeUrl;
+        }
       }
     } else {
-      createTab(ytUrl);
+      createTab(baixatubeUrl);
     }
   }
   setAddressBar(publicAppOrigin() + '/baixatube');
-  syncPortalHomeButton('/youtube');
+  syncPortalHomeButton('/baixatube');
+  if (window.history && typeof window.history.pushState === 'function' && !isElectron) {
+    try {
+      const targetPath = '/baixatube' + (qs ? '?' + qs : '');
+      if (window.location.pathname !== '/baixatube') {
+        window.history.pushState({ portal: 'baixatube' }, '', targetPath);
+      }
+    } catch (e) {}
+  }
 }
+window.openYoutube = openYoutube;
+window.openBaixaTube = openYoutube;
 
 function openWebSearch(searchQuery = '', forceAi = false) {
   const cleanQ = (searchQuery || '').trim();
@@ -3341,13 +3419,6 @@ function openWebSearch(searchQuery = '', forceAi = false) {
     return;
   }
   createTab(searchUrl);
-}
-
-if (btnMovies) {
-  btnMovies.addEventListener('click', () => {
-    openFilmesOnline('');
-    enterMenuPortalFullscreen();
-  });
 }
 
 // Função para abrir favoritos (internos ou externos)
@@ -5613,6 +5684,16 @@ window.torBrowserAPI.getNewTabUrl().then(url => {
   updateAdblockUI();
   initCloudflareStatus();
 
+  // Se o usuário entrou no celular direto pela URL /baixatube, /filmes ou /musica:
+  const initPath = (window.location && window.location.pathname) || '';
+  if (initPath === '/baixatube' || initPath === '/youtube') {
+    openYoutube('');
+  } else if (initPath === '/filmes') {
+    openFilmesOnline('');
+  } else if (initPath === '/musica') {
+    openPapaleguasMusic('');
+  }
+
   // Verifica status da sessão compartilhada
   fetch('/api/session-info', {
     headers: { 'X-Client-Id': CLIENT_ID }
@@ -5624,6 +5705,20 @@ window.torBrowserAPI.getNewTabUrl().then(url => {
       updateCloudflareBadge(primaryUrl, isConnecting, Boolean(info.ngrokTunnelUrl));
     }
   }).catch(() => {});
+});
+
+// Suporte a navegação por histórico do navegador móvel (voltar/avançar no celular)
+window.addEventListener('popstate', () => {
+  const p = (window.location && window.location.pathname) || '/';
+  if (p === '/baixatube' || p === '/youtube') {
+    openYoutube('');
+  } else if (p === '/filmes') {
+    openFilmesOnline('');
+  } else if (p === '/musica') {
+    openPapaleguasMusic('');
+  } else if (p === '/' || p === '/index.html') {
+    goHomeFromFullscreen();
+  }
 });
 
 // ============================================================================
@@ -6411,11 +6506,12 @@ function wipeLocalTraces() {
   if (!isElectron) {
     try { keptBookmarks = localStorage.getItem(key) || localStorage.getItem('user_bookmarks'); } catch (e) {}
   }
-  let keptEq = null, keptSize = null, keptCountry = null, keptClientId = null;
+  let keptEq = null, keptSize = null, keptCountry = null, keptBtCountry = null, keptClientId = null;
   try {
     keptEq = localStorage.getItem('papaleguas_music_eq');
     keptSize = localStorage.getItem('sp_player_size');
     keptCountry = localStorage.getItem('papaleguas_selected_country');
+    keptBtCountry = localStorage.getItem('papaleguas_baixatube_country');
     keptClientId = localStorage.getItem('papaleguas_client_id');
   } catch (e) {}
   try { localStorage.clear(); } catch (e) {}
@@ -6427,6 +6523,7 @@ function wipeLocalTraces() {
     if (keptEq) localStorage.setItem('papaleguas_music_eq', keptEq);
     if (keptSize) localStorage.setItem('sp_player_size', keptSize);
     if (keptCountry) localStorage.setItem('papaleguas_selected_country', keptCountry);
+    if (keptBtCountry) localStorage.setItem('papaleguas_baixatube_country', keptBtCountry);
     if (keptClientId) localStorage.setItem('papaleguas_client_id', keptClientId);
   } catch (e) {}
   try { sessionStorage.clear(); } catch (e) {}

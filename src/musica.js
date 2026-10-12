@@ -89,7 +89,8 @@ if (!window.torBrowserAPI) {
     },
     getAiMusicRecommendations: async (query, category, excludeTitles) => {
       try {
-        const country = localStorage.getItem('papaleguas_selected_country') || 'BR';
+        const rawCountry = localStorage.getItem('papaleguas_music_country') || localStorage.getItem('papaleguas_selected_country') || 'BR';
+        const country = (rawCountry && /^[A-Z]{2}$/i.test(rawCountry) && rawCountry.toUpperCase() !== 'AUTO') ? rawCountry.toUpperCase() : 'BR';
         const res = await fetch('/api/recommendations', {
           method: 'POST',
           headers: {
@@ -103,7 +104,8 @@ if (!window.torBrowserAPI) {
     },
     chatDjPapaleguas: async (userMessage, history, excludeTitles, trackCount) => {
       try {
-        const country = localStorage.getItem('papaleguas_selected_country') || 'BR';
+        const rawCountry = localStorage.getItem('papaleguas_music_country') || localStorage.getItem('papaleguas_selected_country') || 'BR';
+        const country = (rawCountry && /^[A-Z]{2}$/i.test(rawCountry) && rawCountry.toUpperCase() !== 'AUTO') ? rawCountry.toUpperCase() : 'BR';
         const res = await fetch('/api/dj-chat', {
           method: 'POST',
           headers: {

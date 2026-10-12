@@ -2477,6 +2477,7 @@ body.phone-landscape-fs .fs-home-btn {
     display: flex !important;
     gap: 4px !important;
     align-items: center !important;
+    flex-shrink: 0 !important;
   }
 
   html.client-phone #btn-toggle-tor,
@@ -2494,8 +2495,10 @@ body.phone-landscape-fs .fs-home-btn {
 
   html.client-phone #btn-spotify,
   html.client-phone #btn-movies,
+  html.client-phone #btn-youtube,
   body.client-phone #btn-spotify,
-  body.client-phone #btn-movies {
+  body.client-phone #btn-movies,
+  body.client-phone #btn-youtube {
     display: inline-flex !important;
     height: 34px !important;
     padding: 0 8px !important;
@@ -2503,6 +2506,37 @@ body.phone-landscape-fs .fs-home-btn {
     font-size: 12px !important;
     align-items: center !important;
     justify-content: center !important;
+    white-space: nowrap !important;
+    flex-shrink: 0 !important;
+    box-sizing: border-box !important;
+    touch-action: manipulation !important;
+    cursor: pointer !important;
+  }
+
+  html.client-phone #btn-youtube svg,
+  body.client-phone #btn-youtube svg {
+    flex-shrink: 0 !important;
+  }
+
+  @media (max-width: 430px) {
+    html.client-phone #btn-spotify span,
+    html.client-phone #btn-movies span,
+    html.client-phone #btn-youtube span,
+    body.client-phone #btn-spotify span,
+    body.client-phone #btn-movies span,
+    body.client-phone #btn-youtube span {
+      display: none !important;
+    }
+    html.client-phone #btn-spotify,
+    html.client-phone #btn-movies,
+    html.client-phone #btn-youtube,
+    body.client-phone #btn-spotify,
+    body.client-phone #btn-movies,
+    body.client-phone #btn-youtube {
+      padding: 0 !important;
+      width: 34px !important;
+      min-width: 34px !important;
+    }
   }
 
   html.client-phone .webviews-container,
@@ -5433,6 +5467,12 @@ html.video-true-fs .voice-overlay,
 html.video-true-fs .global-yt-mini-player,
 html.video-true-fs .global-music-mini-player {
   display: none !important;
+}
+
+/* No celular, a barra de navegação superior permanece acessível ao navegar pelos menus */
+html.client-phone:not(.fullscreen-video-locked) .browser-toolbar,
+body.client-phone:not(.fullscreen-video-locked) .browser-toolbar {
+  display: flex !important;
 }
 
 .fs-home-btn {

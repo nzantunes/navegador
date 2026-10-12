@@ -85,12 +85,8 @@ async function handle(req, res, ctx) {
       const useTor = ctx.isTorRoutingEnabled(clientSession);
       const clientIpParam = reqUrl.searchParams.get('deviceIp') || req.headers['x-device-ip'] || req.headers['x-client-ip'] || '';
       const clientIp = ctx.extractRequestDeviceIp(req, clientIpParam);
-      const country = await ctx.getClientCountryCode(req, clientIp, useTor);
+      const country = await ctx.getClientCountryCode(req, clientIp, false);
       let effectiveIp = clientIp;
-      if (useTor) {
-        const torExit = await ctx.lookupOutboundIp(true).catch(() => null);
-        if (torExit && torExit.IP) effectiveIp = torExit.IP;
-      }
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({
         success: true,
@@ -122,17 +118,18 @@ async function handle(req, res, ctx) {
     }
     const clientId = req.headers['x-client-id'] || reqUrl.searchParams.get('clientId') || 'client_default';
     const clientSession = ctx.getOrCreateClientSession(clientId);
-    const useTor = ctx.isTorRoutingEnabled(clientSession);
+    // Buscas e recomendações do YouTube saem direto (sem Tor) na velocidade máxima da internet
+    const useTor = false;
     const qParam = reqUrl.searchParams.get('q') || '';
     const clientCountryParam = reqUrl.searchParams.get('country') || '';
     const clientIpParam = reqUrl.searchParams.get('deviceIp') || req.headers['x-device-ip'] || req.headers['x-client-ip'] || '';
     const clientIp = ctx.extractRequestDeviceIp(req, clientIpParam);
 
     let countryCode;
-    if (clientCountryParam && /^[A-Z]{2}$/i.test(clientCountryParam)) {
+    if (clientCountryParam && /^[A-Z]{2}$/i.test(clientCountryParam) && clientCountryParam.toUpperCase() !== 'AUTO') {
       countryCode = clientCountryParam.toUpperCase();
     } else {
-      countryCode = await ctx.getClientCountryCode(req, clientIp, useTor).catch(() => 'BR');
+      countryCode = await ctx.getClientCountryCode(req, clientIp, false).catch(() => 'BR');
     }
 
     const hl = ctx.getHlForCountry(countryCode);
@@ -209,6 +206,8 @@ async function handle(req, res, ctx) {
     res.end(JSON.stringify({
       success: true,
       countryCode,
+      countryName: COUNTRY_NAMES[countryCode] || countryCode,
+      countryFlag: COUNTRY_FLAGS[countryCode] || '🌍',
       clientIp: effectiveClientIp,
       query: headingQuery,
       videos: (videos || []).slice(0, 30)

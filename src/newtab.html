@@ -3,6 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Papaléguas BaixaTube - Vídeos Sem Anúncios e Downloads em MP4 e MP3</title>
+  <meta name="papaleguas-version" content="2026.10.12-v22">
   <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-5788322050130808"
      crossorigin="anonymous"></script>
   <link rel="manifest" href="manifest.json">
@@ -723,6 +725,69 @@
       display: none;
     }
 
+    .home-expand-btn {
+      position: absolute;
+      top: max(10px, env(safe-area-inset-top));
+      right: max(10px, env(safe-area-inset-right));
+      left: auto;
+      z-index: 50;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 40px;
+      height: 40px;
+      padding: 0;
+      border: 1px solid rgba(255, 255, 255, 0.28);
+      border-radius: 10px;
+      background: rgba(8, 12, 22, 0.88);
+      color: #fff;
+      cursor: pointer;
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      box-shadow: 0 8px 22px rgba(0, 0, 0, 0.45);
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .home-expand-btn:hover,
+    .home-expand-btn:active {
+      background: rgba(0, 240, 255, 0.28);
+      border-color: var(--neon-blue);
+      color: #fff;
+      transform: scale(1.05);
+    }
+
+    .home-player-section.mini-mode .home-expand-btn {
+      display: none;
+    }
+
+    .home-expand-btn .icon-contract {
+      display: none;
+    }
+
+    html.video-true-fs .home-expand-btn,
+    html:fullscreen .home-expand-btn,
+    html:-webkit-full-screen .home-expand-btn {
+      display: inline-flex !important;
+      top: max(16px, env(safe-area-inset-top));
+      right: max(16px, env(safe-area-inset-right)) !important;
+      left: auto !important;
+      z-index: 2147483646;
+      background: rgba(15, 23, 42, 0.92);
+      border-color: rgba(255, 255, 255, 0.38);
+    }
+
+    html.video-true-fs .home-expand-btn .icon-expand,
+    html:fullscreen .home-expand-btn .icon-expand,
+    html:-webkit-full-screen .home-expand-btn .icon-expand {
+      display: none !important;
+    }
+
+    html.video-true-fs .home-expand-btn .icon-contract,
+    html:fullscreen .home-expand-btn .icon-contract,
+    html:-webkit-full-screen .home-expand-btn .icon-contract {
+      display: inline-block !important;
+    }
+
     html.video-true-fs .home-minimize-btn,
     html:fullscreen .home-minimize-btn,
     html:-webkit-full-screen .home-minimize-btn {
@@ -890,6 +955,44 @@
       background: rgba(239, 68, 68, 0.3);
       border-color: #ef4444;
       color: #fff;
+    }
+
+    .home-pdl-btn.expand-btn {
+      background: rgba(56, 189, 248, 0.16);
+      border-color: rgba(56, 189, 248, 0.38);
+      color: #bae6fd;
+    }
+
+    .home-pdl-btn.expand-btn:hover {
+      background: rgba(56, 189, 248, 0.32);
+      border-color: #38bdf8;
+      color: #fff;
+      transform: translateY(-1px);
+    }
+
+    .home-pdl-btn.theater-btn {
+      background: rgba(245, 158, 11, 0.16);
+      border-color: rgba(245, 158, 11, 0.38);
+      color: #fde68a;
+    }
+
+    .home-pdl-btn.theater-btn:hover {
+      background: rgba(245, 158, 11, 0.32);
+      border-color: #f59e0b;
+      color: #fff;
+      transform: translateY(-1px);
+    }
+
+    .home-player-section.theater-mode {
+      max-width: 100% !important;
+      width: 100% !important;
+      padding: 0 10px;
+      box-sizing: border-box;
+    }
+
+    .home-youtube-main.theater-mode-active {
+      max-width: 100% !important;
+      padding: 0 14px;
     }
 
     /* Menu de Categorias do YouTube */
@@ -1965,21 +2068,27 @@
 
     .papaleguas-portal-grid {
       display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
       margin: 12px 0 15px 0;
+    }
+
+    @media (max-width: 360px) {
+      .papaleguas-portal-grid {
+        grid-template-columns: 1fr 1fr;
+      }
     }
 
     .papaleguas-portal-btn {
       position: relative;
       overflow: hidden;
       border-radius: 12px;
-      padding: 12px 10px;
+      padding: 10px 6px;
       display: flex;
       flex-direction: column;
       align-items: center;
       text-align: center;
-      gap: 6px;
+      gap: 5px;
       cursor: pointer;
       text-decoration: none;
       border: 1px solid rgba(255, 255, 255, 0.18);
@@ -2005,6 +2114,18 @@
 
     .papaleguas-portal-btn:active {
       transform: translateY(0) scale(0.97);
+    }
+
+    .portal-btn-youtube {
+      background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
+      color: #ffffff;
+      border-color: rgba(239, 68, 68, 0.55);
+      box-shadow: 0 4px 16px rgba(220, 38, 38, 0.38), 0 0 10px rgba(185, 28, 28, 0.25);
+    }
+
+    .portal-btn-youtube:hover {
+      border-color: #f87171;
+      box-shadow: 0 8px 24px rgba(220, 38, 38, 0.65), 0 0 20px rgba(185, 28, 28, 0.5);
     }
 
     .portal-btn-music {
@@ -2352,6 +2473,9 @@
       background: rgba(2, 132, 199, 0.18) !important;
       color: #0369a1 !important;
     }
+    body.light-mode .portal-btn-youtube {
+      box-shadow: 0 4px 14px rgba(220, 38, 38, 0.25) !important;
+    }
     body.light-mode .portal-btn-music {
       box-shadow: 0 4px 14px rgba(124, 58, 237, 0.25) !important;
     }
@@ -2408,6 +2532,12 @@
 
       <!-- BOTÕES DE ATALHO RÁPIDO COM EFEITOS NEON E SHIMMER -->
       <div class="papaleguas-portal-grid">
+        <button type="button" class="papaleguas-portal-btn portal-btn-youtube" id="btn-portal-youtube" title="Abrir BaixaTube">
+          <span class="papaleguas-portal-icon">📺</span>
+          <span class="papaleguas-portal-name">BaixaTube</span>
+          <span class="papaleguas-portal-tag">Vídeos & Downloads</span>
+        </button>
+
         <button type="button" class="papaleguas-portal-btn portal-btn-music" id="btn-portal-music" title="Abrir Papaléguas Music">
           <span class="papaleguas-portal-icon">🎵</span>
           <span class="papaleguas-portal-name">Papaléguas Music</span>
@@ -2517,6 +2647,7 @@
       const dragHandle = document.getElementById('papaleguas-drag-handle');
       const closeBtn = document.getElementById('papaleguas-bubble-close');
       const actionBtn = document.getElementById('papaleguas-bubble-action-btn');
+      const youtubePortalBtn = document.getElementById('btn-portal-youtube');
       const musicPortalBtn = document.getElementById('btn-portal-music');
       const moviesPortalBtn = document.getElementById('btn-portal-movies');
       const installPortalBtn = document.getElementById('btn-portal-install-app');
@@ -2876,6 +3007,13 @@
         });
       }
 
+      if (youtubePortalBtn) {
+        youtubePortalBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          navigateTo('/baixatube', 'openYoutube');
+        });
+      }
+
       if (musicPortalBtn) {
         musicPortalBtn.addEventListener('click', (e) => {
           e.stopPropagation();
@@ -3011,12 +3149,17 @@
       });
 
       // Abre automaticamente ao carregar a página para dar as boas-vindas
-      window.addEventListener('DOMContentLoaded', () => {
-        setTimeout(openBubble, 450);
-      });
-      setTimeout(() => {
-        if (!bubble.classList.contains('is-visible')) openBubble();
-      }, 500);
+      // (Bypassa se o usuário estiver na rota dedicada do BaixaTube, no celular ou se já foi dispensado)
+      const isDedicatedBaixatube = window.location.pathname === '/baixatube' || window.location.pathname === '/youtube';
+      const isMobileDevice = isPhoneClient();
+      if (!isDedicatedBaixatube && !isMobileDevice && !isDismissedForClient()) {
+        window.addEventListener('DOMContentLoaded', () => {
+          setTimeout(openBubble, 450);
+        });
+        setTimeout(() => {
+          if (!bubble.classList.contains('is-visible') && !isDismissedForClient()) openBubble();
+        }, 600);
+      }
 
       // Remove o ícone e o balão do Papaléguas automaticamente após 1 minuto (60 segundos)
       // e grava para nunca mais abrir para aquele cliente
@@ -3089,7 +3232,7 @@
           Novos Vídeos
         </button>
         <select id="baixatube-country-badge" class="baixatube-country-select" onchange="changeFeedCountry(this.value)" title="Escolher país das notícias e vídeos deste dispositivo">
-          <option value="BR" selected>🇧🇷 Brasil</option>
+          <option value="BR">🇧🇷 Brasil</option>
           <option value="US">🇺🇸 Estados Unidos</option>
           <option value="PT">🇵🇹 Portugal</option>
           <option value="ES">🇪🇸 Espanha</option>
@@ -3102,7 +3245,7 @@
           <option value="CA">🇨🇦 Canadá</option>
           <option value="MX">🇲🇽 México</option>
           <option value="RU">🇷🇺 Rússia</option>
-          <option value="auto">🌐 Automático (Detectar IP)</option>
+          <option value="auto" selected>🌐 Automático (Detectar IP)</option>
         </select>
       </div>
 
@@ -3149,14 +3292,21 @@
           <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19 7h-8v6h8V7zm2-4H3a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zm0 16H3V5h18v14z"/></svg>
         </button>
         <button type="button" onclick="expandHomeMiniPlayer()" title="Restaurar player">▢</button>
+        <button type="button" onclick="enterVideoFullscreenDirect()" title="Expandir em tela cheia">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
+        </button>
         <button type="button" onclick="closeHomePlayer()" title="Fechar vídeo">✕</button>
       </div>
       <div class="home-player-scale" id="home-player-scale">
         <div class="home-mini-drag" id="home-mini-drag" title="Arraste para mover o vídeo"></div>
         <div class="home-player-box">
           <iframe id="home-yt-iframe" src="about:blank" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen referrerpolicy="origin"></iframe>
-          <button type="button" class="home-minimize-btn" id="home-minimize-btn" onclick="minimizeHomeVideo()" title="Picture-in-picture">
+          <button type="button" class="home-minimize-btn" id="home-minimize-btn" onclick="minimizeHomeVideo()" title="Picture-in-picture (Minimizar)">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19 7h-8v6h8V7zm2-4H3a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zm0 16H3V5h18v14z"/></svg>
+          </button>
+          <button type="button" class="home-expand-btn" id="home-expand-btn" onclick="toggleExpandHomeVideo()" title="Expandir vídeo (Tela cheia - F)">
+            <svg class="icon-expand" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
+            <svg class="icon-contract" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"/></svg>
           </button>
         </div>
       </div>
@@ -3166,6 +3316,12 @@
           <span class="home-player-title-text" id="home-player-title">Carregando notícias e vídeos mais recentes...</span>
         </div>
         <div class="home-player-dl-actions">
+          <button class="home-pdl-btn expand-btn" id="home-btn-expand-player" onclick="toggleExpandHomeVideo()" title="Expandir vídeo em tela cheia (F)">
+            <span id="home-expand-label">⛶ Expandir Tela</span>
+          </button>
+          <button class="home-pdl-btn theater-btn" id="home-btn-theater" onclick="toggleTheaterMode()" title="Expandir largura do player (Modo Teatro - T)">
+            <span id="home-theater-label">🗖 Modo Teatro</span>
+          </button>
           <button class="home-pdl-btn mp4" id="home-btn-dl-mp4" onclick="handleActiveDownload('mp4')">🎬 Baixar MP4</button>
           <button class="home-pdl-btn mp3" id="home-btn-dl-mp3" onclick="handleActiveDownload('mp3')">🎵 Baixar MP3</button>
           <button class="home-pdl-btn cast" id="home-btn-cast" onclick="openHomeCastModal()" title="Transmitir na Smart TV">📺 Transmitir</button>
@@ -3490,9 +3646,9 @@
       CN: '🇨🇳', RU: '🇷🇺', CA: '🇨🇦', AU: '🇦🇺', IN: '🇮🇳'
     };
 
-    let userSelectedCountry = localStorage.getItem('papaleguas_selected_country') || 'BR';
+    // Inicia a home sempre no Automático por padrão no BaixaTube (detecta país pelo IP da conexão)
+    let userSelectedCountry = localStorage.getItem('papaleguas_baixatube_country') || 'auto';
 
-    // Inicia a home sempre no Brasil por padrão
     let detectedCountry = (userSelectedCountry === 'auto') ? 'BR' : (userSelectedCountry || 'BR');
     let detectedCountryName = COUNTRY_NAMES_MAP[detectedCountry] || 'Brasil';
     let detectedCountryFlag = COUNTRY_FLAGS_MAP[detectedCountry] || '🇧🇷';
@@ -3503,7 +3659,7 @@
       try {
         const res = await Promise.race([
           fetch('https://api4.ipify.org?format=json', { cache: 'no-store' }),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000))
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 600))
         ]);
         if (res.ok) {
           const d = await res.json();
@@ -3516,7 +3672,7 @@
     function changeFeedCountry(val) {
       const selectEl = document.getElementById('baixatube-country-badge');
       if (val === 'auto') {
-        localStorage.setItem('papaleguas_selected_country', 'auto');
+        localStorage.setItem('papaleguas_baixatube_country', 'auto');
         userSelectedCountry = 'auto';
         detectAndApplyCountry(true).finally(() => {
           closeHomePlayer();
@@ -3526,7 +3682,7 @@
       }
       if (/^[A-Z]{2}$/i.test(val)) {
         val = val.toUpperCase();
-        localStorage.setItem('papaleguas_selected_country', val);
+        localStorage.setItem('papaleguas_baixatube_country', val);
         userSelectedCountry = val;
         detectedCountry = val;
         detectedCountryName = COUNTRY_NAMES_MAP[val] || val;
@@ -3544,13 +3700,18 @@
       const selectEl = document.getElementById('baixatube-country-badge');
       const isAutoMode = forceAuto || userSelectedCountry === 'auto';
       if (!isAutoMode) {
-        // Padrão Brasil ou país salvo pelo usuário
+        // País salvo pelo usuário
         detectedCountry = userSelectedCountry || 'BR';
         detectedCountryName = COUNTRY_NAMES_MAP[detectedCountry] || 'Brasil';
         detectedCountryFlag = COUNTRY_FLAGS_MAP[detectedCountry] || '🇧🇷';
         if (selectEl) {
           selectEl.value = detectedCountry;
           selectEl.title = `País atual: ${detectedCountryFlag} ${detectedCountryName} (${detectedCountry})`;
+        }
+      } else {
+        if (selectEl) {
+          selectEl.value = 'auto';
+          selectEl.title = '🌐 Automático (Detectando país pela conexão...)';
         }
       }
       try {
@@ -3573,12 +3734,16 @@
         }
 
         if (isAutoMode) {
+          const prevCountry = detectedCountry;
           detectedCountry = autoCountry;
           detectedCountryName = autoName;
           detectedCountryFlag = autoFlag;
           if (selectEl) {
             selectEl.value = 'auto';
             selectEl.title = `Detectado automaticamente pela conexão: ${detectedCountryFlag} ${detectedCountryName} (${detectedCountry})`;
+          }
+          if (prevCountry && prevCountry !== autoCountry) {
+            loadRecentYouTubeFeed(activeCategory, false, true);
           }
         }
       } catch (e) {}
@@ -3685,7 +3850,7 @@
         if (exitFs) exitFs.call(document);
       } catch (e) {}
       document.documentElement.classList.remove('video-true-fs');
-      window.location.href = '/newtab.html';
+      window.location.href = '/';
     }
     window.goAppHome = goAppHome;
 
@@ -3874,13 +4039,14 @@
         const timestamp = Date.now();
         const devIpParam = detectedClientDeviceIp ? `&deviceIp=${encodeURIComponent(detectedClientDeviceIp)}` : '';
         const devHeaders = detectedClientDeviceIp ? { 'X-Device-Ip': detectedClientDeviceIp } : {};
-        let resp = await fetch(`/api/youtube-recent?q=${encodeURIComponent(query)}&time=${currentTimeFilter}&country=${encodeURIComponent(detectedCountry)}${devIpParam}&_t=${timestamp}${forceRefresh ? '&refresh=1' : ''}`, {
+        const reqCountry = (userSelectedCountry === 'auto') ? 'auto' : (detectedCountry || 'auto');
+        let resp = await fetch(`/api/youtube-recent?q=${encodeURIComponent(query)}&time=${currentTimeFilter}&country=${encodeURIComponent(reqCountry)}${devIpParam}&_t=${timestamp}${forceRefresh ? '&refresh=1' : ''}`, {
           cache: 'no-store',
           headers: { 'Cache-Control': 'no-cache', ...devHeaders }
         });
         if (requestId !== feedRequestId) return;
         if (!resp.ok && resp.status === 404) {
-          resp = await fetch(`/api/youtube-trending?country=${encodeURIComponent(detectedCountry)}${devIpParam}&_t=${timestamp}`, {
+          resp = await fetch(`/api/youtube-trending?country=${encodeURIComponent(reqCountry)}${devIpParam}&_t=${timestamp}`, {
             cache: 'no-store',
             headers: devHeaders
           });
@@ -3891,7 +4057,7 @@
         if (requestId !== feedRequestId) return;
 
         if ((!data || !data.success || !Array.isArray(data.videos) || data.videos.length === 0)) {
-          resp = await fetch(`/api/youtube-recent?q=${encodeURIComponent(query)}&time=${currentTimeFilter}&country=${encodeURIComponent(detectedCountry)}${devIpParam}&_t=${Date.now()}`, {
+          resp = await fetch(`/api/youtube-recent?q=${encodeURIComponent(query)}&time=${currentTimeFilter}&country=${encodeURIComponent(reqCountry)}${devIpParam}&_t=${Date.now()}`, {
             cache: 'no-store',
             headers: { 'Cache-Control': 'no-cache', ...devHeaders }
           });
@@ -3901,6 +4067,21 @@
         if (requestId !== feedRequestId) return;
 
         if (data && data.success && Array.isArray(data.videos) && data.videos.length > 0) {
+          if (data.countryCode && /^[A-Z]{2}$/.test(data.countryCode)) {
+            detectedCountry = data.countryCode;
+            detectedCountryName = data.countryName || COUNTRY_NAMES_MAP[data.countryCode] || data.countryCode;
+            detectedCountryFlag = data.countryFlag || COUNTRY_FLAGS_MAP[data.countryCode] || '🌍';
+            if (data.clientIp) detectedClientDeviceIp = data.clientIp;
+            const selectEl = document.getElementById('baixatube-country-badge');
+            if (selectEl) {
+              const autoOpt = selectEl.querySelector('option[value="auto"]');
+              if (autoOpt) autoOpt.textContent = `🌐 Automático (${detectedCountryFlag} ${detectedCountry})`;
+              if (userSelectedCountry === 'auto') {
+                selectEl.value = 'auto';
+                selectEl.title = `Detectado automaticamente pela conexão: ${detectedCountryFlag} ${detectedCountryName} (${detectedCountry})`;
+              }
+            }
+          }
           homeYtGrid.innerHTML = '';
           updateFeedHeading(query);
           data.videos.forEach(v => {
@@ -4304,6 +4485,8 @@
     }
 
     let videoFsArmed = false;
+    let userRequestedFs = false;
+
     function isDocFullscreen() {
       return !!(document.fullscreenElement || document.webkitFullscreenElement || document.webkitCurrentFullScreenElement || document.msFullscreenElement);
     }
@@ -4311,16 +4494,44 @@
       if (!currentActiveVideoId) return;
       if (typeof collapseHomeToMini === 'function') collapseHomeToMini(true);
     }
+
+    function syncFullscreenUi(isFs) {
+      const expandLabel = document.getElementById('home-expand-label');
+      const expandBtn = document.getElementById('home-btn-expand-player');
+      const overlayBtn = document.getElementById('home-expand-btn');
+      if (expandLabel) {
+        expandLabel.textContent = isFs ? '🗗 Restaurar Tela' : '⛶ Expandir Tela';
+      }
+      if (expandBtn) {
+        expandBtn.title = isFs ? 'Sair da tela cheia (ESC)' : 'Expandir vídeo em tela cheia (F)';
+      }
+      if (overlayBtn) {
+        overlayBtn.title = isFs ? 'Sair da tela cheia (ESC)' : 'Expandir vídeo (Tela cheia - F)';
+      }
+    }
+
     function onHomeFullscreenChange() {
       if (isDocFullscreen()) {
         videoFsArmed = true;
         document.documentElement.classList.add('video-true-fs');
+        document.body.classList.add('video-true-fs');
+        syncFullscreenUi(true);
         return;
       }
       document.documentElement.classList.remove('video-true-fs');
+      document.body.classList.remove('video-true-fs');
+      syncFullscreenUi(false);
       if (!videoFsArmed) return;
       videoFsArmed = false;
-      setTimeout(showHomeMiniAfterFullscreen, 80);
+      if (!userRequestedFs) {
+        setTimeout(showHomeMiniAfterFullscreen, 80);
+      } else {
+        userRequestedFs = false;
+        const sec = document.getElementById('home-player-section');
+        if (sec && !sec.classList.contains('mini-mode')) {
+          try { sec.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) {}
+        }
+      }
     }
     ['fullscreenchange', 'webkitfullscreenchange', 'MSFullscreenChange'].forEach((evName) => {
       document.addEventListener(evName, onHomeFullscreenChange);
@@ -4328,13 +4539,115 @@
 
     function enterVideoFullscreen(el) {
       videoFsArmed = true;
+      userRequestedFs = true;
       document.documentElement.classList.add('video-true-fs');
+      document.body.classList.add('video-true-fs');
+      syncFullscreenUi(true);
       try {
         if (window.parent && window.parent !== window) {
           window.parent.postMessage({ type: 'enter-video-fullscreen' }, '*');
         }
       } catch (e) {}
+      try {
+        const docEl = document.documentElement;
+        const reqFs = docEl.requestFullscreen || docEl.webkitRequestFullscreen || docEl.mozRequestFullScreen || docEl.msRequestFullscreen;
+        if (reqFs && !isDocFullscreen()) {
+          const p = reqFs.call(docEl);
+          if (p && typeof p.catch === 'function') p.catch(() => {});
+        }
+      } catch (e) {}
     }
+    window.enterVideoFullscreen = enterVideoFullscreen;
+
+    function exitVideoFullscreen() {
+      videoFsArmed = false;
+      userRequestedFs = false;
+      document.documentElement.classList.remove('video-true-fs');
+      document.body.classList.remove('video-true-fs');
+      syncFullscreenUi(false);
+      try {
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage({ type: 'exit-video-fullscreen' }, '*');
+        }
+      } catch (e) {}
+      try {
+        const exitFs = document.exitFullscreen || document.webkitExitFullscreen || document.mozCancelFullScreen || document.msExitFullscreen;
+        if (exitFs && isDocFullscreen()) {
+          const p = exitFs.call(document);
+          if (p && typeof p.catch === 'function') p.catch(() => {});
+        }
+      } catch (e) {}
+      const sec = document.getElementById('home-player-section');
+      if (sec && !sec.classList.contains('mini-mode')) {
+        try { sec.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) {}
+      }
+    }
+    window.exitVideoFullscreen = exitVideoFullscreen;
+
+    function toggleExpandHomeVideo() {
+      const isFs = document.documentElement.classList.contains('video-true-fs') || isDocFullscreen();
+      if (isFs) {
+        exitVideoFullscreen();
+      } else {
+        const sec = document.getElementById('home-player-section');
+        if (sec && sec.classList.contains('mini-mode')) {
+          expandHomeMiniPlayer(true);
+        }
+        enterVideoFullscreen();
+      }
+    }
+    window.toggleExpandHomeVideo = toggleExpandHomeVideo;
+
+    function enterVideoFullscreenDirect() {
+      expandHomeMiniPlayer(true);
+      enterVideoFullscreen();
+    }
+    window.enterVideoFullscreenDirect = enterVideoFullscreenDirect;
+
+    function toggleTheaterMode() {
+      const section = document.getElementById('home-player-section');
+      const main = document.querySelector('.home-youtube-main');
+      const theaterLabel = document.getElementById('home-theater-label');
+      const theaterBtn = document.getElementById('home-btn-theater');
+      if (!section) return;
+
+      const isTheater = section.classList.toggle('theater-mode');
+      if (main) main.classList.toggle('theater-mode-active', isTheater);
+
+      if (theaterLabel) {
+        theaterLabel.textContent = isTheater ? '🗗 Modo Padrão' : '🗖 Modo Teatro';
+      }
+      if (theaterBtn) {
+        theaterBtn.title = isTheater ? 'Restaurar largura padrão (T)' : 'Expandir largura do player (Modo Teatro - T)';
+      }
+
+      requestAnimationFrame(() => {
+        try { section.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) {}
+      });
+    }
+    window.toggleTheaterMode = toggleTheaterMode;
+
+    document.addEventListener('keydown', (e) => {
+      const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : '';
+      if (tag === 'input' || tag === 'textarea' || (e.target && e.target.isContentEditable)) return;
+
+      const section = document.getElementById('home-player-section');
+      const hasActiveVideo = !!(currentActiveVideoId && section && section.style.display !== 'none');
+      if (!hasActiveVideo) return;
+
+      if (e.key === 'f' || e.key === 'F') {
+        e.preventDefault();
+        toggleExpandHomeVideo();
+      } else if (e.key === 't' || e.key === 'T') {
+        e.preventDefault();
+        toggleTheaterMode();
+      } else if (e.key === 'Escape') {
+        if (document.documentElement.classList.contains('video-true-fs') || isDocFullscreen()) {
+          e.preventDefault();
+          exitVideoFullscreen();
+        }
+      }
+    });
 
     function isNewtabLandscape() {
       if (!isPhoneClient()) return false;
@@ -4406,7 +4719,7 @@
       const autoParam = startAutoplay ? '1' : '0';
       const inlineParam = '1';
       const origin = (window.location.origin && window.location.origin.indexOf('http') === 0) ? window.location.origin : 'http://localhost:8080';
-      const embedSrc = `https://www.youtube.com/embed/${encodeURIComponent(id)}?autoplay=${autoParam}&enablejsapi=1&playsinline=${inlineParam}&fs=0&rel=0&origin=${encodeURIComponent(origin)}&widget_referrer=${encodeURIComponent(origin)}`;
+      const embedSrc = `https://www.youtube.com/embed/${encodeURIComponent(id)}?autoplay=${autoParam}&enablejsapi=1&playsinline=${inlineParam}&fs=1&rel=0&origin=${encodeURIComponent(origin)}&widget_referrer=${encodeURIComponent(origin)}`;
       const playerToken = ++homePlayerLoadToken;
       let playerLoaded = false;
       homePlayerIframe.addEventListener('load', function markPlayerLoaded() {
@@ -4921,12 +5234,11 @@
 
       card.addEventListener('click', () => {
         const isMobile = isPhoneClient();
-        playVideoInHomePlayer(v.id, v.title, v.channel, true, isMobile);
+        // Inicia o vídeo normalmente com áudio e scroll para o player sem travar a tela cheia
+        playVideoInHomePlayer(v.id, v.title, v.channel, true, false);
         loadSuggestionsForVideo(v);
-        if (!isMobile) {
-          const sec = document.getElementById('home-player-section');
-          if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }
+        const sec = document.getElementById('home-player-section');
+        if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'center' });
       });
 
       homeYtGrid.appendChild(card);
@@ -5443,10 +5755,10 @@
           c.classList.toggle('active', (c.getAttribute('data-q') || '') === bootQ);
         });
       }
-      // Detecta o país via IP antes de carregar o feed para que as recomendações sejam regionais
-      detectAndApplyCountry().catch(() => {}).finally(() => {
-        loadRecentYouTubeFeed(bootQ || 'noticias', !!bootQ);
-      });
+      // Inicia imediatamente o carregamento dos vídeos para exibição ultrarrápida (sem esperar geo-IP)
+      loadRecentYouTubeFeed(bootQ || 'noticias', !!bootQ);
+      // Em segundo plano, detecta o país pela conexão e ajusta se necessário
+      detectAndApplyCountry().catch(() => {});
     } catch (e) {
       loadRecentYouTubeFeed('noticias');
     }

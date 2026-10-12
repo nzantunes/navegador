@@ -101,7 +101,7 @@ function sendForbiddenAdminResponse(res, isJson = false) {
 const MEDIA_DOWNLOADS_DIR = path.join(os.homedir(), '.papaleguas_downloads');
 try { fs.mkdirSync(MEDIA_DOWNLOADS_DIR, { recursive: true }); } catch (e) {}
 
-const SERVER_BUILD_VERSION = '2026.10.11-v21';
+const SERVER_BUILD_VERSION = '2026.10.12-v22';
 const querystring = require('querystring');
 const zlib = require('zlib');
 const http2 = require('http2');
@@ -337,6 +337,21 @@ async function getClientCountryCode(req, explicitIp = '', useTor = false) {
     } catch (e) {}
   }
 
+  // 3. Se for IP privado / rede Wi-Fi local, consulta a geolocalização da conexão pública real (direta, sem Tor)
+  try {
+    const cachedPublic = ipCountryCache.get('__public_egress__');
+    if (cachedPublic && (Date.now() - cachedPublic.t) < 30 * 60 * 1000) return cachedPublic.country;
+    const publicGeo = await fetchJsonViaAgent(
+      'http://ip-api.com/json/?fields=status,countryCode',
+      null, 3000
+    );
+    if (publicGeo && publicGeo.status === 'success' && publicGeo.countryCode) {
+      const country = String(publicGeo.countryCode).toUpperCase();
+      ipCountryCache.set('__public_egress__', { t: Date.now(), country });
+      return country;
+    }
+  } catch (e) {}
+
   // 4. Fallback por Accept-Language do navegador do dispositivo cliente
   const lang = (req && req.headers && req.headers['accept-language']) || '';
   if (/pt-BR|pt-PT/i.test(lang)) return 'BR';
@@ -412,7 +427,7 @@ function buildIpCheckPage(info) {
 }
 
 function ytdlpProxyArgs() {
-  return ['--no-proxy'];
+  return ['--proxy', ''];
 }
 
 function rewriteGoogleFamilyThroughProxy(html, clientId, pageOrigin) {
@@ -2809,7 +2824,6 @@ function downloadMediaFile(urlOrId, format = 'mp4', onProgress = null, quality =
     const args = [
       '-u',
       '-m', 'yt_dlp',
-      '--no-proxy',
       '--js-runtimes', 'node',
       '--extractor-args', 'youtube:player_client=android,ios,web,mweb',
       '--no-playlist',
@@ -7772,7 +7786,8 @@ function getDevicePlaylistsRoot(clientId, req) {
       }
       const clientId = req.headers['x-client-id'] || reqUrl.searchParams.get('clientId') || 'client_default';
       const clientSession = getOrCreateClientSession(clientId);
-      const useTor = isTorRoutingEnabled(clientSession);
+      // Buscas e recomendações do YouTube saem direto (sem Tor) na velocidade máxima da internet
+      const useTor = false;
       const qParam = reqUrl.searchParams.get('q') || '';
       const clientCountryParam = reqUrl.searchParams.get('country') || '';
       const clientIpParam = reqUrl.searchParams.get('deviceIp') || req.headers['x-device-ip'] || req.headers['x-client-ip'] || '';
@@ -7780,10 +7795,10 @@ function getDevicePlaylistsRoot(clientId, req) {
 
       // Se o cliente já detectou o país baseado no seu dispositivo, usa direto; senão detecta pelo IP do dispositivo/Tor.
       let countryCode;
-      if (clientCountryParam && /^[A-Z]{2}$/i.test(clientCountryParam)) {
+      if (clientCountryParam && /^[A-Z]{2}$/i.test(clientCountryParam) && clientCountryParam.toUpperCase() !== 'AUTO') {
         countryCode = clientCountryParam.toUpperCase();
       } else {
-        countryCode = await getClientCountryCode(req, clientIp, useTor).catch(() => 'BR');
+        countryCode = await getClientCountryCode(req, clientIp, false).catch(() => 'BR');
       }
 
       const hl = getHlForCountry(countryCode);
@@ -7897,6 +7912,8 @@ function getDevicePlaylistsRoot(clientId, req) {
       res.end(JSON.stringify({
         success: true,
         countryCode,
+        countryName: COUNTRY_NAMES[countryCode] || countryCode,
+        countryFlag: COUNTRY_FLAGS[countryCode] || '🌍',
         clientIp: returnIp,
         query: headingQuery,
         videos: videos.slice(0, 30)
@@ -10320,15 +10337,22 @@ function getDevicePlaylistsRoot(clientId, req) {
     return;
   }
 
-  // YouTube e BaixaTube usam o player da home, servindo newtab.html
-  if (pathname === '/youtube' || pathname === '/baixatube') {
-    const homePath = path.join(SRC_DIR, 'newtab.html');
-    if (fs.existsSync(homePath)) {
+  // YouTube e BaixaTube:
+  // Se a requisição vem de dentro de um iframe ou tem query ?embedded=1, serve newtab.html.
+  // Se for acesso direto pela barra de endereço do celular/PC (document request), serve index.html
+  // para carregar o shell completo com a barra de navegação e menus responsivos.
+  if (pathname === '/youtube' || pathname === '/youtube/' || pathname === '/baixatube' || pathname === '/baixatube/') {
+    const isIframe = isIframeDocumentRequest(req) ||
+                     reqUrl.searchParams.get('embedded') === '1' ||
+                     req.headers['sec-fetch-dest'] === 'iframe' ||
+                     (req.headers.referer && req.headers.referer.includes('index.html'));
+    const targetFile = isIframe ? path.join(SRC_DIR, 'newtab.html') : path.join(SRC_DIR, 'index.html');
+    if (fs.existsSync(targetFile)) {
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'no-cache, no-store, must-revalidate'
       });
-      res.end(fs.readFileSync(homePath, 'utf8'));
+      res.end(fs.readFileSync(targetFile, 'utf8'));
       return;
     }
   }
@@ -11880,7 +11904,7 @@ function getDevicePlaylistsRoot(clientId, req) {
           currentCinemaVid = id;
           currentCinemaTitle = title;
           iframe.referrerPolicy = 'origin';
-          iframe.src = 'https://www.youtube.com/embed/' + encodeURIComponent(id) + '?autoplay=1&enablejsapi=1&playsinline=1&fs=0&rel=0&origin=' + encodeURIComponent(window.location.origin || 'http://localhost:8080') + '&widget_referrer=' + encodeURIComponent(window.location.origin || 'http://localhost:8080');
+          iframe.src = 'https://www.youtube.com/embed/' + encodeURIComponent(id) + '?autoplay=1&enablejsapi=1&playsinline=1&fs=1&rel=0&origin=' + encodeURIComponent(window.location.origin || 'http://localhost:8080') + '&widget_referrer=' + encodeURIComponent(window.location.origin || 'http://localhost:8080');
           if (titleEl) titleEl.textContent = '▶ ' + title;
           const directBtn = document.getElementById('cinema-direct-link');
           if (directBtn) directBtn.href = 'https://www.youtube.com/watch?v=' + encodeURIComponent(id);
