@@ -1,3 +1,9 @@
+// Blindagem anti-recursão: o shell do navegador (renderer.js) NUNCA deve rodar dentro de um iframe
+if (typeof window !== 'undefined' && window.self !== window.top) {
+  try { if (document.documentElement) document.documentElement.style.display = 'none'; } catch (e) {}
+  throw new Error('[Papaléguas] Shell do navegador bloqueado dentro de iframe.');
+}
+
 // Polyfill de fetch para ambiente local Electron (file://) rotear requisições /api/ para http://localhost:8080
 if (typeof window !== 'undefined' && window.location && window.location.protocol === 'file:') {
   const _origFetch = window.fetch;
@@ -131,10 +137,29 @@ function prettyAddressBarUrl(raw) {
   return s;
 }
 
+function enforceCleanPortalUrl() {
+  try {
+    if (urlInput && (isInternalPortalUrl(urlInput.value) || urlInput.value.includes('baixatube') || urlInput.value.includes('ngrok.app') || urlInput.value.includes('ngrok-free.app') || urlInput.value.includes('trycloudflare.com'))) {
+      urlInput.value = '';
+      if (typeof syncSearchClearButton === 'function') syncSearchClearButton();
+    }
+    if (searchFsInput && (isInternalPortalUrl(searchFsInput.value) || searchFsInput.value.includes('baixatube') || searchFsInput.value.includes('ngrok.app') || searchFsInput.value.includes('ngrok-free.app') || searchFsInput.value.includes('trycloudflare.com'))) {
+      searchFsInput.value = '';
+      if (typeof syncSearchFsClearButton === 'function') syncSearchFsClearButton();
+    }
+  } catch (e) {}
+}
+
+try { enforceCleanPortalUrl(); } catch (e) {}
+document.addEventListener('DOMContentLoaded', enforceCleanPortalUrl);
+window.addEventListener('load', enforceCleanPortalUrl);
+
 function setAddressBar(raw) {
   if (!urlInput) return;
-  urlInput.value = prettyAddressBarUrl(raw);
+  const pretty = prettyAddressBarUrl(raw);
+  urlInput.value = (pretty && !isInternalPortalUrl(pretty) && !pretty.includes('baixatube') && !pretty.includes('ngrok.app') && !pretty.includes('ngrok-free.app') && !pretty.includes('trycloudflare.com')) ? pretty : '';
   syncSearchClearButton();
+  enforceCleanPortalUrl();
 }
 
 function syncSearchClearButton() {
@@ -860,6 +885,10 @@ function goHomeFromFullscreen() {
   document.body.classList.remove('video-true-fs');
   document.documentElement.classList.remove('portal-home');
   document.body.classList.remove('portal-home');
+  const btn = document.getElementById('fs-home-btn');
+  if (btn) {
+    btn.style.display = 'none';
+  }
   try {
     const exitFs = document.exitFullscreen || document.webkitExitFullscreen || document.msExitFullscreen;
     if (exitFs && (document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement)) {
@@ -883,6 +912,13 @@ function goHomeFromFullscreen() {
     userDismissedMiniPlayer = false;
     if (globalMusicMiniPlayer) globalMusicMiniPlayer.classList.remove('hidden');
     setAddressBar('');
+    if (window.history && typeof window.history.pushState === 'function' && !isElectronApp()) {
+      try {
+        if (window.location.pathname !== '/' && window.location.pathname !== '/index.html') {
+          window.history.pushState({ portal: 'home' }, '', '/');
+        }
+      } catch (e) {}
+    }
     return;
   }
 
@@ -894,23 +930,27 @@ function goHomeFromFullscreen() {
     }
     activeTab.webview.loadURL(DEFAULT_URL);
   } else {
-    window.location.href = DEFAULT_URL;
+    window.location.href = '/';
   }
   setAddressBar('');
-  if (window.history && typeof window.history.replaceState === 'function' && !isElectronApp()) {
+  if (window.history && typeof window.history.pushState === 'function' && !isElectronApp()) {
     try {
       if (window.location.pathname !== '/' && window.location.pathname !== '/index.html') {
-        window.history.replaceState({ portal: 'home' }, '', '/');
+        window.history.pushState({ portal: 'home' }, '', '/');
       }
     } catch (e) {}
   }
 }
+window.goHome = goHomeFromFullscreen;
 
 function enterMenuPortalFullscreen() {
-  const isPhone = isNativePhone || isMobileMode || (document.documentElement && document.documentElement.classList.contains('client-phone')) || (Math.min(window.innerWidth || 1200, (window.screen && window.screen.width) || 1200) <= 900);
-  if (isPhone) return;
-  document.documentElement.classList.add('video-true-fs');
-  document.body.classList.add('video-true-fs');
+  document.documentElement.classList.add('video-true-fs', 'portal-home');
+  document.body.classList.add('video-true-fs', 'portal-home');
+  const btn = document.getElementById('fs-home-btn');
+  if (btn) {
+    btn.classList.remove('is-hidden');
+    btn.style.display = 'inline-flex';
+  }
 }
 
 function openPapaleguasMusic(searchQuery = '', autoplay = true) {
@@ -948,18 +988,11 @@ function openPapaleguasMusic(searchQuery = '', autoplay = true) {
   }
   setAddressBar('');
   syncPortalHomeButton('/musica');
-  const isPhone = isNativePhone || isMobileMode || (document.documentElement && document.documentElement.classList.contains('client-phone')) || (Math.min(window.innerWidth || 1200, (window.screen && window.screen.width) || 1200) <= 900);
-  if (window.history && typeof window.history.replaceState === 'function' && !isElectron) {
+  enterMenuPortalFullscreen();
+  if (window.history && typeof window.history.pushState === 'function' && !isElectronApp()) {
     try {
-      if (isPhone) {
-        // No celular, NUNCA expor /musica ou outro caminho na URL do navegador
-        if (window.location.pathname !== '/' && window.location.pathname !== '/index.html') {
-          window.history.replaceState({ portal: 'musica' }, '', '/');
-        }
-      } else {
-        if (window.location.pathname !== '/musica') {
-          window.history.pushState({ portal: 'musica' }, '', '/musica');
-        }
+      if (window.location.pathname !== '/musica') {
+        window.history.pushState({ portal: 'musica' }, '', '/musica');
       }
     } catch (e) {}
   }
@@ -2137,7 +2170,7 @@ function navigateToUrl(rawInput) {
     return;
   }
   if (cleanNavCmd === 'home' || cleanNavCmd === 'inicio' || cleanNavCmd === 'menu') {
-    goHome();
+    goHomeFromFullscreen();
     return;
   }
 
@@ -2149,7 +2182,7 @@ function navigateToUrl(rawInput) {
       if (restPath === 'baixatube' || restPath === 'youtube') { openYoutube(''); return; }
       if (restPath === 'filmes' || restPath === 'filme') { openFilmesOnline(''); return; }
       if (restPath === 'musica' || restPath === 'music') { openPapaleguasMusic(''); return; }
-      if (restPath === 'home' || restPath === 'inicio' || restPath === 'menu' || !restPath) { goHome(); return; }
+      if (restPath === 'home' || restPath === 'inicio' || restPath === 'menu' || !restPath) { goHomeFromFullscreen(); return; }
     }
   } catch (e) {}
 
@@ -2422,8 +2455,8 @@ window.addEventListener('message', (event) => {
       } catch(e){}
 
       activeTab.url = displayUrl;
-      const isNewTab = displayUrl.includes('newtab.html');
-      setAddressBar(isNewTab ? '' : displayUrl);
+      const isInternal = isInternalPortalUrl(displayUrl);
+      setAddressBar(isInternal ? '' : displayUrl);
       if (data.title && activeTab.header) {
         activeTab.title = data.title;
         const titleEl = activeTab.header.querySelector('.tab-title');
@@ -2638,6 +2671,12 @@ function seedValueForSearchTab(raw) {
     }
   }
   if (isInternalPortalUrl(value)) return '';
+  try {
+    const origin = (typeof publicAppOrigin === 'function' ? publicAppOrigin() : window.location.origin).toLowerCase();
+    if (value.toLowerCase().startsWith(origin)) return '';
+    const parsed = new URL(value, window.location.origin);
+    if (parsed.origin === window.location.origin) return '';
+  } catch (e) {}
   if (/^\//.test(value) || /newtab\.html/i.test(value)) return '';
   return value;
 }
@@ -2652,11 +2691,13 @@ function openSearchFullscreen(initialValue) {
   hideUrlSuggestions();
   searchFs.hidden = false;
   const seed = typeof initialValue === 'string' ? initialValue : String(urlInput && urlInput.value || '');
-  searchFsInput.value = seedValueForSearchTab(seed);
+  const cleanSeed = seedValueForSearchTab(seed);
+  searchFsInput.value = (cleanSeed && !isInternalPortalUrl(cleanSeed) && !cleanSeed.includes('baixatube') && !cleanSeed.includes('ngrok.app')) ? cleanSeed : '';
   urlSuggestState.items = [];
   urlSuggestState.q = '';
   urlSuggestState.active = -1;
   syncSearchFsClearButton();
+  enforceCleanPortalUrl();
   if (searchFsNet) {
     const torOn = !!(typeof lastTorStatus !== 'undefined' && lastTorStatus && lastTorStatus.enabled);
     searchFsNet.classList.toggle('is-tor', torOn);
@@ -3256,22 +3297,7 @@ if (btnHome) {
   });
 }
 
-(function trapHostedBrowserBack() {
-  if (isElectronApp()) return;
-  try {
-    window.history.replaceState({ papaleguas: 1 }, '', window.location.href);
-    window.history.pushState({ papaleguas: 2 }, '', window.location.href);
-  } catch (e) {}
-  window.addEventListener('popstate', () => {
-    try {
-      window.history.pushState({ papaleguas: 2 }, '', window.location.href);
-    } catch (e) {}
-    const activeTab = getActiveTab();
-    if (activeTab && activeTab.webview && typeof activeTab.webview.canGoBack === 'function' && activeTab.webview.canGoBack()) {
-      activeTab.webview.goBack();
-    }
-  });
-})();
+// Sincronização do botão Home flutuante com a navegação do app
 const fsHomeBtn = document.getElementById('fs-home-btn');
 if (fsHomeBtn) {
   fsHomeBtn.addEventListener('click', (e) => {
@@ -3386,19 +3412,12 @@ function openFilmesOnline(searchQuery = '') {
   }
   setAddressBar('');
   syncPortalHomeButton('/filmes');
-  const isPhone = isNativePhone || isMobileMode || (document.documentElement && document.documentElement.classList.contains('client-phone')) || (Math.min(window.innerWidth || 1200, (window.screen && window.screen.width) || 1200) <= 900);
-  if (window.history && typeof window.history.replaceState === 'function' && !isElectron) {
+  enterMenuPortalFullscreen();
+  if (window.history && typeof window.history.pushState === 'function' && !isElectronApp()) {
     try {
-      if (isPhone) {
-        // No celular, NUNCA expor /filmes ou outro caminho na URL do navegador
-        if (window.location.pathname !== '/' && window.location.pathname !== '/index.html') {
-          window.history.replaceState({ portal: 'filmes' }, '', '/');
-        }
-      } else {
-        const targetPath = '/filmes' + (searchQuery && searchQuery.trim() ? '?q=' + encodeURIComponent(searchQuery.trim()) : '');
-        if (window.location.pathname !== '/filmes') {
-          window.history.pushState({ portal: 'filmes' }, '', targetPath);
-        }
+      const targetPath = '/filmes' + (searchQuery && searchQuery.trim() ? '?q=' + encodeURIComponent(searchQuery.trim()) : '');
+      if (window.location.pathname !== '/filmes') {
+        window.history.pushState({ portal: 'filmes' }, '', targetPath);
       }
     } catch (e) {}
   }
@@ -3445,19 +3464,12 @@ function openYoutube(searchQuery = '', videoId = '') {
   }
   setAddressBar('');
   syncPortalHomeButton('/baixatube');
-  const isPhoneYoutube = isNativePhone || isMobileMode || (document.documentElement && document.documentElement.classList.contains('client-phone')) || (Math.min(window.innerWidth || 1200, (window.screen && window.screen.width) || 1200) <= 900);
-  if (window.history && typeof window.history.replaceState === 'function' && !isElectron) {
+  enterMenuPortalFullscreen();
+  if (window.history && typeof window.history.pushState === 'function' && !isElectronApp()) {
     try {
-      if (isPhoneYoutube) {
-        // No celular, NUNCA expor /baixatube ou outro caminho na URL do navegador
-        if (window.location.pathname !== '/' && window.location.pathname !== '/index.html') {
-          window.history.replaceState({ portal: 'baixatube' }, '', '/');
-        }
-      } else {
-        const targetPath = '/baixatube' + (qs ? '?' + qs : '');
-        if (window.location.pathname !== '/baixatube') {
-          window.history.pushState({ portal: 'baixatube' }, '', targetPath);
-        }
+      const targetPath = '/baixatube' + (qs ? '?' + qs : '');
+      if (window.location.pathname !== '/baixatube') {
+        window.history.pushState({ portal: 'baixatube' }, '', targetPath);
       }
     } catch (e) {}
   }
@@ -5755,7 +5767,6 @@ window.torBrowserAPI.getNewTabUrl().then(url => {
 
   // Se o usuário entrou no celular direto pela URL /baixatube, /filmes, /musica, /home ou /menu:
   const initPath = (window.location && window.location.pathname) || '';
-  const isPhoneClient = isNativePhone || isMobileMode || (document.documentElement && document.documentElement.classList.contains('client-phone')) || (Math.min(window.innerWidth || 1200, (window.screen && window.screen.width) || 1200) <= 900);
 
   if (initPath === '/baixatube' || initPath === '/youtube') {
     openYoutube('');
@@ -5764,18 +5775,18 @@ window.torBrowserAPI.getNewTabUrl().then(url => {
   } else if (initPath === '/musica' || initPath === '/music') {
     openPapaleguasMusic('');
   } else if (initPath === '/home' || initPath === '/menu') {
-    goHome();
+    goHomeFromFullscreen();
   }
 
-  // No celular / aplicativo móvel, limpa a URL do navegador imediatamente para '/'
-  // impedindo que caminhos como /baixatube, /filme, /music, /menu ou /home fiquem visíveis na barra do celular
-  if (isPhoneClient && window.history && typeof window.history.replaceState === 'function') {
+  // Normaliza apenas rotas auxiliares /home, /menu ou /inicio para '/'
+  if (!isElectronApp() && window.history && typeof window.history.replaceState === 'function') {
     try {
-      if (initPath !== '/' && initPath !== '/index.html') {
+      if (initPath === '/home' || initPath === '/menu' || initPath === '/inicio') {
         window.history.replaceState({}, '', '/');
       }
     } catch (e) {}
   }
+  enforceCleanPortalUrl();
 
   // Verifica status da sessão compartilhada
   fetch('/api/session-info', {
@@ -5802,6 +5813,7 @@ window.addEventListener('popstate', () => {
   } else if (p === '/' || p === '/index.html' || p === '/home' || p === '/menu') {
     goHomeFromFullscreen();
   }
+  enforceCleanPortalUrl();
 });
 
 // ============================================================================

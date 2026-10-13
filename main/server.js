@@ -101,7 +101,7 @@ function sendForbiddenAdminResponse(res, isJson = false) {
 const MEDIA_DOWNLOADS_DIR = path.join(os.homedir(), '.papaleguas_downloads');
 try { fs.mkdirSync(MEDIA_DOWNLOADS_DIR, { recursive: true }); } catch (e) {}
 
-const SERVER_BUILD_VERSION = '2026.10.12-v25';
+const SERVER_BUILD_VERSION = '2026.10.12-v28';
 const querystring = require('querystring');
 const zlib = require('zlib');
 const http2 = require('http2');
@@ -793,8 +793,8 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 8080;
 // Mantendo exclusivamente o ngrok como túnel público
 ngrokTunnel.startTunnel(PORT);
 const SRC_DIR = path.join(__dirname, '../src');
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "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";
 const aiClient = require('./ai-client');
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 aiClient.setOpenAiFallbackKey(OPENAI_API_KEY);
 
 // Busca no DuckDuckGo (HTML) para navegação web e celulares via Tor
@@ -10403,11 +10403,7 @@ function getDevicePlaylistsRoot(clientId, req) {
   // Se for acesso direto pela barra de endereço do celular/PC (document request), serve index.html
   // para carregar o shell completo com a barra de navegação e menus responsivos.
   if (pathname === '/youtube' || pathname === '/youtube/' || pathname === '/baixatube' || pathname === '/baixatube/') {
-    const isIframe = isIframeDocumentRequest(req) ||
-                     reqUrl.searchParams.get('embedded') === '1' ||
-                     req.headers['sec-fetch-dest'] === 'iframe' ||
-                     (req.headers.referer && req.headers.referer.includes('index.html'));
-    const targetFile = isIframe ? path.join(SRC_DIR, 'newtab.html') : path.join(SRC_DIR, 'index.html');
+    const targetFile = path.join(SRC_DIR, 'newtab.html');
     if (fs.existsSync(targetFile)) {
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
@@ -10468,7 +10464,7 @@ function getDevicePlaylistsRoot(clientId, req) {
   // Assista aos melhores filmes dublados completos sem travar
   // com suporte a transmissão direta na Smart TV / Roku TV
   // ----------------------------------------------------
-  if (pathname === '/filmes') {
+  if (pathname === '/filmes' || pathname === '/filmes/') {
     const isLocal = isLocalRequest(req);
     const q = reqUrl.searchParams.get('q') || '';
     let selectedVid = reqUrl.searchParams.get('v') || '';
@@ -11991,12 +11987,7 @@ function getDevicePlaylistsRoot(clientId, req) {
           window.scrollTo(0, 0);
 
           try {
-            const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '') || (window.innerWidth <= 768);
-            if (!isMobile) {
-              window.history.replaceState({}, '', '/filmes');
-            } else {
-              window.history.replaceState({}, '', '/');
-            }
+            window.history.replaceState({}, '', '/filmes');
             if (window.parent && window.parent !== window) {
               window.parent.postMessage({
                 type: 'navigate-sync',
@@ -12839,7 +12830,8 @@ function getDevicePlaylistsRoot(clientId, req) {
       res.end('Erro ao carregar arquivo');
     } else {
       const isHtml = /[\\/]index\.html$/i.test(filePath) || isAppShellPathname(pathname);
-      const isStaticAsset = !isHtml && !pathname.endsWith('.txt') && !pathname.endsWith('.xml');
+      const isCoreScript = pathname.endsWith('.js') || pathname.endsWith('.css') || pathname.endsWith('.json') || pathname.endsWith('.html');
+      const isStaticAsset = !isHtml && !pathname.endsWith('.txt') && !pathname.endsWith('.xml') && !isCoreScript;
       const headers = {
         'Content-Type': contentType,
         'Cache-Control': isStaticAsset ? 'public, max-age=86400' : 'no-cache, no-store, must-revalidate',

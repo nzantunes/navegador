@@ -4,8 +4,18 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Papaléguas BaixaTube - Vídeos Sem Anúncios e Downloads em MP4 e MP3</title>
-  <meta name="papaleguas-version" content="2026.10.12-v25">
+  <meta name="papaleguas-version" content="2026.10.12-v28">
   <script>
+    try {
+      if (window.history && typeof window.history.replaceState === 'function') {
+        var p = (window.location && window.location.pathname || '').toLowerCase();
+        if (p !== '/' && p !== '/index.html') {
+          if (/(?:^|\/)(?:home|inicio|menu)(?:[/?#]|$)/i.test(p)) {
+            window.history.replaceState(null, '', '/');
+          }
+        }
+      }
+    } catch (e) {}
     window.addEventListener('load', function() {
       var s = document.createElement('script');
       s.src = 'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-5788322050130808';
@@ -2775,7 +2785,11 @@
             return;
           }
         } catch (e) {}
-        window.location.href = url;
+        if (typeof window[parentMethod] === 'function') {
+          window[parentMethod]('');
+          return;
+        }
+        window.location.href = '/';
       }
 
       // ========================================================================

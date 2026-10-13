@@ -6,11 +6,23 @@
   <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-5788322050130808"
      crossorigin="anonymous"></script>
   <title>Papaléguas Music</title>
-  <meta name="papaleguas-version" content="2026.10.12-v25">
+  <meta name="papaleguas-version" content="2026.10.12-v28">
+  <script>
+    try {
+      if (window.history && typeof window.history.replaceState === 'function') {
+        var p = (window.location && window.location.pathname || '').toLowerCase();
+        if (p !== '/' && p !== '/index.html' && p !== '/musica') {
+          if (/(?:^|\/)(?:home|inicio|menu)(?:[/?#]|$)/i.test(p)) {
+            window.history.replaceState(null, '', '/');
+          }
+        }
+      }
+    } catch (e) {}
+  </script>
   <link rel="icon" type="image/x-icon" href="/favicon.ico">
   <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png?v=4">
   <link rel="apple-touch-icon" sizes="192x192" href="/icon-192.png?v=4">
-  <link rel="stylesheet" href="styles.css?v=22">
+  <link rel="stylesheet" href="styles.css?v=28">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -3161,7 +3173,7 @@
     </div>
   </div>
 
-  <script src="auto-update.js?v=21"></script>
-  <script src="musica.js?v=21"></script>
+  <script src="auto-update.js?v=27"></script>
+  <script src="musica.js?v=27"></script>
 </body>
 </html>

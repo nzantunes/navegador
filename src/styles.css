@@ -2591,10 +2591,12 @@ body.phone-landscape-fs .fs-home-btn {
   }
 
 
-  html.client-phone .fs-home-btn,
-  body.client-phone .fs-home-btn,
-  html.mobile-sim-active .fs-home-btn,
-  body.mobile-sim-active .fs-home-btn {
+  html.client-phone.portal-home .fs-home-btn,
+  body.client-phone.portal-home .fs-home-btn,
+  html.client-phone.video-true-fs .fs-home-btn,
+  body.client-phone.video-true-fs .fs-home-btn,
+  html.mobile-sim-active.portal-home .fs-home-btn,
+  body.mobile-sim-active.portal-home .fs-home-btn {
     display: inline-flex !important;
   }
 }
@@ -5469,9 +5471,9 @@ html.video-true-fs .global-music-mini-player {
   display: none !important;
 }
 
-/* No celular, a barra de navegação superior permanece acessível ao navegar pelos menus */
-html.client-phone:not(.fullscreen-video-locked) .browser-toolbar,
-body.client-phone:not(.fullscreen-video-locked) .browser-toolbar {
+/* No celular, a barra de navegação superior permanece acessível na home, mas recolhe ao expandir em tela cheia */
+html.client-phone:not(.fullscreen-video-locked):not(.video-true-fs) .browser-toolbar,
+body.client-phone:not(.fullscreen-video-locked):not(.video-true-fs) .browser-toolbar {
   display: flex !important;
 }
 
@@ -5526,6 +5528,9 @@ html:fullscreen .fs-home-btn,
 html:-webkit-full-screen .fs-home-btn,
 html.portal-home .fs-home-btn {
   display: inline-flex !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  pointer-events: auto !important;
 }
 html.video-true-fs .webviews-container,
 html.video-true-fs .webviews-container.mobile-mode {
