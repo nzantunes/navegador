@@ -74,16 +74,46 @@ function isAppShellUrl(raw) {
   }
 }
 
+function isInternalPortalUrl(url) {
+  if (!url) return true;
+  const s = String(url).trim();
+  if (!s || s === '/' || s === '/index.html') return true;
+  const lower = s.toLowerCase();
+  if (lower.includes('newtab.html') || lower.includes('musica.html')) return true;
+  if (/(?:^|\/)(?:baixatube|youtube|filmes?|musicas?|music|home|inicio|menu)(?:[/?#]|$)/i.test(lower)) {
+    return true;
+  }
+  try {
+    const origin = (typeof publicAppOrigin === 'function' ? publicAppOrigin() : window.location.origin).toLowerCase();
+    if (lower.startsWith(origin)) {
+      const rest = lower.slice(origin.length);
+      if (!rest || rest === '/' || rest === '/index.html') return true;
+      if (/^\/(?:baixatube|youtube|filmes?|musicas?|music|home|inicio|menu)(?:[/?#]|$)/i.test(rest)) {
+        return true;
+      }
+    }
+    const parsed = new URL(s, window.location.origin);
+    const p = parsed.pathname.toLowerCase();
+    if (p === '/' || p === '/index.html') return true;
+    if (/^\/(?:baixatube|youtube|filmes?|musicas?|music|home|inicio|menu)(?:\/|$)/i.test(p)) {
+      return true;
+    }
+  } catch (e) {}
+  return false;
+}
+
 function prettyAddressBarUrl(raw) {
   if (!raw) return '';
-  const s = String(raw);
-  if (/newtab\.html/i.test(s) && !/[?&](?:q|v)=/i.test(s)) return '';
+  const s = String(raw).trim();
+  if (!s) return '';
+
   try {
     if (s.includes('/proxy?url=')) {
       const proxied = new URL(s, window.location.origin).searchParams.get('url');
       if (proxied) return prettyAddressBarUrl(proxied);
     }
   } catch (e) {}
+
   try {
     const parsed = new URL(s, publicAppOrigin() + '/');
     const q = parsed.searchParams.get('q') || parsed.searchParams.get('query');
@@ -91,16 +121,13 @@ function prettyAddressBarUrl(raw) {
       return q;
     }
   } catch (e) {}
-  const lower = s.toLowerCase();
-  if (lower.includes('musica.html') || /(^|\/)musica(\?|$)/i.test(s) || lower.includes('open.spotify.com')) {
-    return publicAppOrigin() + '/musica';
+
+  // NUNCA permitir que rotas ou portais internos (menu, baixatube, filme, music, home, newtab)
+  // apareçam na barra de endereço/URL, especialmente no aplicativo de celular:
+  if (isInternalPortalUrl(s)) {
+    return '';
   }
-  if (lower.includes('/filmes') || lower.includes('pluto.tv')) {
-    return publicAppOrigin() + '/filmes';
-  }
-  if (lower.includes('/youtube') || lower.includes('/baixatube') || lower.includes('youtube.com') || lower.includes('youtu.be') || /newtab\.html/i.test(s)) {
-    return publicAppOrigin() + '/baixatube';
-  }
+
   return s;
 }
 
@@ -870,10 +897,10 @@ function goHomeFromFullscreen() {
     window.location.href = DEFAULT_URL;
   }
   setAddressBar('');
-  if (window.history && typeof window.history.pushState === 'function' && !isElectronApp()) {
+  if (window.history && typeof window.history.replaceState === 'function' && !isElectronApp()) {
     try {
       if (window.location.pathname !== '/' && window.location.pathname !== '/index.html') {
-        window.history.pushState({ portal: 'home' }, '', '/');
+        window.history.replaceState({ portal: 'home' }, '', '/');
       }
     } catch (e) {}
   }
@@ -919,12 +946,20 @@ function openPapaleguasMusic(searchQuery = '', autoplay = true) {
     // Cria sempre uma aba dedicada para o Papaléguas Music, garantindo que continue tocando em segundo plano
     createTab(musicaUrl);
   }
-  setAddressBar(publicAppOrigin() + '/musica');
+  setAddressBar('');
   syncPortalHomeButton('/musica');
-  if (window.history && typeof window.history.pushState === 'function' && !isElectron) {
+  const isPhone = isNativePhone || isMobileMode || (document.documentElement && document.documentElement.classList.contains('client-phone')) || (Math.min(window.innerWidth || 1200, (window.screen && window.screen.width) || 1200) <= 900);
+  if (window.history && typeof window.history.replaceState === 'function' && !isElectron) {
     try {
-      if (window.location.pathname !== '/musica') {
-        window.history.pushState({ portal: 'musica' }, '', '/musica');
+      if (isPhone) {
+        // No celular, NUNCA expor /musica ou outro caminho na URL do navegador
+        if (window.location.pathname !== '/' && window.location.pathname !== '/index.html') {
+          window.history.replaceState({ portal: 'musica' }, '', '/');
+        }
+      } else {
+        if (window.location.pathname !== '/musica') {
+          window.history.pushState({ portal: 'musica' }, '', '/musica');
+        }
       }
     } catch (e) {}
   }
@@ -2093,14 +2128,30 @@ function navigateToUrl(rawInput) {
     openYoutube('');
     return;
   }
-  if (cleanNavCmd === 'filmes' || cleanNavCmd === 'filmes online') {
+  if (cleanNavCmd === 'filmes' || cleanNavCmd === 'filme' || cleanNavCmd === 'filmes online') {
     openFilmesOnline('');
     return;
   }
-  if (cleanNavCmd === 'musica' || cleanNavCmd === 'musicas' || cleanNavCmd === 'spotify') {
+  if (cleanNavCmd === 'musica' || cleanNavCmd === 'music' || cleanNavCmd === 'musicas' || cleanNavCmd === 'spotify') {
     openPapaleguasMusic('');
     return;
   }
+  if (cleanNavCmd === 'home' || cleanNavCmd === 'inicio' || cleanNavCmd === 'menu') {
+    goHome();
+    return;
+  }
+
+  // Se o usuário digitou ou colou a URL completa de um portal interno
+  try {
+    const origin = (typeof publicAppOrigin === 'function' ? publicAppOrigin() : window.location.origin).toLowerCase();
+    if (target.toLowerCase().startsWith(origin)) {
+      const restPath = target.slice(origin.length).toLowerCase().replace(/^\/+/, '');
+      if (restPath === 'baixatube' || restPath === 'youtube') { openYoutube(''); return; }
+      if (restPath === 'filmes' || restPath === 'filme') { openFilmesOnline(''); return; }
+      if (restPath === 'musica' || restPath === 'music') { openPapaleguasMusic(''); return; }
+      if (restPath === 'home' || restPath === 'inicio' || restPath === 'menu' || !restPath) { goHome(); return; }
+    }
+  } catch (e) {}
 
   // Intercepta qualquer tentativa de navegar para o Spotify para abrir direto o mini player em tela cheia
   if (target.includes('open.spotify.com')) {
@@ -2586,6 +2637,7 @@ function seedValueForSearchTab(raw) {
       }
     }
   }
+  if (isInternalPortalUrl(value)) return '';
   if (/^\//.test(value) || /newtab\.html/i.test(value)) return '';
   return value;
 }
@@ -3332,13 +3384,21 @@ function openFilmesOnline(searchQuery = '') {
       createTab(filmesUrl);
     }
   }
-  setAddressBar(publicAppOrigin() + '/filmes');
+  setAddressBar('');
   syncPortalHomeButton('/filmes');
-  if (window.history && typeof window.history.pushState === 'function' && !isElectron) {
+  const isPhone = isNativePhone || isMobileMode || (document.documentElement && document.documentElement.classList.contains('client-phone')) || (Math.min(window.innerWidth || 1200, (window.screen && window.screen.width) || 1200) <= 900);
+  if (window.history && typeof window.history.replaceState === 'function' && !isElectron) {
     try {
-      const targetPath = '/filmes' + (searchQuery && searchQuery.trim() ? '?q=' + encodeURIComponent(searchQuery.trim()) : '');
-      if (window.location.pathname !== '/filmes') {
-        window.history.pushState({ portal: 'filmes' }, '', targetPath);
+      if (isPhone) {
+        // No celular, NUNCA expor /filmes ou outro caminho na URL do navegador
+        if (window.location.pathname !== '/' && window.location.pathname !== '/index.html') {
+          window.history.replaceState({ portal: 'filmes' }, '', '/');
+        }
+      } else {
+        const targetPath = '/filmes' + (searchQuery && searchQuery.trim() ? '?q=' + encodeURIComponent(searchQuery.trim()) : '');
+        if (window.location.pathname !== '/filmes') {
+          window.history.pushState({ portal: 'filmes' }, '', targetPath);
+        }
       }
     } catch (e) {}
   }
@@ -3383,13 +3443,21 @@ function openYoutube(searchQuery = '', videoId = '') {
       createTab(baixatubeUrl);
     }
   }
-  setAddressBar(publicAppOrigin() + '/baixatube');
+  setAddressBar('');
   syncPortalHomeButton('/baixatube');
-  if (window.history && typeof window.history.pushState === 'function' && !isElectron) {
+  const isPhoneYoutube = isNativePhone || isMobileMode || (document.documentElement && document.documentElement.classList.contains('client-phone')) || (Math.min(window.innerWidth || 1200, (window.screen && window.screen.width) || 1200) <= 900);
+  if (window.history && typeof window.history.replaceState === 'function' && !isElectron) {
     try {
-      const targetPath = '/baixatube' + (qs ? '?' + qs : '');
-      if (window.location.pathname !== '/baixatube') {
-        window.history.pushState({ portal: 'baixatube' }, '', targetPath);
+      if (isPhoneYoutube) {
+        // No celular, NUNCA expor /baixatube ou outro caminho na URL do navegador
+        if (window.location.pathname !== '/' && window.location.pathname !== '/index.html') {
+          window.history.replaceState({ portal: 'baixatube' }, '', '/');
+        }
+      } else {
+        const targetPath = '/baixatube' + (qs ? '?' + qs : '');
+        if (window.location.pathname !== '/baixatube') {
+          window.history.pushState({ portal: 'baixatube' }, '', targetPath);
+        }
       }
     } catch (e) {}
   }
@@ -5685,14 +5753,28 @@ window.torBrowserAPI.getNewTabUrl().then(url => {
   updateAdblockUI();
   initCloudflareStatus();
 
-  // Se o usuário entrou no celular direto pela URL /baixatube, /filmes ou /musica:
+  // Se o usuário entrou no celular direto pela URL /baixatube, /filmes, /musica, /home ou /menu:
   const initPath = (window.location && window.location.pathname) || '';
+  const isPhoneClient = isNativePhone || isMobileMode || (document.documentElement && document.documentElement.classList.contains('client-phone')) || (Math.min(window.innerWidth || 1200, (window.screen && window.screen.width) || 1200) <= 900);
+
   if (initPath === '/baixatube' || initPath === '/youtube') {
     openYoutube('');
-  } else if (initPath === '/filmes') {
+  } else if (initPath === '/filmes' || initPath === '/filme') {
     openFilmesOnline('');
-  } else if (initPath === '/musica') {
+  } else if (initPath === '/musica' || initPath === '/music') {
     openPapaleguasMusic('');
+  } else if (initPath === '/home' || initPath === '/menu') {
+    goHome();
+  }
+
+  // No celular / aplicativo móvel, limpa a URL do navegador imediatamente para '/'
+  // impedindo que caminhos como /baixatube, /filme, /music, /menu ou /home fiquem visíveis na barra do celular
+  if (isPhoneClient && window.history && typeof window.history.replaceState === 'function') {
+    try {
+      if (initPath !== '/' && initPath !== '/index.html') {
+        window.history.replaceState({}, '', '/');
+      }
+    } catch (e) {}
   }
 
   // Verifica status da sessão compartilhada
@@ -5713,11 +5795,11 @@ window.addEventListener('popstate', () => {
   const p = (window.location && window.location.pathname) || '/';
   if (p === '/baixatube' || p === '/youtube') {
     openYoutube('');
-  } else if (p === '/filmes') {
+  } else if (p === '/filmes' || p === '/filme') {
     openFilmesOnline('');
-  } else if (p === '/musica') {
+  } else if (p === '/musica' || p === '/music') {
     openPapaleguasMusic('');
-  } else if (p === '/' || p === '/index.html') {
+  } else if (p === '/' || p === '/index.html' || p === '/home' || p === '/menu') {
     goHomeFromFullscreen();
   }
 });

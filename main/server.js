@@ -101,7 +101,7 @@ function sendForbiddenAdminResponse(res, isJson = false) {
 const MEDIA_DOWNLOADS_DIR = path.join(os.homedir(), '.papaleguas_downloads');
 try { fs.mkdirSync(MEDIA_DOWNLOADS_DIR, { recursive: true }); } catch (e) {}
 
-const SERVER_BUILD_VERSION = '2026.10.12-v24';
+const SERVER_BUILD_VERSION = '2026.10.12-v25';
 const querystring = require('querystring');
 const zlib = require('zlib');
 const http2 = require('http2');
@@ -11991,7 +11991,12 @@ function getDevicePlaylistsRoot(clientId, req) {
           window.scrollTo(0, 0);
 
           try {
-            window.history.replaceState({}, '', '/filmes');
+            const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '') || (window.innerWidth <= 768);
+            if (!isMobile) {
+              window.history.replaceState({}, '', '/filmes');
+            } else {
+              window.history.replaceState({}, '', '/');
+            }
             if (window.parent && window.parent !== window) {
               window.parent.postMessage({
                 type: 'navigate-sync',

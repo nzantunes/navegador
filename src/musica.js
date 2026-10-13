@@ -5987,7 +5987,12 @@ window.addEventListener('DOMContentLoaded', async () => {
   const q = params.get('q') || params.get('dj') || params.get('search') || '';
   const autoplay = params.get('autoplay') !== '0';
   try {
-    window.history.replaceState({}, '', '/musica');
+    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '') || (window.innerWidth <= 768);
+    if (!isMobile) {
+      window.history.replaceState({}, '', '/musica');
+    } else {
+      window.history.replaceState({}, '', '/');
+    }
     if (window.parent && window.parent !== window) {
       window.parent.postMessage({
         type: 'navigate-sync',
