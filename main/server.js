@@ -101,7 +101,7 @@ function sendForbiddenAdminResponse(res, isJson = false) {
 const MEDIA_DOWNLOADS_DIR = path.join(os.homedir(), '.papaleguas_downloads');
 try { fs.mkdirSync(MEDIA_DOWNLOADS_DIR, { recursive: true }); } catch (e) {}
 
-const SERVER_BUILD_VERSION = '2026.10.12-v28';
+const SERVER_BUILD_VERSION = '2026.10.14-v29';
 const querystring = require('querystring');
 const zlib = require('zlib');
 const http2 = require('http2');
