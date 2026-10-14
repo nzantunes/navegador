@@ -3542,7 +3542,8 @@ function getFullVideoStreamByVideoId(videoId) {
     execFile(ytdlpPath, [
       ...ytdlpProxyArgs(),
       '--no-playlist',
-      '-f', 'b/bv*+ba/b/best[height<=1080]/best',
+      '--extractor-args', 'youtube:player_client=android,web,ios',
+      '-f', '18/b[acodec!=none][vcodec!=none]/best[acodec!=none][vcodec!=none]/b/best',
       '--no-warnings',
       '-g',
       'https://www.youtube.com/watch?v=' + encodeURIComponent(videoId)

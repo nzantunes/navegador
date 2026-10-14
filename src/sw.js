@@ -1,5 +1,5 @@
 // Service Worker para Papaléguas PWA com tela de reconexão inteligente e auto-update
-const CACHE_NAME = 'papaleguas-pwa-v50';
+const CACHE_NAME = 'papaleguas-pwa-v51';
 const OFFLINE_URL = '/offline.html';
 
 const OFFLINE_HTML = `<!DOCTYPE html>

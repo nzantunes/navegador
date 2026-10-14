@@ -4412,7 +4412,8 @@ async function prepareMobilePipVideo(state) {
     ytPipVideo.setAttribute('webkit-playsinline', 'true');
     ytPipVideo.playsInline = true;
     ytPipVideo.disablePictureInPicture = false;
-    ytPipVideo.muted = !document.hidden;
+    ytPipVideo.muted = false;
+    ytPipVideo.volume = 1.0;
     ytPipVideo.loop = false;
     ytPipVideo.poster = 'https://i.ytimg.com/vi/' + encodeURIComponent(state.videoId) + '/hqdefault.jpg';
     const alreadyLive = ytPipVideo.dataset.vid === state.videoId
@@ -4462,11 +4463,12 @@ function armPipAudioForBackground() {
   const isPipActive = !!(document.pictureInPictureElement === ytPipVideo || (ytPipVideo.webkitPresentationMode === 'picture-in-picture'));
   if (isPipActive) {
     ytPipVideo.muted = false;
+    ytPipVideo.volume = 1.0;
     if (ytNotifyAudio && !ytNotifyAudio.paused) {
       try { ytNotifyAudio.pause(); } catch (e) {}
     }
+    postYoutubeCommand('mute');
   }
-  postYoutubeCommand('mute');
 }
 
 async function enterMobilePictureInPicture() {
@@ -4475,26 +4477,31 @@ async function enterMobilePictureInPicture() {
     await prepareMobilePipVideo(lastYoutubeState);
     syncPipVideoTime(lastYoutubeState);
   }
+  ytPipVideo.muted = false;
+  ytPipVideo.volume = 1.0;
   try {
     if (ytPipVideo.paused) await ytPipVideo.play().catch(() => {});
   } catch (e) {}
-  armPipAudioForBackground();
   try {
     if (document.pictureInPictureEnabled && !document.pictureInPictureElement) {
       await ytPipVideo.requestPictureInPicture();
+    }
+    if (document.pictureInPictureElement === ytPipVideo) {
+      armPipAudioForBackground();
       return true;
     }
-    if (document.pictureInPictureElement === ytPipVideo) return true;
   } catch (e) {}
   try {
     if (ytPipVideo.webkitSupportsPresentationMode && typeof ytPipVideo.webkitSetPresentationMode === 'function') {
       if (ytPipVideo.webkitPresentationMode !== 'picture-in-picture') {
         ytPipVideo.webkitSetPresentationMode('picture-in-picture');
-        return true;
       }
+      armPipAudioForBackground();
       return true;
     }
   } catch (e) {}
+  postYoutubeCommand('unmute');
+  postYoutubeCommand('play');
   return false;
 }
 
@@ -4758,6 +4765,8 @@ function onAppFullscreenChange() {
   if (/\/musica|musica\.html|\/filmes/i.test(tabUrl)) return;
   if (!lastYoutubeState || !lastYoutubeState.videoId) return;
   postYoutubeCommand('enter-mini');
+  postYoutubeCommand('unmute');
+  postYoutubeCommand('play');
 }
 ['fullscreenchange', 'webkitfullscreenchange', 'MSFullscreenChange'].forEach((evName) => {
   document.addEventListener(evName, onAppFullscreenChange);
@@ -4819,6 +4828,8 @@ if (ytPipVideo) {
   });
   ytPipVideo.addEventListener('leavepictureinpicture', () => {
     if (!document.hidden && ytPipVideo) ytPipVideo.muted = true;
+    postYoutubeCommand('unmute');
+    postYoutubeCommand('play');
   });
   ytPipVideo.addEventListener('ended', () => {
     postYoutubeCommand('next');
