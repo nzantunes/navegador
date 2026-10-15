@@ -28,9 +28,23 @@ function publicAppOrigin() {
   return 'http://localhost:8080';
 }
 
+function extractYoutubeVideoId(raw) {
+  if (!raw) return null;
+  try {
+    const s = String(raw).trim();
+    const m = s.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?|shorts)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
+    if (m && m[1]) return m[1];
+  } catch (e) {}
+  return null;
+}
+
 function routeUrlInsideTorApp(raw) {
   const target = String(raw || '').trim();
   if (!target) return target;
+  const ytId = extractYoutubeVideoId(target);
+  if (ytId) {
+    return resolveAppNavUrl('/baixatube?v=' + encodeURIComponent(ytId));
+  }
   if (target.startsWith('/') && !/^\/proxy(?:\?|$)/i.test(target)) return resolveAppNavUrl(target);
   try {
     const parsed = new URL(target, publicAppOrigin() + '/');
@@ -1892,7 +1906,21 @@ function setupWebviewListeners(tab) {
   // Intercepta qualquer abertura de janela / link com target=_blank do webview
   wv.addEventListener('new-window', (e) => {
     if (typeof e.preventDefault === 'function') e.preventDefault();
-    if (e.url) createTab(e.url);
+    if (e.url) {
+      const vid = extractYoutubeVideoId(e.url);
+      if (vid) {
+        const activeTab = getActiveTab();
+        if (activeTab && activeTab.url && activeTab.url.includes('baixatube')) {
+          try {
+            activeTab.webview.executeJavaScript(`if (typeof playVideoInHomePlayer === 'function') { playVideoInHomePlayer('${vid}', 'Vídeo Recomendado', 'Papaléguas BaixaTube', true, true); if (typeof loadSuggestionsForVideo === 'function') loadSuggestionsForVideo({ id: '${vid}' }); }`);
+            return;
+          } catch (err) {}
+        }
+        createTab(routeUrlInsideTorApp(e.url));
+        return;
+      }
+      createTab(e.url);
+    }
   });
 
   wv.addEventListener('console-message', (e) => {
@@ -1941,6 +1969,22 @@ function setupWebviewListeners(tab) {
 
   // Intercepta tentativas de navegação antes de iniciar no webview
   wv.addEventListener('will-navigate', (e) => {
+    if (e.url) {
+      const vid = extractYoutubeVideoId(e.url);
+      if (vid) {
+        if (typeof e.preventDefault === 'function') e.preventDefault();
+        try { if (wv.stop) wv.stop(); } catch (err) {}
+        const activeTab = getActiveTab();
+        if (activeTab && activeTab.url && activeTab.url.includes('baixatube')) {
+          try {
+            activeTab.webview.executeJavaScript(`if (typeof playVideoInHomePlayer === 'function') { playVideoInHomePlayer('${vid}', 'Vídeo Recomendado', 'Papaléguas BaixaTube', true, true); if (typeof loadSuggestionsForVideo === 'function') loadSuggestionsForVideo({ id: '${vid}' }); }`);
+            return;
+          } catch (err) {}
+        }
+        createTab(routeUrlInsideTorApp(e.url));
+        return;
+      }
+    }
     if (e.url && e.url.includes('open.spotify.com')) {
       if (typeof e.preventDefault === 'function') e.preventDefault();
       let query = '';

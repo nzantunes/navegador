@@ -10403,7 +10403,7 @@ function getDevicePlaylistsRoot(clientId, req) {
   // Se a requisição vem de dentro de um iframe ou tem query ?embedded=1, serve newtab.html.
   // Se for acesso direto pela barra de endereço do celular/PC (document request), serve index.html
   // para carregar o shell completo com a barra de navegação e menus responsivos.
-  if (pathname === '/youtube' || pathname === '/youtube/' || pathname === '/baixatube' || pathname === '/baixatube/') {
+  if (pathname === '/youtube' || pathname === '/youtube/' || pathname === '/baixatube' || pathname === '/baixatube/' || pathname === '/watch' || pathname === '/watch/') {
     const targetFile = path.join(SRC_DIR, 'newtab.html');
     if (fs.existsSync(targetFile)) {
       res.writeHead(200, {

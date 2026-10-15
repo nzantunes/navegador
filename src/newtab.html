@@ -744,6 +744,248 @@
       display: none;
     }
 
+    /* Overlay de Recomendações Nativas BaixaTube */
+    .home-player-recs-overlay {
+      position: absolute;
+      inset: 0;
+      z-index: 60;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+      padding: 16px 20px;
+      background: linear-gradient(180deg, rgba(7, 10, 18, 0.45) 0%, rgba(9, 13, 24, 0.90) 38%, rgba(6, 9, 16, 0.98) 100%);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      color: #fff;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease, visibility 0.25s ease;
+      box-sizing: border-box;
+      visibility: hidden;
+      overflow: hidden;
+    }
+    .home-player-recs-overlay.active {
+      opacity: 1;
+      pointer-events: auto;
+      visibility: visible;
+    }
+    .home-player-section.mini-mode .home-player-recs-overlay {
+      display: none !important;
+    }
+    html.video-true-fs .home-player-recs-overlay {
+      z-index: 2147483020 !important;
+      padding: 24px 32px;
+    }
+    .recs-overlay-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+      flex-shrink: 0;
+    }
+    .recs-overlay-title-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .recs-overlay-badge {
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      background: linear-gradient(135deg, rgba(0, 240, 255, 0.25), rgba(255, 0, 85, 0.25));
+      border: 1px solid rgba(0, 240, 255, 0.4);
+      padding: 4px 10px;
+      border-radius: 20px;
+      color: #00f0ff;
+    }
+    .recs-overlay-subtitle {
+      font-size: 13px;
+      color: rgba(255, 255, 255, 0.75);
+    }
+    .recs-overlay-controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .recs-countdown-box {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      padding: 4px 8px;
+      border-radius: 8px;
+    }
+    .recs-countdown-text {
+      font-size: 12px;
+      font-weight: 700;
+      color: #00f0ff;
+    }
+    .recs-btn-action {
+      background: rgba(0, 240, 255, 0.2);
+      border: 1px solid rgba(0, 240, 255, 0.5);
+      color: #00f0ff;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 8px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .recs-btn-action:hover {
+      background: rgba(0, 240, 255, 0.4);
+    }
+    .recs-btn-cancel {
+      background: rgba(255, 255, 255, 0.1);
+      border-color: rgba(255, 255, 255, 0.2);
+      color: #cbd5e1;
+    }
+    .recs-btn-resume {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(255, 255, 255, 0.14);
+      border: 1px solid rgba(255, 255, 255, 0.28);
+      color: #fff;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 700;
+      padding: 6px 12px;
+      cursor: pointer;
+      transition: background 0.2s, transform 0.15s;
+    }
+    .recs-btn-resume:hover {
+      background: rgba(255, 255, 255, 0.25);
+      transform: scale(1.02);
+    }
+    .recs-overlay-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      width: 100%;
+      box-sizing: border-box;
+      max-height: 52%;
+      min-height: 0;
+    }
+    @media (max-width: 680px) {
+      .recs-overlay-grid {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 6px;
+      }
+      .home-player-recs-overlay {
+        padding: 8px 10px;
+      }
+      .recs-overlay-subtitle {
+        display: none;
+      }
+      .recs-overlay-header {
+        margin-bottom: 6px;
+      }
+    }
+    .recs-overlay-card {
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 10px;
+      overflow: hidden;
+      cursor: pointer;
+      transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
+    .recs-overlay-card:hover {
+      transform: translateY(-3px) scale(1.02);
+      border-color: #00f0ff;
+      box-shadow: 0 8px 24px rgba(0, 240, 255, 0.25);
+    }
+    .recs-overlay-thumb-box {
+      position: relative;
+      width: 100%;
+      padding-bottom: 56.25%;
+      background: #000;
+      overflow: hidden;
+    }
+    .recs-overlay-thumb {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      transition: transform 0.3s ease;
+    }
+    .recs-overlay-card:hover .recs-overlay-thumb {
+      transform: scale(1.06);
+    }
+    .recs-overlay-dur {
+      position: absolute;
+      bottom: 4px;
+      right: 4px;
+      background: rgba(0, 0, 0, 0.85);
+      color: #fff;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 5px;
+      border-radius: 4px;
+      font-family: monospace;
+    }
+    .recs-overlay-play-badge {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, 0.4);
+      opacity: 0;
+      transition: opacity 0.2s ease;
+    }
+    .recs-overlay-play-badge svg {
+      width: 32px;
+      height: 32px;
+      fill: #00f0ff;
+      filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.8));
+    }
+    .recs-overlay-card:hover .recs-overlay-play-badge {
+      opacity: 1;
+    }
+    .recs-overlay-info {
+      padding: 8px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      min-width: 0;
+      flex: 1;
+    }
+    .recs-overlay-card-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: #f1f5f9;
+      line-height: 1.3;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    @media (max-width: 680px) {
+      .recs-overlay-card-title {
+        font-size: 11px;
+        -webkit-line-clamp: 1;
+      }
+      .recs-overlay-card-channel {
+        display: none;
+      }
+    }
+    .recs-overlay-card-channel {
+      font-size: 11px;
+      color: #94a3b8;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
     .home-expand-btn,
     #home-expand-btn,
     html.video-true-fs .home-expand-btn,
@@ -3271,10 +3513,31 @@
       <div class="home-player-scale" id="home-player-scale">
         <div class="home-mini-drag" id="home-mini-drag" title="Arraste para mover o vídeo"></div>
         <div class="home-player-box">
-          <iframe id="home-yt-iframe" src="about:blank" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen referrerpolicy="origin"></iframe>
+          <iframe id="home-yt-iframe" src="about:blank" sandbox="allow-scripts allow-same-origin allow-presentation allow-forms" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen referrerpolicy="origin"></iframe>
           <button type="button" class="home-minimize-btn" id="home-minimize-btn" onclick="minimizeHomeVideo()" title="Picture-in-picture (Minimizar)">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19 7h-8v6h8V7zm2-4H3a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zm0 16H3V5h18v14z"/></svg>
           </button>
+          <!-- Overlay de Recomendações Nativas BaixaTube (Trava links externos e abre sempre dentro do app) -->
+          <div class="home-player-recs-overlay" id="home-player-recs-overlay" style="display:none;" aria-hidden="true">
+            <div class="recs-overlay-header">
+              <div class="recs-overlay-title-group">
+                <span class="recs-overlay-badge">🎯 Recomendações</span>
+                <span class="recs-overlay-subtitle" id="recs-overlay-status">Mais vídeos para você</span>
+              </div>
+              <div class="recs-overlay-controls">
+                <div class="recs-countdown-box" id="recs-countdown-box" style="display:none;">
+                  <span class="recs-countdown-text" id="recs-countdown-text">Próximo em 5s</span>
+                  <button type="button" class="recs-btn-action recs-btn-play-now" id="recs-btn-play-now" onclick="triggerOverlayPlayNext()" title="Reproduzir Próximo Agora">▶ Agora</button>
+                  <button type="button" class="recs-btn-action recs-btn-cancel" id="recs-btn-cancel-countdown" onclick="cancelOverlayCountdown()" title="Cancelar contagem automática">✕</button>
+                </div>
+                <button type="button" class="recs-btn-resume" id="recs-btn-resume-video" onclick="resumeVideoFromOverlay()" title="Continuar vídeo">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                  <span>Continuar</span>
+                </button>
+              </div>
+            </div>
+            <div class="recs-overlay-grid" id="recs-overlay-grid"></div>
+          </div>
         </div>
       </div>
       <div class="home-player-bar">
@@ -4336,6 +4599,175 @@
       } catch (e) {}
     }
 
+    // =========================================================================
+    // CONTROLE DE RECOMENDAÇÕES NATIVAS BAIXATUBE E INTERCEPTAÇÃO DE CLIQUES
+    // =========================================================================
+    let overlayCountdownTimer = null;
+    let overlayCountdownSeconds = 5;
+    let pauseRecsTimeout = null;
+
+    function extractYoutubeVideoId(url) {
+      if (!url) return null;
+      try {
+        const s = String(url).trim();
+        const m = s.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?|shorts)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i);
+        if (m && m[1]) return m[1];
+      } catch (e) {}
+      return null;
+    }
+
+    function cancelOverlayCountdown() {
+      if (overlayCountdownTimer) {
+        clearInterval(overlayCountdownTimer);
+        overlayCountdownTimer = null;
+      }
+      const countBox = document.getElementById('recs-countdown-box');
+      if (countBox) countBox.style.display = 'none';
+    }
+
+    function triggerOverlayPlayNext() {
+      cancelOverlayCountdown();
+      hidePlayerRecsOverlay();
+      playNextVideo();
+    }
+
+    function resumeVideoFromOverlay() {
+      cancelOverlayCountdown();
+      hidePlayerRecsOverlay();
+      sendYtIframeCommand('playVideo');
+      updatePlaybackState(true);
+    }
+
+    function hidePlayerRecsOverlay() {
+      cancelOverlayCountdown();
+      if (pauseRecsTimeout) {
+        clearTimeout(pauseRecsTimeout);
+        pauseRecsTimeout = null;
+      }
+      const overlay = document.getElementById('home-player-recs-overlay');
+      if (overlay) {
+        overlay.classList.remove('active');
+        overlay.setAttribute('aria-hidden', 'true');
+        setTimeout(() => {
+          if (!overlay.classList.contains('active')) {
+            overlay.style.display = 'none';
+          }
+        }, 250);
+      }
+    }
+
+    function showPlayerRecsOverlay(isEnded = false) {
+      const sec = document.getElementById('home-player-section');
+      if (sec && sec.classList.contains('mini-mode')) return;
+
+      const overlay = document.getElementById('home-player-recs-overlay');
+      const grid = document.getElementById('recs-overlay-grid');
+      const statusEl = document.getElementById('recs-overlay-status');
+      const countBox = document.getElementById('recs-countdown-box');
+      const countText = document.getElementById('recs-countdown-text');
+      const resumeBtn = document.getElementById('recs-btn-resume-video');
+      if (!overlay || !grid) return;
+
+      cancelOverlayCountdown();
+
+      const currentList = Array.isArray(allFeedVideos) ? allFeedVideos : [];
+      const candidates = currentList.filter(v => v && v.id && v.id !== currentActiveVideoId);
+      const recsToShow = candidates.slice(0, 4);
+
+      if (recsToShow.length === 0) {
+        if (currentActiveVideoId) {
+          loadSuggestionsForVideo({ id: currentActiveVideoId, title: currentActiveTitle, channel: currentActiveChannel });
+        }
+        return;
+      }
+
+      grid.innerHTML = '';
+      recsToShow.forEach((v) => {
+        const card = document.createElement('div');
+        card.className = 'recs-overlay-card';
+        card.title = `${v.title || 'Vídeo'} - Reproduzir no Papaléguas`;
+        const durHtml = v.isLive ? `<span class="recs-overlay-dur" style="background:#ef4444;">AO VIVO</span>` : (v.duration ? `<span class="recs-overlay-dur">${escapeHtml(v.duration)}</span>` : '');
+        card.innerHTML = `
+          <div class="recs-overlay-thumb-box">
+            <img src="${v.thumbnail || `https://i.ytimg.com/vi/${encodeURIComponent(v.id)}/hqdefault.jpg`}" class="recs-overlay-thumb" alt="${escapeHtml(v.title || '')}" loading="lazy" onerror="this.src='https://i.ytimg.com/vi/${encodeURIComponent(v.id)}/hqdefault.jpg'">
+            ${durHtml}
+            <div class="recs-overlay-play-badge">
+              <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+            </div>
+          </div>
+          <div class="recs-overlay-info">
+            <div class="recs-overlay-card-title">${escapeHtml(v.title || 'Vídeo')}</div>
+            <div class="recs-overlay-card-channel">${escapeHtml(v.channel || 'BaixaTube')}</div>
+          </div>
+        `;
+        card.onclick = (e) => {
+          e.stopPropagation();
+          hidePlayerRecsOverlay();
+          playVideoInHomePlayer(v.id, v.title, v.channel, true, true);
+          loadSuggestionsForVideo(v);
+        };
+        grid.appendChild(card);
+      });
+
+      if (isEnded) {
+        if (statusEl) statusEl.textContent = 'Vídeo finalizado • Próximo vídeo em breve';
+        if (resumeBtn) resumeBtn.style.display = 'none';
+        if (countBox && countText) {
+          countBox.style.display = 'inline-flex';
+          overlayCountdownSeconds = 5;
+          countText.textContent = `Próximo em ${overlayCountdownSeconds}s`;
+          overlayCountdownTimer = setInterval(() => {
+            overlayCountdownSeconds--;
+            if (overlayCountdownSeconds <= 0) {
+              cancelOverlayCountdown();
+              hidePlayerRecsOverlay();
+              playNextVideo();
+            } else {
+              countText.textContent = `Próximo em ${overlayCountdownSeconds}s`;
+            }
+          }, 1000);
+        }
+      } else {
+        if (statusEl) statusEl.textContent = 'Vídeo pausado • Recomendações relacionadas';
+        if (countBox) countBox.style.display = 'none';
+        if (resumeBtn) resumeBtn.style.display = 'inline-flex';
+      }
+
+      overlay.style.display = 'flex';
+      requestAnimationFrame(() => {
+        overlay.classList.add('active');
+        overlay.setAttribute('aria-hidden', 'false');
+      });
+    }
+
+    // Intercepta window.open para NUNCA abrir pop-ups externos fora do aplicativo
+    const _origWindowOpen = window.open;
+    window.open = function (url, target, features) {
+      if (url) {
+        const yId = extractYoutubeVideoId(url);
+        if (yId) {
+          playVideoInHomePlayer(yId, 'Vídeo Recomendado', 'Papaléguas BaixaTube', true, true);
+          loadSuggestionsForVideo({ id: yId, title: 'Vídeo Recomendado' });
+          return null;
+        }
+      }
+      return _origWindowOpen ? _origWindowOpen.apply(this, arguments) : null;
+    };
+
+    // Intercepta qualquer clique em link de vídeo do YouTube para tocar SEMPRE dentro do player
+    document.addEventListener('click', (ev) => {
+      const a = ev.target && ev.target.closest ? ev.target.closest('a') : null;
+      if (!a || !a.href) return;
+      const yId = extractYoutubeVideoId(a.href);
+      if (yId) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const clickTitle = (a.textContent || '').trim() || 'Vídeo Recomendado';
+        playVideoInHomePlayer(yId, clickTitle, 'Papaléguas BaixaTube', true, true);
+        loadSuggestionsForVideo({ id: yId, title: clickTitle });
+      }
+    }, true);
+
     function playNextVideo() {
       if (!allFeedVideos.length) return;
       const idx = allFeedVideos.findIndex(v => v.id === currentActiveVideoId);
@@ -4705,6 +5137,12 @@
 
     function playVideoInHomePlayer(id, title, channel = 'Papaléguas BaixaTube', startAutoplay = false, startFullscreen = true) {
       if (!id) return;
+      hidePlayerRecsOverlay();
+      try {
+        if (homePlayerIframe) {
+          homePlayerIframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-presentation allow-forms');
+        }
+      } catch (e) {}
       const section = document.getElementById('home-player-section');
       if (section) {
         section.style.display = 'flex';
@@ -5060,6 +5498,20 @@
           return;
         }
         if (data && data.event === 'infoDelivery' && data.info) {
+          // Detecta se o YouTube trocou de vídeo internamente por recomendação
+          const infoVData = data.info.videoData || (data.info.videoUrl ? { video_id: extractYoutubeVideoId(data.info.videoUrl) } : null);
+          if (infoVData && infoVData.video_id && infoVData.video_id !== currentActiveVideoId) {
+            console.log('[BaixaTube] YouTube trocou de vídeo internamente:', infoVData.video_id);
+            currentActiveVideoId = infoVData.video_id;
+            currentActiveTitle = infoVData.title || currentActiveTitle;
+            currentActiveChannel = infoVData.author || currentActiveChannel;
+            if (homePlayerTitle) homePlayerTitle.textContent = currentActiveTitle;
+            updateFloatingBar(currentActiveVideoId, currentActiveTitle, currentActiveChannel);
+            updateYtMediaSession(currentActiveVideoId, currentActiveTitle, currentActiveChannel);
+            loadSuggestionsForVideo({ id: currentActiveVideoId, title: currentActiveTitle, channel: currentActiveChannel });
+            hidePlayerRecsOverlay();
+          }
+
           if (typeof data.info.currentTime !== 'undefined') {
             ytCurrentTime = data.info.currentTime;
           }
@@ -5071,10 +5523,16 @@
             const state = data.info.playerState;
             if (state === 1) { // Playing
               updatePlaybackState(true);
+              hidePlayerRecsOverlay();
             } else if (state === 2) { // Paused
               updatePlaybackState(false);
+              if (pauseRecsTimeout) clearTimeout(pauseRecsTimeout);
+              pauseRecsTimeout = setTimeout(() => {
+                if (!isCurrentlyPlaying) showPlayerRecsOverlay(false);
+              }, 400);
             } else if (state === 0) { // Ended
-              playNextVideo();
+              updatePlaybackState(false);
+              showPlayerRecsOverlay(true);
             }
           }
         }
