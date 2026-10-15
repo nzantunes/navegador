@@ -4992,6 +4992,19 @@ if (window.torBrowserAPI && typeof window.torBrowserAPI.onQueryYoutubePip === 'f
   });
 }
 
+if (window.torBrowserAPI && typeof window.torBrowserAPI.onPipClosed === 'function') {
+  window.torBrowserAPI.onPipClosed(() => {
+    document.querySelectorAll('iframe, webview').forEach((el) => {
+      try {
+        if (el.contentWindow && el.contentWindow.postMessage) {
+          el.contentWindow.postMessage({ type: 'youtube-exit-pip' }, '*');
+          el.contentWindow.postMessage(JSON.stringify({ type: 'papaleguas-yt-control', action: 'exit-pip' }), '*');
+        }
+      } catch (e) {}
+    });
+  });
+}
+
 // Controles de Transmissão (Cast para Smart TVs)
 const btnCast = document.getElementById('btn-cast');
 const castModal = document.getElementById('cast-modal');

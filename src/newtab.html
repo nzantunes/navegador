@@ -4998,18 +4998,16 @@
     async function enterHomePictureInPicture() {
       if (!currentActiveVideoId) return false;
 
-      // 1. Notifica o Shell Electron para abrir o Picture-in-Picture nativo flutuante (sempre no topo)
-      try {
-        if (window.parent && window.parent !== window) {
-          window.parent.postMessage({
-            type: 'youtube-enter-pip',
-            videoId: currentActiveVideoId,
-            title: currentActiveTitle,
-            currentTime: ytCurrentTime || 0
-          }, '*');
-        }
-      } catch (e) {}
+      // Silencia e pausa o player da aba para tocar exclusivamente no Picture-in-Picture (evita áudio duplo)
+      sendYtIframeCommand('pauseVideo');
+      sendYtIframeCommand('mute');
+      if (audioAnchor) {
+        try { audioAnchor.pause(); } catch (e) {}
+        audioAnchor.muted = true;
+      }
+      markHomeSystemPip(true);
 
+      // 1. Notifica o Shell Electron nativo diretamente se disponível
       if (window.torBrowserAPI && typeof window.torBrowserAPI.offerYoutubePip === 'function') {
         try {
           window.torBrowserAPI.offerYoutubePip({
@@ -5018,11 +5016,22 @@
             currentTime: ytCurrentTime || 0,
             isPlaying: true
           });
-          sendYtIframeCommand('pauseVideo');
-          markHomeSystemPip(true);
           return true;
         } catch (e) {}
       }
+
+      // 2. Notifica o Shell Electron através do parent (iframe do navegador)
+      try {
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage({
+            type: 'youtube-enter-pip',
+            videoId: currentActiveVideoId,
+            title: currentActiveTitle,
+            currentTime: ytCurrentTime || 0
+          }, '*');
+          return true;
+        }
+      } catch (e) {}
 
       // 2. Desktop Moderno: W3C Document Picture-in-Picture (mantém o iframe original rodando fluido, sem reiniciar nem pausar)
       if ('documentPictureInPicture' in window && !isPhoneClient()) {
@@ -5263,8 +5272,16 @@
     window.addEventListener('message', (event) => {
       try {
         const data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+        if (data && (data.type === 'youtube-exit-pip' || data.type === 'pip-closed')) {
+          exitHomePictureInPicture();
+          return;
+        }
         if (data && data.type === 'papaleguas-yt-control') {
           const action = data.action;
+          if (action === 'exit-pip') {
+            exitHomePictureInPicture();
+            return;
+          }
           if (action === 'play') {
             sendYtIframeCommand('playVideo');
             updatePlaybackState(true);

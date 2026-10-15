@@ -21,6 +21,10 @@ contextBridge.exposeInMainWorld('torBrowserAPI', {
     ipcRenderer.removeAllListeners('query-youtube-pip');
     ipcRenderer.on('query-youtube-pip', () => { if (typeof cb === 'function') cb(); });
   },
+  onPipClosed: (cb) => {
+    ipcRenderer.removeAllListeners('pip-closed');
+    ipcRenderer.on('pip-closed', () => { if (typeof cb === 'function') cb(); });
+  },
   getCastDevices: (opts = {}) => ipcRenderer.invoke('get-cast-devices', opts),
   scanClientLan: () => ipcRenderer.invoke('scan-client-lan'),
   castToDevice: (deviceId, url, title = '') => ipcRenderer.invoke('cast-to-device', { deviceId, url, title }),

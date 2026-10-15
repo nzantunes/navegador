@@ -692,6 +692,9 @@ function showYtPipWindow(state) {
   });
   ytPipWindow.on('closed', () => {
     ytPipWindow = null;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      try { mainWindow.webContents.send('pip-closed'); } catch (e) {}
+    }
     if (forceQuitBrowser) return;
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.show();
@@ -725,6 +728,7 @@ ipcMain.on('restore-main-from-pip', () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.show();
     mainWindow.focus();
+    try { mainWindow.webContents.send('pip-closed'); } catch (e) {}
   } else {
     forceQuitBrowser = false;
     createWindow();
