@@ -4412,7 +4412,7 @@ async function prepareMobilePipVideo(state) {
     ytPipVideo.setAttribute('webkit-playsinline', 'true');
     ytPipVideo.playsInline = true;
     ytPipVideo.disablePictureInPicture = false;
-    ytPipVideo.muted = false;
+    ytPipVideo.muted = true;
     ytPipVideo.volume = 1.0;
     ytPipVideo.loop = false;
     ytPipVideo.poster = 'https://i.ytimg.com/vi/' + encodeURIComponent(state.videoId) + '/hqdefault.jpg';
@@ -4466,8 +4466,11 @@ function armPipAudioForBackground() {
     ytPipVideo.volume = 1.0;
     if (ytNotifyAudio && !ytNotifyAudio.paused) {
       try { ytNotifyAudio.pause(); } catch (e) {}
+      ytNotifyAudio.muted = true;
     }
     postYoutubeCommand('mute');
+  } else {
+    ytPipVideo.muted = true;
   }
 }
 
@@ -4477,8 +4480,7 @@ async function enterMobilePictureInPicture() {
     await prepareMobilePipVideo(lastYoutubeState);
     syncPipVideoTime(lastYoutubeState);
   }
-  ytPipVideo.muted = false;
-  ytPipVideo.volume = 1.0;
+  ytPipVideo.muted = true;
   try {
     if (ytPipVideo.paused) await ytPipVideo.play().catch(() => {});
   } catch (e) {}
@@ -4500,6 +4502,8 @@ async function enterMobilePictureInPicture() {
       return true;
     }
   } catch (e) {}
+  try { ytPipVideo.pause(); } catch (e) {}
+  ytPipVideo.muted = true;
   postYoutubeCommand('unmute');
   postYoutubeCommand('play');
   return false;
@@ -4660,7 +4664,7 @@ function setupParentYtMediaSession(state) {
 
 function startParentYtAudio(state, opts) {
   if (!ytNotifyAudio || !state || !state.videoId || isElectronShell()) return;
-  const unmute = !!(opts && opts.unmute);
+  const unmute = !!(opts && opts.unmute && document.hidden);
   const id = state.videoId;
   ytNotifyAudio.setAttribute('playsinline', 'true');
   ytNotifyAudio.playsInline = true;
@@ -4670,6 +4674,12 @@ function startParentYtAudio(state, opts) {
     ytNotifyAudio.src = ytNotifyStreamUrl(id);
   }
   ytNotifyAudio.muted = !unmute;
+  if (!document.hidden) {
+    ytNotifyAudio.muted = true;
+    try { ytNotifyAudio.pause(); } catch (e) {}
+    setupParentYtMediaSession(Object.assign({}, state, { isPlaying: true }));
+    return;
+  }
   const t = typeof state.currentTime === 'number' ? state.currentTime : 0;
   const playp = ytNotifyAudio.play();
   if (playp && typeof playp.then === 'function') {
@@ -4679,12 +4689,13 @@ function startParentYtAudio(state, opts) {
       }
       if (unmute) postYoutubeCommand('mute');
     }).catch(() => {
-      ytNotifyAudio.muted = false;
-      ytNotifyAudio.play().catch(() => {});
+      if (document.hidden) {
+        ytNotifyAudio.muted = false;
+        ytNotifyAudio.play().catch(() => {});
+      }
     });
   }
   setupParentYtMediaSession(Object.assign({}, state, { isPlaying: true }));
-  prepareMobilePipVideo(state);
 }
 
 function updateGlobalYtMiniUI() {
@@ -4808,11 +4819,16 @@ document.addEventListener('visibilitychange', () => {
     if (isMobilePipClient()) {
       const isPipActive = ytPipVideo && (document.pictureInPictureElement === ytPipVideo || ytPipVideo.webkitPresentationMode === 'picture-in-picture');
       if (!isPipActive) {
-        if (ytPipVideo) ytPipVideo.muted = true;
-        if (ytNotifyAudio && ytNotifyAudio.src && ytNotifyAudio.src.indexOf('stream-audio') !== -1) {
+        if (ytPipVideo) {
+          try { ytPipVideo.pause(); } catch (e) {}
+          ytPipVideo.muted = true;
+        }
+        if (ytNotifyAudio) {
+          try { ytNotifyAudio.pause(); } catch (e) {}
           ytNotifyAudio.muted = true;
         }
         postYoutubeCommand('unmute');
+        postYoutubeCommand('play');
       }
     }
   }
@@ -4827,7 +4843,10 @@ if (ytPipVideo) {
     armPipAudioForBackground();
   });
   ytPipVideo.addEventListener('leavepictureinpicture', () => {
-    if (!document.hidden && ytPipVideo) ytPipVideo.muted = true;
+    if (ytPipVideo) {
+      try { ytPipVideo.pause(); } catch (e) {}
+      ytPipVideo.muted = true;
+    }
     postYoutubeCommand('unmute');
     postYoutubeCommand('play');
   });

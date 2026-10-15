@@ -3851,6 +3851,15 @@
         userPinnedMini = true;
         lockHomeMiniAuto(1600);
       }
+      const pipEl = document.getElementById('yt-pip-video');
+      if (pipEl && document.pictureInPictureElement !== pipEl) {
+        try { pipEl.pause(); } catch (e) {}
+        pipEl.muted = true;
+      }
+      if (audioAnchor) {
+        try { audioAnchor.pause(); } catch (e) {}
+        audioAnchor.muted = true;
+      }
       if (section.classList.contains('mini-mode')) {
         const miniTitle = document.getElementById('home-mini-title');
         if (miniTitle) miniTitle.textContent = currentActiveTitle || 'BaixaTube';
@@ -3882,9 +3891,6 @@
       if (floatingBar) floatingBar.classList.remove('active');
       sendYtIframeCommand('unMute');
       sendYtIframeCommand('playVideo');
-      if (audioAnchor && audioAnchor.src && audioAnchor.src.indexOf('stream-audio') !== -1) {
-        audioAnchor.muted = true;
-      }
     }
     window.collapseHomeToMini = collapseHomeToMini;
 
@@ -3909,6 +3915,14 @@
       }
       if (pipEl && document.pictureInPictureElement === pipEl) {
         document.exitPictureInPicture().catch(() => {});
+      }
+      if (pipEl) {
+        try { pipEl.pause(); } catch (e) {}
+        pipEl.muted = true;
+      }
+      if (audioAnchor) {
+        try { audioAnchor.pause(); } catch (e) {}
+        audioAnchor.muted = true;
       }
       if (fromUser !== false) {
         userPinnedMini = false;
@@ -4214,12 +4228,9 @@
         return;
       }
       audioAnchor.loop = false;
-      audioAnchor.muted = !(homeNotifOn || document.hidden);
+      audioAnchor.muted = true;
       audioAnchor.dataset.vid = id;
       audioAnchor.src = homeAudioStreamUrl(id);
-      audioAnchor.play().then(() => {
-        if (!audioAnchor.muted) sendYtIframeCommand('mute');
-      }).catch(() => {});
     }
 
     function enableHomeNotificationPlayback() {
@@ -4735,21 +4746,16 @@
       updateYtMediaSession(id, title, channel);
       const miniTitle = document.getElementById('home-mini-title');
       if (miniTitle) miniTitle.textContent = title || 'BaixaTube';
-      if (audioAnchor) audioAnchor.play().catch(() => {});
+      if (audioAnchor) {
+        try { audioAnchor.pause(); } catch (e) {}
+        audioAnchor.muted = true;
+      }
       if (startAutoplay) {
         updatePlaybackState(true);
       }
       broadcastHomeYtState();
       prefetchHomeBgAudio(id);
       handoffToParentShell(!!startAutoplay);
-      if (startAutoplay && typeof enterHomePictureInPicture === 'function') {
-        const v = document.getElementById('yt-pip-video');
-        if (v) {
-          v.muted = true;
-          v.playsInline = true;
-          v.play().catch(function () {});
-        }
-      }
       checkNewtabLandscapeVideo();
     }
 
@@ -4883,7 +4889,7 @@
         v.playsInline = true;
         v.loop = false;
         v.disablePictureInPicture = false;
-        v.muted = false;
+        v.muted = true;
         v.volume = 1.0;
         v.poster = 'https://i.ytimg.com/vi/' + encodeURIComponent(currentActiveVideoId) + '/hqdefault.jpg';
         if (v.dataset.vid !== currentActiveVideoId || !v.src || v.src.indexOf('stream-video') === -1) {
@@ -4908,8 +4914,7 @@
           }
         } catch (e) {}
 
-        v.muted = false;
-        v.volume = 1.0;
+        v.muted = true;
         await v.play().catch(() => {});
 
         let pipSuccess = false;
@@ -4926,14 +4931,21 @@
           v.volume = 1.0;
           sendYtIframeCommand('mute');
           sendYtIframeCommand('pauseVideo');
+          if (audioAnchor) {
+            try { audioAnchor.pause(); } catch (e) {}
+            audioAnchor.muted = true;
+          }
           return true;
         } else {
           try { v.pause(); } catch (e) {}
+          v.muted = true;
           sendYtIframeCommand('unMute');
           sendYtIframeCommand('playVideo');
           return false;
         }
       } catch (e) {
+        try { v.pause(); } catch (err) {}
+        v.muted = true;
         sendYtIframeCommand('unMute');
         sendYtIframeCommand('playVideo');
       }
@@ -4948,6 +4960,7 @@
       pipEl.addEventListener('leavepictureinpicture', () => {
         markHomeSystemPip(false);
         try { pipEl.pause(); } catch (e) {}
+        pipEl.muted = true;
         if (currentActiveVideoId) {
           sendYtIframeCommand('unMute');
           sendYtIframeCommand('playVideo');
