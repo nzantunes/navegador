@@ -703,18 +703,21 @@ function showYtPipWindow(state) {
 }
 
 ipcMain.on('youtube-pip-offer', (event, state) => {
+  const fromWindowClose = pipQueryPending;
   pipQueryPending = false;
   const videoId = state && (state.videoId || state.id);
   if (videoId) {
     showYtPipWindow(Object.assign({}, state, { videoId, isPlaying: true }));
-    if (mainWindow && !mainWindow.isDestroyed()) {
+    if (fromWindowClose && mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.hide();
     }
     return;
   }
-  forceQuitBrowser = true;
-  closeYtPipWindow();
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
+  if (fromWindowClose) {
+    forceQuitBrowser = true;
+    closeYtPipWindow();
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
+  }
 });
 
 ipcMain.on('restore-main-from-pip', () => {

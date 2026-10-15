@@ -2418,7 +2418,11 @@ window.addEventListener('message', (event) => {
       });
     }
     if (lastYoutubeState && lastYoutubeState.videoId) {
-      prepareMobilePipVideo(lastYoutubeState).then(() => enterMobilePictureInPicture());
+      if (window.torBrowserAPI && typeof window.torBrowserAPI.offerYoutubePip === 'function') {
+        window.torBrowserAPI.offerYoutubePip(lastYoutubeState);
+      } else {
+        prepareMobilePipVideo(lastYoutubeState).then(() => enterMobilePictureInPicture());
+      }
     }
     return;
   }
