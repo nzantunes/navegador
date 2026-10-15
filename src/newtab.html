@@ -1797,104 +1797,9 @@
       }
     }
 
-    /* Barra Flutuante de Notificação do Vídeo (Mobile e Desktop) */
+    /* Barra Flutuante/Mini Player desativado permanentemente: mantido apenas Picture-in-Picture */
     .yt-floating-bar {
-      position: fixed;
-      bottom: 16px;
-      left: 50%;
-      transform: translateX(-50%) translateY(140%);
-      width: calc(100% - 24px);
-      max-width: 620px;
-      background: rgba(15, 23, 42, 0.95);
-      border: 1px solid rgba(0, 240, 255, 0.35);
-      border-radius: 14px;
-      padding: 8px 12px;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.85), 0 0 20px rgba(0, 240, 255, 0.15);
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
-      z-index: 1500;
-      transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s ease;
-      opacity: 0;
-      pointer-events: none;
-    }
-
-    .yt-floating-bar.active {
-      transform: translateX(-50%) translateY(0);
-      opacity: 1;
-      pointer-events: auto;
-    }
-
-    .yt-floating-thumb {
-      width: 52px;
-      height: 38px;
-      border-radius: 8px;
-      object-fit: cover;
-      flex-shrink: 0;
-      background: #000;
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      cursor: pointer;
-    }
-
-    .yt-floating-info {
-      flex: 1;
-      min-width: 0;
-      display: flex;
-      flex-direction: column;
-      cursor: pointer;
-    }
-
-    .yt-floating-title {
-      font-size: 13px;
-      font-weight: 600;
-      color: #f8fafc;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      line-height: 1.3;
-    }
-
-    .yt-floating-channel {
-      font-size: 11px;
-      color: #38bdf8;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .yt-floating-controls {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      flex-shrink: 0;
-    }
-
-    .yt-floating-btn {
-      background: rgba(255, 255, 255, 0.08);
-      border: 1px solid rgba(255, 255, 255, 0.15);
-      color: #fff;
-      width: 36px;
-      height: 36px;
-      border-radius: 50%;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      cursor: pointer;
-      transition: all 0.2s;
-    }
-
-    .yt-floating-btn:hover {
-      background: rgba(0, 240, 255, 0.25);
-      border-color: var(--neon-blue);
-      color: #00f0ff;
-    }
-
-    .yt-floating-btn.play-btn {
-      background: #ef4444;
-      border-color: #ef4444;
-      color: #fff;
+      display: none !important;
     }
 
     .back-top-btn {
@@ -3617,29 +3522,7 @@
     </div>
   </div>
 
-  <!-- A janela "Transmitir na TV" é criada por cast-hub.js -->
-  <div class="yt-floating-bar" id="yt-floating-bar">
-    <img src="papaleguas_icon.png" class="yt-floating-thumb" id="yt-float-thumb" alt="Thumbnail" onclick="scrollToPlayer()" />
-    <div class="yt-floating-info" onclick="scrollToPlayer()">
-      <span class="yt-floating-title" id="yt-float-title">Vídeo em Reprodução</span>
-      <span class="yt-floating-channel" id="yt-float-channel">Papaléguas BaixaTube</span>
-    </div>
-    <div class="yt-floating-controls">
-      <button class="yt-floating-btn" onclick="playPrevVideo()" title="Vídeo Anterior">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5" stroke="currentColor" stroke-width="2.5"/></svg>
-      </button>
-      <button class="yt-floating-btn play-btn" id="yt-float-play-btn" onclick="togglePlayPause()" title="Reproduzir / Pausar">
-        <svg id="yt-float-play-icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-        <svg id="yt-float-pause-icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="display:none;"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
-      </button>
-      <button class="yt-floating-btn" onclick="playNextVideo()" title="Próximo Vídeo">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19" stroke="currentColor" stroke-width="2.5"/></svg>
-      </button>
-      <button class="yt-floating-btn" onclick="closeHomePlayer()" title="Fechar Vídeo" style="color: #f87171; font-weight: bold; margin-left: 2px;">
-        ✕
-      </button>
-    </div>
-  </div>
+
 
   <!-- Elemento de áudio para ancorar a barra de notificação no Android / Chrome -->
   <audio id="yt-media-anchor" loop preload="auto" style="display:none;" src="data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA"></audio>
@@ -4734,14 +4617,7 @@
       }
     }
 
-    function updateFloatingBar(id, title, channel) {
-      const thumb = document.getElementById('yt-float-thumb');
-      const t = document.getElementById('yt-float-title');
-      const ch = document.getElementById('yt-float-channel');
-      if (thumb) thumb.src = `https://i.ytimg.com/vi/${encodeURIComponent(id)}/hqdefault.jpg`;
-      if (t) t.textContent = title || 'Vídeo em Reprodução';
-      if (ch) ch.textContent = channel || 'Papaléguas BaixaTube';
-    }
+    function updateFloatingBar() {}
 
     function syncYtMediaSessionPosition(pos, dur) {
       if (!('mediaSession' in navigator) || typeof navigator.mediaSession.setPositionState !== 'function') return;
@@ -5117,23 +4993,7 @@
       checkNewtabLandscapeVideo();
     }
 
-    window.addEventListener('scroll', () => {
-      if (homeScrollRaf) return;
-      homeScrollRaf = requestAnimationFrame(() => {
-        homeScrollRaf = 0;
-        const floatingBar = document.getElementById('yt-floating-bar');
-        const playerSection = document.getElementById('home-player-section');
-        if (!playerSection || !currentActiveVideoId || playerSection.style.display === 'none') return;
-        const rect = playerSection.getBoundingClientRect();
-        if (floatingBar) {
-          if (rect.bottom < 48) {
-            floatingBar.classList.add('active');
-          } else {
-            floatingBar.classList.remove('active');
-          }
-        }
-      });
-    }, { passive: true });
+
 
     async function enterHomePictureInPicture() {
       if (!currentActiveVideoId) return false;
