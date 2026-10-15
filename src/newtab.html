@@ -4743,6 +4743,24 @@
       }
     }
 
+    function notifyShellVideoFullscreen(isFs) {
+      const type = isFs ? 'enter-video-fullscreen' : 'exit-video-fullscreen';
+      const payload = { type: type, active: !!isFs };
+      try {
+        window.postMessage(payload, '*');
+      } catch (e) {}
+      try {
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage(payload, '*');
+        }
+      } catch (e) {}
+      try {
+        if (window.torBrowserAPI && typeof window.torBrowserAPI.sendToHost === 'function') {
+          window.torBrowserAPI.sendToHost(type, payload);
+        }
+      } catch (e) {}
+    }
+
     function onHomeFullscreenChange() {
       if (isDocFullscreen()) {
         videoFsArmed = true;
@@ -4751,19 +4769,30 @@
         syncFullscreenUi(true);
         sendYtIframeCommand('unMute');
         sendYtIframeCommand('playVideo');
+        notifyShellVideoFullscreen(true);
         return;
       }
-      document.documentElement.classList.remove('video-true-fs');
-      document.body.classList.remove('video-true-fs');
-      syncFullscreenUi(false);
-      sendYtIframeCommand('unMute');
-      sendYtIframeCommand('playVideo');
-      if (!videoFsArmed) return;
-      videoFsArmed = false;
-      userRequestedFs = false;
-      const sec = document.getElementById('home-player-section');
-      if (sec) {
-        try { sec.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) {}
+      if (videoFsArmed) {
+        videoFsArmed = false;
+        userRequestedFs = false;
+        phoneLandscapeActive = false;
+        document.documentElement.classList.remove('video-true-fs');
+        document.body.classList.remove('video-true-fs');
+        syncFullscreenUi(false);
+        notifyShellVideoFullscreen(false);
+        sendYtIframeCommand('unMute');
+        sendYtIframeCommand('playVideo');
+        const sec = document.getElementById('home-player-section');
+        if (sec) {
+          try { sec.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) {}
+        }
+        return;
+      }
+      if (userRequestedFs) {
+        document.documentElement.classList.add('video-true-fs');
+        document.body.classList.add('video-true-fs');
+        syncFullscreenUi(true);
+        notifyShellVideoFullscreen(true);
       }
     }
     ['fullscreenchange', 'webkitfullscreenchange', 'MSFullscreenChange'].forEach((evName) => {
@@ -4771,40 +4800,40 @@
     });
 
     function enterVideoFullscreen(el) {
-      videoFsArmed = true;
       userRequestedFs = true;
       document.documentElement.classList.add('video-true-fs');
       document.body.classList.add('video-true-fs');
       syncFullscreenUi(true);
-      try {
-        if (window.parent && window.parent !== window) {
-          window.parent.postMessage({ type: 'enter-video-fullscreen' }, '*');
-        }
-      } catch (e) {}
+      notifyShellVideoFullscreen(true);
       try {
         const docEl = document.documentElement;
         const reqFs = docEl.requestFullscreen || docEl.webkitRequestFullscreen || docEl.mozRequestFullScreen || docEl.msRequestFullscreen;
         if (reqFs && !isDocFullscreen()) {
           const p = reqFs.call(docEl);
-          if (p && typeof p.catch === 'function') p.catch(() => {});
+          if (p && typeof p.then === 'function') {
+            p.then(() => {
+              videoFsArmed = true;
+            }).catch(() => {
+              videoFsArmed = false;
+            });
+          }
         }
-      } catch (e) {}
+      } catch (e) {
+        videoFsArmed = false;
+      }
     }
     window.enterVideoFullscreen = enterVideoFullscreen;
 
     function exitVideoFullscreen() {
       videoFsArmed = false;
       userRequestedFs = false;
+      phoneLandscapeActive = false;
       document.documentElement.classList.remove('video-true-fs');
       document.body.classList.remove('video-true-fs');
       syncFullscreenUi(false);
+      notifyShellVideoFullscreen(false);
       sendYtIframeCommand('unMute');
       sendYtIframeCommand('playVideo');
-      try {
-        if (window.parent && window.parent !== window) {
-          window.parent.postMessage({ type: 'exit-video-fullscreen' }, '*');
-        }
-      } catch (e) {}
       try {
         const exitFs = document.exitFullscreen || document.webkitExitFullscreen || document.mozCancelFullScreen || document.msExitFullscreen;
         if (exitFs && isDocFullscreen()) {
@@ -4898,22 +4927,14 @@
         if (!phoneLandscapeActive) {
           phoneLandscapeActive = true;
           document.documentElement.classList.add('video-true-fs');
-          try {
-            if (window.parent && window.parent !== window) {
-              window.parent.postMessage({ type: 'enter-video-fullscreen' }, '*');
-            }
-          } catch (e) {}
+          notifyShellVideoFullscreen(true);
         }
       } else if (!isLandscape && phoneLandscapeActive) {
         phoneLandscapeActive = false;
-        if (!isDocFullscreen()) {
+        if (!isDocFullscreen() && !userRequestedFs) {
           videoFsArmed = false;
           document.documentElement.classList.remove('video-true-fs');
-          try {
-            if (window.parent && window.parent !== window) {
-              window.parent.postMessage({ type: 'exit-video-fullscreen' }, '*');
-            }
-          } catch (e) {}
+          notifyShellVideoFullscreen(false);
         }
       }
     }
@@ -5315,7 +5336,11 @@
           } else if (action === 'prev') {
             playPrevVideo();
           } else if (action === 'enter-mini') {
-            toggleHomePictureInPicture();
+            // Janela interna removida; mantém reprodução normal
+          } else if (action === 'enter-fullscreen') {
+            enterVideoFullscreen();
+          } else if (action === 'exit-fullscreen') {
+            exitVideoFullscreen();
           }
           return;
         }
@@ -5566,11 +5591,14 @@
         </div>
       `;
 
-      card.addEventListener('click', () => {
-        // Inicia o vídeo imediatamente em tela cheia com áudio
+      const onCardClick = (ev) => {
+        if (ev && ev.target && ev.target.closest && ev.target.closest('.yt-card-dl-row, .yt-card-dl-btn')) {
+          return;
+        }
         playVideoInHomePlayer(v.id, v.title, v.channel, true, true);
         loadSuggestionsForVideo(v);
-      });
+      };
+      card.addEventListener('click', onCardClick);
 
       homeYtGrid.appendChild(card);
     }

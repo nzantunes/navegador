@@ -5549,8 +5549,11 @@ html.video-true-fs .webviews-container.mobile-mode {
 }
 html.video-true-fs webview,
 html.video-true-fs .web-client-iframe,
+html.video-true-fs .web-client-frame,
+html.video-true-fs webview.web-client-frame,
 html.video-true-fs webview.active,
-html.video-true-fs .web-client-iframe.active {
+html.video-true-fs .web-client-iframe.active,
+html.video-true-fs .web-client-frame.is-visible {
   position: fixed !important;
   inset: 0 !important;
   width: 100vw !important;

@@ -916,10 +916,14 @@ function syncPortalHomeButton(url) {
 }
 
 function goHomeFromFullscreen() {
+  appVideoFullscreen = false;
+  nativeAppFsArmed = false;
+  if (typeof fsHomeVideoWatch === 'function') fsHomeVideoWatch(false);
   document.documentElement.classList.remove('video-true-fs');
   document.body.classList.remove('video-true-fs');
   document.documentElement.classList.remove('portal-home');
   document.body.classList.remove('portal-home');
+  postYoutubeCommand('exit-fullscreen');
   const btn = document.getElementById('fs-home-btn');
   if (btn) {
     btn.style.display = 'none';
@@ -1907,6 +1911,7 @@ function setupWebviewListeners(tab) {
       document.body.classList.add('video-true-fs');
     } else if (event.channel === 'exit-video-fullscreen') {
       appVideoFullscreen = false;
+      nativeAppFsArmed = false;
       if (typeof fsHomeVideoWatch === 'function') fsHomeVideoWatch(false);
       document.documentElement.classList.remove('video-true-fs');
       document.body.classList.remove('video-true-fs');
@@ -1928,6 +1933,20 @@ function setupWebviewListeners(tab) {
         }
       }
     }
+  });
+
+  wv.addEventListener('enter-html-full-screen', () => {
+    appVideoFullscreen = true;
+    if (typeof fsHomeVideoWatch === 'function') fsHomeVideoWatch(true);
+    document.documentElement.classList.add('video-true-fs');
+    document.body.classList.add('video-true-fs');
+  });
+  wv.addEventListener('leave-html-full-screen', () => {
+    appVideoFullscreen = false;
+    nativeAppFsArmed = false;
+    if (typeof fsHomeVideoWatch === 'function') fsHomeVideoWatch(false);
+    document.documentElement.classList.remove('video-true-fs');
+    document.body.classList.remove('video-true-fs');
   });
 
   // Intercepta qualquer abertura de janela / link com target=_blank do webview
@@ -2389,6 +2408,7 @@ window.addEventListener('message', (event) => {
 
   if (data.type === 'exit-video-fullscreen') {
     appVideoFullscreen = false;
+    nativeAppFsArmed = false;
     fsHomeVideoWatch(false);
     document.documentElement.classList.remove('video-true-fs');
     document.body.classList.remove('video-true-fs');
@@ -4821,29 +4841,34 @@ window.papaleguasEnterYtPip = function () {
   return enterMobilePictureInPicture();
 };
 
+let nativeAppFsArmed = false;
+
 function isAppFullscreen() {
   return !!(document.fullscreenElement || document.webkitFullscreenElement || document.webkitCurrentFullScreenElement || document.msFullscreenElement);
 }
 
 function onAppFullscreenChange() {
   if (isAppFullscreen()) {
+    nativeAppFsArmed = true;
     appVideoFullscreen = true;
     if (typeof fsHomeVideoWatch === 'function') fsHomeVideoWatch(true);
     document.documentElement.classList.add('video-true-fs');
     document.body.classList.add('video-true-fs');
     return;
   }
-  if (typeof fsHomeVideoWatch === 'function') fsHomeVideoWatch(false);
-  document.documentElement.classList.remove('video-true-fs');
-  document.body.classList.remove('video-true-fs');
-  if (!appVideoFullscreen) return;
-  appVideoFullscreen = false;
-  const tabUrl = (getActiveTab() && getActiveTab().url) || '';
-  if (/\/musica|musica\.html|\/filmes/i.test(tabUrl)) return;
-  if (!lastYoutubeState || !lastYoutubeState.videoId) return;
-  postYoutubeCommand('enter-mini');
-  postYoutubeCommand('unmute');
-  postYoutubeCommand('play');
+  if (nativeAppFsArmed) {
+    nativeAppFsArmed = false;
+    appVideoFullscreen = false;
+    if (typeof fsHomeVideoWatch === 'function') fsHomeVideoWatch(false);
+    document.documentElement.classList.remove('video-true-fs');
+    document.body.classList.remove('video-true-fs');
+    postYoutubeCommand('exit-fullscreen');
+    return;
+  }
+  if (appVideoFullscreen) {
+    document.documentElement.classList.add('video-true-fs');
+    document.body.classList.add('video-true-fs');
+  }
 }
 ['fullscreenchange', 'webkitfullscreenchange', 'MSFullscreenChange'].forEach((evName) => {
   document.addEventListener(evName, onAppFullscreenChange);
@@ -6116,6 +6141,14 @@ if (pagePlayerModal) {
 
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    if (document.documentElement.classList.contains('video-true-fs') || appVideoFullscreen) {
+      appVideoFullscreen = false;
+      nativeAppFsArmed = false;
+      if (typeof fsHomeVideoWatch === 'function') fsHomeVideoWatch(false);
+      document.documentElement.classList.remove('video-true-fs');
+      document.body.classList.remove('video-true-fs');
+      postYoutubeCommand('exit-fullscreen');
+    }
     const box = document.getElementById('page-player');
     if (box && !box.hidden) {
       closePagePlayer(true);
