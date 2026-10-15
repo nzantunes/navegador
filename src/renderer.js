@@ -888,6 +888,27 @@ function isPortalTabUrl(url) {
   return u.includes('/musica') || u.includes('musica.html') || u.includes('/filmes') || u.includes('/youtube') || u.includes('/baixatube');
 }
 
+function isHomeOrBaixaTubeTab(t) {
+  if (!t || !t.url) return false;
+  const u = String(t.url).toLowerCase();
+  return u.includes('newtab.html') || u.includes('baixatube') || u.includes('/youtube') || u.includes('localhost:8080') || u.includes('127.0.0.1:8080') || u === String(DEFAULT_URL).toLowerCase();
+}
+
+function playYoutubeVideoInApp(vid, title = 'Vídeo Recomendado') {
+  if (!vid) return;
+  const cleanTitle = String(title || 'Vídeo Recomendado').replace(/['"\\]/g, '');
+  const activeTab = getActiveTab();
+  const targetTab = (activeTab && isHomeOrBaixaTubeTab(activeTab)) ? activeTab : tabs.find(t => isHomeOrBaixaTubeTab(t));
+  if (targetTab && targetTab.webview) {
+    if (activeTabId !== targetTab.id) activateTab(targetTab.id);
+    try {
+      targetTab.webview.executeJavaScript(`if (typeof playVideoInHomePlayer === 'function') { playVideoInHomePlayer('${vid}', '${cleanTitle}', 'Papaléguas BaixaTube', true, true); if (typeof loadSuggestionsForVideo === 'function') loadSuggestionsForVideo({ id: '${vid}' }); }`);
+      return;
+    } catch (err) {}
+  }
+  openYoutube('', vid);
+}
+
 function syncPortalHomeButton(url) {
   const on = isPortalTabUrl(url);
   document.documentElement.classList.toggle('portal-home', on);
@@ -1834,7 +1855,13 @@ function setupWebviewListeners(tab) {
       }
     } else if (event.channel === 'open-new-tab') {
       // Nova aba pedida pela página: abre dentro do app, pela mesma conexão (Tor ou direta).
-      const urlToOpen = routeUrlInsideTorApp(event.args[0]);
+      const rawUrl = event.args[0];
+      const ytVid = extractYoutubeVideoId(rawUrl);
+      if (ytVid) {
+        playYoutubeVideoInApp(ytVid);
+        return;
+      }
+      const urlToOpen = routeUrlInsideTorApp(rawUrl);
       if (urlToOpen && !isAppShellUrl(urlToOpen)) {
         createTab(urlToOpen);
       }
@@ -1909,14 +1936,7 @@ function setupWebviewListeners(tab) {
     if (e.url) {
       const vid = extractYoutubeVideoId(e.url);
       if (vid) {
-        const activeTab = getActiveTab();
-        if (activeTab && activeTab.url && activeTab.url.includes('baixatube')) {
-          try {
-            activeTab.webview.executeJavaScript(`if (typeof playVideoInHomePlayer === 'function') { playVideoInHomePlayer('${vid}', 'Vídeo Recomendado', 'Papaléguas BaixaTube', true, true); if (typeof loadSuggestionsForVideo === 'function') loadSuggestionsForVideo({ id: '${vid}' }); }`);
-            return;
-          } catch (err) {}
-        }
-        createTab(routeUrlInsideTorApp(e.url));
+        playYoutubeVideoInApp(vid);
         return;
       }
       createTab(e.url);
@@ -1974,14 +1994,7 @@ function setupWebviewListeners(tab) {
       if (vid) {
         if (typeof e.preventDefault === 'function') e.preventDefault();
         try { if (wv.stop) wv.stop(); } catch (err) {}
-        const activeTab = getActiveTab();
-        if (activeTab && activeTab.url && activeTab.url.includes('baixatube')) {
-          try {
-            activeTab.webview.executeJavaScript(`if (typeof playVideoInHomePlayer === 'function') { playVideoInHomePlayer('${vid}', 'Vídeo Recomendado', 'Papaléguas BaixaTube', true, true); if (typeof loadSuggestionsForVideo === 'function') loadSuggestionsForVideo({ id: '${vid}' }); }`);
-            return;
-          } catch (err) {}
-        }
-        createTab(routeUrlInsideTorApp(e.url));
+        playYoutubeVideoInApp(vid);
         return;
       }
     }
@@ -2318,7 +2331,12 @@ document.addEventListener('click', (event) => {
 
 if (window.torBrowserAPI && typeof window.torBrowserAPI.onOpenUrlInApp === 'function') {
   window.torBrowserAPI.onOpenUrlInApp((url) => {
-    // window.open / target=_blank barrados pelo Electron voltam para uma aba do app.
+    // window.open / target=_blank barrados pelo Electron voltam para uma aba do app ou tocam direto no BaixaTube.
+    const vid = extractYoutubeVideoId(url);
+    if (vid) {
+      playYoutubeVideoInApp(vid);
+      return;
+    }
     const inside = routeUrlInsideTorApp(url);
     if (inside && !isAppShellUrl(inside)) createTab(inside);
   });
