@@ -3,10 +3,53 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-5788322050130808"
-     crossorigin="anonymous"></script>
-  <title>Papaléguas Music</title>
-  <meta name="papaleguas-version" content="2026.10.14-v29">
+  <title>Papaléguas Music - Músicas e Playlists Sem Anúncios</title>
+  <meta name="description" content="Ouça músicas, crie playlists e escute seus artistas favoritos sem anúncios no Papaléguas Music.">
+  <!-- OpenGraph Padrão para Redes Sociais e WhatsApp -->
+  <meta property="og:site_name" content="Papaléguas Music">
+  <meta property="og:title" content="Papaléguas Music - Músicas e Playlists Sem Anúncios">
+  <meta property="og:description" content="Ouça músicas, crie playlists e escute seus artistas favoritos sem anúncios no Papaléguas Music.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://papaleguas.app/musica">
+  <meta property="og:image" content="https://papaleguas.app/og-banner.jpg">
+  <meta property="og:image:secure_url" content="https://papaleguas.app/og-banner.jpg">
+  <meta property="og:image:type" content="image/jpeg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Papaléguas Music - Músicas e Playlists Sem Anúncios">
+  <meta name="twitter:description" content="Ouça músicas, crie playlists e escute seus artistas favoritos sem anúncios no Papaléguas Music.">
+  <meta name="twitter:image" content="https://papaleguas.app/og-banner.jpg">
+  <meta name="papaleguas-version" content="2026.11.07-v114">
+  <!-- Google tag (gtag.js) + AdSense: carregamento adiado (1ª interação ou 7s após o load) para não travar a thread principal -->
+  <meta name="google-adsense-account" content="ca-pub-5788322050130808">
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+
+    gtag('config', 'G-3PPDLGKC46');
+    (function () {
+      var done = false;
+      var evs = ['touchstart', 'pointerdown', 'scroll', 'keydown', 'mousemove'];
+      function addScript(src, cors) {
+        var s = document.createElement('script');
+        s.async = true;
+        s.src = src;
+        if (cors) s.crossOrigin = 'anonymous';
+        document.head.appendChild(s);
+      }
+      function loadThirdParty() {
+        if (done) return;
+        done = true;
+        evs.forEach(function (e) { window.removeEventListener(e, loadThirdParty, { passive: true }); });
+        addScript('https://www.googletagmanager.com/gtag/js?id=G-3PPDLGKC46', false);
+        addScript('https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-5788322050130808', true);
+      }
+      evs.forEach(function (e) { window.addEventListener(e, loadThirdParty, { passive: true }); });
+      window.addEventListener('load', function () { setTimeout(loadThirdParty, 7000); });
+    })();
+  </script>
   <script>
     try {
       if (window.history && typeof window.history.replaceState === 'function') {
@@ -22,7 +65,7 @@
   <link rel="icon" type="image/x-icon" href="/favicon.ico">
   <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png?v=4">
   <link rel="apple-touch-icon" sizes="192x192" href="/icon-192.png?v=4">
-  <link rel="stylesheet" href="styles.css?v=28">
+  <link rel="stylesheet" href="styles.css?v=46">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -312,6 +355,7 @@
       border: 1px solid rgba(255, 255, 255, 0.08);
       box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
       transition: all 0.2s ease;
+      cursor: pointer;
     }
     .sp-fav-item:hover {
       background: rgba(255, 255, 255, 0.07);
@@ -2623,9 +2667,9 @@
           <div class="sp-mini-track-info" id="sp-mini-track-info" title="Toque para restaurar se minimizado">
             <span class="sp-runner" id="sp-runner" title="Papaléguas Music">
               <span class="sp-runner-dust" aria-hidden="true"></span>
-              <img class="sp-runner-img" src="papaleguas_logo.png" alt="Papaléguas" onerror="if(!this.dataset.retried){this.dataset.retried='1';this.src='/papaleguas_logo.png';}" />
+              <img class="sp-runner-img" src="papaleguas_logo.png" alt="Papaléguas" loading="lazy" decoding="async" onerror="if(!this.dataset.retried){this.dataset.retried='1';this.src='/papaleguas_logo.png';}" />
             </span>
-            <img class="sp-mini-thumb" id="sp-mini-thumb" alt="" data-fallback="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='8' fill='%23111827'/%3E%3Cpath d='M26 44V22l20-4v18' fill='none' stroke='%231ed760' stroke-width='3'/%3E%3Ccircle cx='22' cy='44' r='4' fill='%231ed760'/%3E%3Ccircle cx='42' cy='36' r='4' fill='%231ed760'/%3E%3C/svg%3E" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='8' fill='%23111827'/%3E%3Cpath d='M26 44V22l20-4v18' fill='none' stroke='%231ed760' stroke-width='3'/%3E%3Ccircle cx='22' cy='44' r='4' fill='%231ed760'/%3E%3Ccircle cx='42' cy='36' r='4' fill='%231ed760'/%3E%3C/svg%3E" />
+            <img class="sp-mini-thumb" id="sp-mini-thumb" alt="" loading="lazy" decoding="async" data-fallback="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='8' fill='%23111827'/%3E%3Cpath d='M26 44V22l20-4v18' fill='none' stroke='%231ed760' stroke-width='3'/%3E%3Ccircle cx='22' cy='44' r='4' fill='%231ed760'/%3E%3Ccircle cx='42' cy='36' r='4' fill='%231ed760'/%3E%3C/svg%3E" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='8' fill='%23111827'/%3E%3Cpath d='M26 44V22l20-4v18' fill='none' stroke='%231ed760' stroke-width='3'/%3E%3Ccircle cx='22' cy='44' r='4' fill='%231ed760'/%3E%3Ccircle cx='42' cy='36' r='4' fill='%231ed760'/%3E%3C/svg%3E" />
             <!-- Badge de tempo na bolha minimizada -->
             <div class="sp-mini-bubble-badge" id="sp-mini-bubble-badge">0:00</div>
             <div class="sp-mini-details">
@@ -2878,7 +2922,7 @@
 
         <!-- Card de Destaque -->
         <div class="sp-hero-card" id="sp-hero-card">
-          <img class="sp-hero-img" id="sp-hero-img" src="papaleguas_logo.png" alt="Papaléguas Music" onerror="if(!this.dataset.retried){this.dataset.retried='1';this.src='/papaleguas_logo.png';}" />
+          <img class="sp-hero-img" id="sp-hero-img" src="papaleguas_logo.png" alt="Papaléguas Music" loading="lazy" decoding="async" onerror="if(!this.dataset.retried){this.dataset.retried='1';this.src='/papaleguas_logo.png';}" />
           <div class="sp-hero-info">
             <h4 class="sp-hero-title" id="sp-hero-title">PAPALÉGUAS MUSIC 🎵</h4>
             <p class="sp-hero-sub" id="sp-hero-sub">Selecione o que você quer ouvir!</p>
@@ -3002,7 +3046,7 @@
           </div>
           <div class="sp-cover-modal-body">
             <div class="sp-cover-current-box">
-              <img id="sp-cover-modal-preview" src="papaleguas_logo.png" alt="Capa atual" />
+              <img id="sp-cover-modal-preview" src="papaleguas_logo.png" alt="Capa atual" loading="lazy" decoding="async" />
               <div class="sp-cover-upload-area">
                 <input type="file" id="sp-cover-file-input" accept="image/*" hidden />
                 <button type="button" class="sp-cover-upload-btn" id="btn-sp-cover-choose-file">
@@ -3034,7 +3078,7 @@
           <div class="sp-add-modal-body">
             <!-- Card da Música Selecionada -->
             <div class="sp-add-modal-track-info">
-              <img id="sp-add-modal-track-thumb" class="sp-add-modal-thumb" src="papaleguas_logo.png" alt="" />
+              <img id="sp-add-modal-track-thumb" class="sp-add-modal-thumb" src="papaleguas_logo.png" alt="" loading="lazy" decoding="async" />
               <div class="sp-add-modal-track-meta">
                 <span class="sp-add-modal-track-title" id="sp-add-modal-track-title">Nome da Música</span>
                 <span class="sp-add-modal-track-artist" id="sp-add-modal-track-artist">Artista</span>
@@ -3105,7 +3149,7 @@
           </div>
           
           <div class="sp-expanded-art-wrapper">
-            <img class="sp-expanded-art" id="sp-expanded-art" src="papaleguas_logo.png" alt="Capa" onerror="this.src='/papaleguas_logo.png'" />
+            <img class="sp-expanded-art" id="sp-expanded-art" src="papaleguas_logo.png" alt="Capa" loading="lazy" decoding="async" onerror="this.src='/papaleguas_logo.png'" />
           </div>
 
           <div class="sp-expanded-info">
@@ -3173,7 +3217,10 @@
     </div>
   </div>
 
-  <script src="auto-update.js?v=27"></script>
-  <script src="musica.js?v=27"></script>
+  <script src="auto-update.js?v=136"></script>
+  <script src="client-cast.js?v=108"></script>
+  <script src="cast-hub.js?v=108"></script>
+  <script src="musica.js?v=108"></script>
+  <script src="i18n-ip.js?v=108"></script>
 </body>
 </html>

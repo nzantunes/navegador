@@ -1,10 +1,9 @@
-// Papaléguas PWA Auto-Updater
-// Detecta novas versões no servidor e atualiza o app imediatamente ao abrir no celular
+// Papaléguas PWA Auto-Updater (Blindado Anti-Loop para Celular & Desktop)
+// Detecta novas versões reais no servidor sem recarregar em loop a mesma versão
 (function () {
   'use strict';
 
-  // 1. SE ESTIVER DENTRO DE UM IFRAME (como abas internas): NUNCA EXECUTAR.
-  // Somente a janela principal (top-level / PWA shell) gerencia Service Worker e atualizações.
+  // 1. SE ESTIVER DENTRO DE UM IFRAME: NUNCA EXECUTAR.
   try {
     if (window.parent && window.parent !== window) return;
     if (window.top && window.top !== window) return;
@@ -16,7 +15,7 @@
 
   var refreshing = false;
 
-  // Banner visual elegante e sutil para notificar atualização no celular
+  // Banner visual sutil para notificar atualização real no celular
   function showUpdateToast(msg) {
     try {
       var id = 'pl-update-toast-banner';
@@ -39,26 +38,34 @@
         }
       }
       el.innerHTML = '<span style="font-size:15px">⚡</span> ' + msg;
+      setTimeout(function () {
+        try { if (el && el.parentNode) el.parentNode.removeChild(el); } catch (e) {}
+      }, 4000);
     } catch (e) {}
   }
 
   // 2. CONTROLLERCHANGE:
-  // Dispara quando um novo Service Worker assume o controle da página
+  // Só deve recarregar a página se uma NOVA versão foi explicitamente instalada e aguarda ativação.
+  // NUNCA recarrega no carregamento inicial normal da página!
   navigator.serviceWorker.addEventListener('controllerchange', function () {
     if (refreshing) return;
+
+    // Trava de segurança: só recarrega se o update foi sinalizado como necessário
+    var isUpdatePending = sessionStorage.getItem('pl_pwa_update_pending');
+    if (!isUpdatePending) {
+      return; // Apenas o Service Worker assumindo controle normal na abertura do app
+    }
+
+    sessionStorage.removeItem('pl_pwa_update_pending');
     var lastReload = parseInt(sessionStorage.getItem('pl_pwa_reload_ts') || '0', 10);
-    // Cooldown de 30s entre reloads para evitar loops
-    if (Date.now() - lastReload < 30000) return;
+    if (Date.now() - lastReload < 25000) return;
 
-    if (sessionStorage.getItem('pl_pwa_controller_reloaded')) return;
-    sessionStorage.setItem('pl_pwa_controller_reloaded', 'true');
     sessionStorage.setItem('pl_pwa_reload_ts', String(Date.now()));
-
     refreshing = true;
-    showUpdateToast('Nova versão pronta! Atualizando...');
+    showUpdateToast('Nova versão aplicada com sucesso!');
     setTimeout(function () {
       window.location.reload();
-    }, 450);
+    }, 500);
   });
 
   // Limpa caches antigos do PWA
@@ -72,8 +79,17 @@
     }
   }
 
-  // Checa a versão do servidor e atualiza imediatamente no celular com trava anti-loop
-  function checkServerVersion(isManual) {
+  // Obtém a versão que a página atual está rodando
+  function getRunningVersion() {
+    var metaEl = document.querySelector('meta[name="papaleguas-version"]');
+    if (metaEl && metaEl.getAttribute('content')) {
+      return String(metaEl.getAttribute('content')).trim();
+    }
+    return localStorage.getItem('pl_app_version') || null;
+  }
+
+  // Checa a versão do servidor e atualiza APENAS se houver uma versão REALMENTE diferente
+  function checkServerVersion() {
     if (refreshing) return;
 
     fetch('/api/session-info?_pl_upd=' + Date.now(), { cache: 'no-store' })
@@ -84,49 +100,42 @@
       .then(function (data) {
         if (!data || !data.serverVersion) return;
         var serverVer = String(data.serverVersion).trim();
-        var stored = localStorage.getItem('pl_app_version');
-        var metaEl = document.querySelector('meta[name="papaleguas-version"]');
-        var runningVer = metaEl ? String(metaEl.getAttribute('content') || '').trim() : null;
+        var runningVer = getRunningVersion();
+        var storedVer = localStorage.getItem('pl_app_version');
 
-        // Atualiza também o badge do modal de instalação se estiver presente na tela
+        // Atualiza o badge do modal de instalação se estiver na tela
         var modalVerEl = document.getElementById('install-modal-app-version');
         if (modalVerEl) {
           modalVerEl.textContent = 'Versão ' + serverVer + ' (Atualizada)';
         }
 
-        // REGRA 1: Se a página em execução já possui a mesma versão que o servidor, NUNCA recarrega!
-        if (runningVer && runningVer === serverVer) {
+        // REGRA DE OURO 1: Se a versão em execução já é igual à do servidor, NUNCA ATUALIZA!
+        if (runningVer === serverVer || storedVer === serverVer) {
           localStorage.setItem('pl_app_version', serverVer);
           return;
         }
 
-        // REGRA 2: Se não há meta tag, mas o localStorage já é igual ao servidor, NUNCA recarrega!
-        if (!runningVer && stored === serverVer) {
+        // REGRA DE OURO 2: Trava anti-loop permanente por versão
+        var lastAttemptedVer = localStorage.getItem('pl_last_attempted_ver');
+        var lastAttemptTime = parseInt(localStorage.getItem('pl_last_attempt_ts') || '0', 10);
+        
+        // Se já tentamos atualizar para ESTA mesma versão nos últimos 60 segundos, NÃO tenta de novo
+        if (lastAttemptedVer === serverVer && (Date.now() - lastAttemptTime < 60000)) {
+          console.log('[PWA AutoUpdate] Versão ' + serverVer + ' já verificada recentemente. Sem loop.');
+          localStorage.setItem('pl_app_version', serverVer);
           return;
         }
 
-        // REGRA 3: Trava anti-loop por versão na sessão.
-        // Se já tentamos atualizar para ESTA versão nesta sessão, NUNCA tenta novamente!
-        var reloadAttemptKey = 'pl_reload_attempted_' + serverVer;
-        if (sessionStorage.getItem(reloadAttemptKey)) {
-          console.warn('[PWA AutoUpdate] Atualização para ' + serverVer + ' já tentada nesta sessão. Evitando loop de recarregamento.');
-          return;
-        }
-
-        // REGRA 4: Cooldown geral de reload (mínimo 20 segundos)
-        var lastReload = parseInt(sessionStorage.getItem('pl_pwa_reload_ts') || '0', 10);
-        if (Date.now() - lastReload < 20000) return;
-
-        // Marca a tentativa e cooldown antes de qualquer recarregamento
-        sessionStorage.setItem(reloadAttemptKey, 'true');
-        sessionStorage.setItem('pl_pwa_reload_ts', String(Date.now()));
+        // Registra a tentativa para impedir repetição
+        localStorage.setItem('pl_last_attempted_ver', serverVer);
+        localStorage.setItem('pl_last_attempt_ts', String(Date.now()));
         localStorage.setItem('pl_app_version', serverVer);
+        sessionStorage.setItem('pl_pwa_update_pending', 'true');
         refreshing = true;
 
-        console.log('[PWA AutoUpdate] Atualizando para versão:', serverVer, '(atual:', runningVer || stored || 'antiga', ')');
+        console.log('[PWA AutoUpdate] Atualizando para nova versão:', serverVer, '(anterior:', runningVer || 'desconhecida', ')');
         showUpdateToast('Atualizando para versão ' + serverVer + '...');
 
-        // Invalida caches do Service Worker
         clearObsoleteCaches();
 
         navigator.serviceWorker.getRegistration().then(function (reg) {
@@ -138,9 +147,9 @@
           }
           setTimeout(function () {
             window.location.reload();
-          }, 600);
+          }, 700);
         }).catch(function () {
-          setTimeout(function () { window.location.reload(); }, 600);
+          setTimeout(function () { window.location.reload(); }, 700);
         });
       })
       .catch(function () {});
@@ -149,70 +158,90 @@
   function setupAutoUpdate(registration) {
     if (!registration) return;
 
-    // Monitora novas instalações encontradas em segundo plano
+    // Monitora novas versões em segundo plano
     registration.addEventListener('updatefound', function () {
       var newWorker = registration.installing;
       if (!newWorker) return;
       newWorker.addEventListener('statechange', function () {
-        if (newWorker.state === 'installed') {
-          showUpdateToast('Instalando atualização mais recente...');
+        if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+          sessionStorage.setItem('pl_pwa_update_pending', 'true');
           newWorker.postMessage({ type: 'SKIP_WAITING' });
         }
       });
     });
 
-    // Se já houver um worker esperando, ativa imediatamente
     if (registration.waiting) {
+      sessionStorage.setItem('pl_pwa_update_pending', 'true');
       registration.waiting.postMessage({ type: 'SKIP_WAITING' });
     }
 
-    // 1. Imediatamente ao abrir o aplicativo: checa e atualiza
-    checkServerVersion(true);
+    // Checagem segura ao abrir o app
+    checkServerVersion();
 
-    // 2. Ao voltar para o aplicativo no celular (resumo de tela / desbloqueio)
+    // Ao voltar ao app após desbloquear tela (sem reload forçado, apenas checagem silenciosa)
     document.addEventListener('visibilitychange', function () {
       if (document.visibilityState === 'visible') {
-        try { registration.update(); } catch (e) {}
-        checkServerVersion(false);
+        var lastCheck = parseInt(sessionStorage.getItem('pl_last_focus_check') || '0', 10);
+        if (Date.now() - lastCheck > 60000) {
+          sessionStorage.setItem('pl_last_focus_check', String(Date.now()));
+          checkServerVersion();
+        }
       }
     });
 
-    window.addEventListener('focus', function () {
-      try { registration.update(); } catch (e) {}
-      checkServerVersion(false);
-    });
-
-    // 3. Ao reconectar a internet no celular
-    window.addEventListener('online', function () {
-      try { registration.update(); } catch (e) {}
-      checkServerVersion(false);
-    });
-
-    // 4. Checagem periódica a cada 5 minutos
+    // Checagem periódica a cada 10 minutos (espaçado para economizar bateria no celular)
     setInterval(function () {
-      try { registration.update(); } catch (e) {}
-      checkServerVersion(false);
-    }, 5 * 60 * 1000);
+      checkServerVersion();
+    }, 10 * 60 * 1000);
   }
 
-  // Registra o Service Worker sempre checando o servidor diretamente (updateViaCache: 'none')
+  // Registra o Service Worker
   navigator.serviceWorker.register('/sw.js', {
     scope: '/',
     updateViaCache: 'none'
   })
     .then(function (reg) {
       setupAutoUpdate(reg);
-      try { reg.update(); } catch (e) {}
     })
     .catch(function (err) {
       console.warn('[PWA AutoUpdate] Falha no registro do Service Worker:', err);
     });
 
-  // Gatilho imediato independente do Service Worker
+  function triggerManualUpdate() {
+    showUpdateToast('Verificando e atualizando app...');
+    try { clearObsoleteCaches(); } catch (e) {}
+    try {
+      localStorage.removeItem('pl_last_attempted_ver');
+      localStorage.removeItem('pl_last_attempt_ts');
+      localStorage.removeItem('pl_app_version');
+      sessionStorage.setItem('pl_pwa_update_pending', 'true');
+    } catch (e) {}
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistration().then(function (reg) {
+        if (reg) {
+          reg.update().then(function () {
+            if (reg.waiting) reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+            if (reg.installing) reg.installing.postMessage({ type: 'SKIP_WAITING' });
+          }).catch(function () {});
+        }
+        setTimeout(function () {
+          window.location.reload();
+        }, 600);
+      }).catch(function () {
+        setTimeout(function () { window.location.reload(); }, 600);
+      });
+    } else {
+      setTimeout(function () { window.location.reload(); }, 600);
+    }
+  }
+
+  window.papaleguasCheckUpdate = checkServerVersion;
+  window.papaleguasForceUpdate = triggerManualUpdate;
+
+  // Gatilho inicial
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', function () { checkServerVersion(true); });
+    document.addEventListener('DOMContentLoaded', checkServerVersion);
   } else {
-    checkServerVersion(true);
+    setTimeout(checkServerVersion, 300);
   }
 })();
-

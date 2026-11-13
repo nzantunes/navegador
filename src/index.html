@@ -6,30 +6,63 @@
   <title>Papaléguas - Navegador Privado, Filmes Online e Músicas</title>
   <meta name="description" content="Papaléguas Browser - Navegador privado com streaming de filmes online, músicas sem anúncios e download direto de vídeos em alta velocidade.">
   <meta name="keywords" content="papaleguas, navegador privado, filmes online, assistir filmes, musicas gratis, download de videos, baixa tube">
-  <meta name="robots" content="index, follow">
-  <link rel="canonical" href="https://papaleguas.ngrok.app/">
+  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+  <link rel="canonical" href="https://papaleguas.app/">
   <meta name="google-site-verification" content="SJH0DPmzrPqP6IQsWjyW-z1b_rAyECfY8s3XKWeyiD0" />
   <meta name="google-site-verification" content="google4acffdc77e16ecda" />
+  <!-- Google tag (gtag.js) + AdSense: carregamento adiado (1ª interação ou 7s após o load) para não travar a thread principal -->
+  <meta name="google-adsense-account" content="ca-pub-5788322050130808">
   <script>
-    window.addEventListener('load', function() {
-      var s = document.createElement('script');
-      s.src = 'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-5788322050130808';
-      s.async = true;
-      s.crossOrigin = 'anonymous';
-      document.head.appendChild(s);
-    });
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+
+    gtag('config', 'G-3PPDLGKC46');
+    (function () {
+      var done = false;
+      var evs = ['touchstart', 'pointerdown', 'scroll', 'keydown', 'mousemove'];
+      function addScript(src, cors) {
+        var s = document.createElement('script');
+        s.async = true;
+        s.src = src;
+        if (cors) s.crossOrigin = 'anonymous';
+        document.head.appendChild(s);
+      }
+      function loadThirdParty() {
+        if (done) return;
+        done = true;
+        evs.forEach(function (e) { window.removeEventListener(e, loadThirdParty, { passive: true }); });
+        addScript('https://www.googletagmanager.com/gtag/js?id=G-3PPDLGKC46', false);
+        addScript('https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-5788322050130808', true);
+      }
+      evs.forEach(function (e) { window.addEventListener(e, loadThirdParty, { passive: true }); });
+      window.addEventListener('load', function () { setTimeout(loadThirdParty, 7000); });
+    })();
   </script>
+  <!-- OpenGraph Padrão para Redes Sociais e WhatsApp -->
+  <meta property="og:site_name" content="Papaléguas">
   <meta property="og:title" content="Papaléguas - Navegador Privado, Filmes Online e Músicas">
-  <meta property="og:description" content="Navegador privado com streaming de filmes online, músicas sem anúncios e download direto de vídeos.">
+  <meta property="og:description" content="Navegador privado com streaming de filmes online, músicas sem anúncios e download direto de vídeos em alta velocidade.">
   <meta property="og:type" content="website">
-  <meta property="og:url" content="https://papaleguas.ngrok.app/">
-  <meta property="og:image" content="https://papaleguas.ngrok.app/icon-512.png">
+  <meta property="og:url" content="https://papaleguas.app/">
+  <meta property="og:image" content="https://papaleguas.app/og-banner.jpg">
+  <meta property="og:image:secure_url" content="https://papaleguas.app/og-banner.jpg">
+  <meta property="og:image:type" content="image/jpeg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Papaléguas - Navegador Privado, Filmes Online e Músicas">
+  <meta name="twitter:description" content="Navegador privado com streaming de filmes online, músicas sem anúncios e download direto de vídeos em alta velocidade.">
+  <meta name="twitter:image" content="https://papaleguas.app/og-banner.jpg">
   <meta name="theme-color" content="#0b0d14">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="Papaléguas">
   <meta name="ngrok-skip-browser-warning" content="1">
-  <meta name="papaleguas-version" content="2026.10.14-v29">
+  <meta name="papaleguas-version" content="2026.11.07-v114">
+  <!-- Feeds de Sindicatura Automática para Robôs, Agentes e Canais -->
+  <link rel="alternate" type="application/rss+xml" title="Papaléguas BaixaTube RSS Feed" href="https://papaleguas.app/feed.xml">
+  <link rel="alternate" type="application/feed+json" title="Papaléguas BaixaTube JSON Feed" href="https://papaleguas.app/feed.json">
   <link rel="manifest" href="manifest.json">
   <link rel="icon" type="image/x-icon" href="favicon.ico">
   <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png?v=4">
@@ -64,21 +97,23 @@
         }
       } catch (e) {}
 
-      var isInstalled = false;
+      // Limpa bloqueio legado para que o instalador e botão de download apareçam sempre
       try {
-        isInstalled = localStorage.getItem('papaleguas_app_installed') === 'true';
+        localStorage.removeItem('papaleguas_app_installed');
+        sessionStorage.removeItem('papaleguas_app_installed');
+        document.cookie = 'papaleguas_app_installed=; path=/; max-age=0';
       } catch (e) {}
-      var standalone = isInstalled || (window.matchMedia && (window.matchMedia('(display-mode: standalone)').matches || window.matchMedia('(display-mode: fullscreen)').matches || window.matchMedia('(display-mode: minimal-ui)').matches)) || window.navigator.standalone === true || (document.referrer && document.referrer.includes('android-app://'));
+
+      var standalone = (window.matchMedia && (window.matchMedia('(display-mode: standalone)').matches || window.matchMedia('(display-mode: minimal-ui)').matches)) || window.navigator.standalone === true;
       var host = (location.hostname || '').toLowerCase();
       var isPhone = !isElectron && (uaMobile || /Android|iPhone|iPod|iPad|Mobile|Opera Mini|IEMobile|webOS|BlackBerry/i.test(ua) || (window.matchMedia && window.matchMedia('(max-width: 900px)').matches) || Math.min(screen.width || 1200, window.innerWidth || 1200) <= 900);
       var root = document.documentElement;
       root.classList.add(isPhone ? 'client-phone' : 'client-pc');
       root.classList.add(isElectron ? 'client-electron' : 'client-hosted');
       if (standalone) {
-        root.classList.add('client-standalone', 'app-installed');
-        root.setAttribute('data-app-installed', 'true');
-        try { localStorage.setItem('papaleguas_app_installed', 'true'); } catch (e) {}
+        root.classList.add('client-standalone');
       }
+
       if (typeof onTunnel !== 'undefined' && onTunnel) root.classList.add('client-on-tunnel');
 
       if (isPhone) {
@@ -89,7 +124,7 @@
       }
     })();
   </script>
-  <link rel="stylesheet" href="styles.css?v=28">
+  <link rel="stylesheet" href="styles.css?v=46">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@300;400;500;600;700&display=swap">
@@ -98,6 +133,8 @@
   <script defer src="hybrid-bridge.js"></script>
 </head>
 <body>
+  <!-- Barra de progresso de navegação e carregamento de links -->
+  <div class="top-nav-progress-bar" id="top-nav-progress-bar" aria-hidden="true"></div>
   <!-- OVERLAY DE VOZ -->
   <div id="voice-overlay" class="voice-overlay" style="display: none;">
     <div class="voice-overlay-content">
@@ -129,8 +166,8 @@
       </button>
       <div class="header-status-area">
         <div class="tor-badge" id="tor-badge">
-          <span class="status-dot" id="status-dot"></span>
-          <span class="badge-text" id="badge-text">Tor: Desconectado</span>
+          <span class="status-dot online" id="status-dot"></span>
+          <span class="badge-text" id="badge-text">Tor: Conectado (9050)</span>
         </div>
         <button type="button" class="cf-badge cf-connecting" id="cf-badge" title="Túnel Cloudflare" style="display:none;">
           <span class="status-dot pulse" id="cf-status-dot"></span>
@@ -180,7 +217,7 @@
         </div>
         <input type="text" id="url-input" class="url-input"
           placeholder="Pesquise com privacidade ou acesse um site..."
-          spellcheck="false" autocomplete="off" />
+          spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" data-form-type="other" />
         <span class="url-loading-chip" id="url-loading-chip" hidden>
           <span class="url-loading-spin"></span>
           <span class="url-loading-bars" aria-hidden="true"><i></i><i></i><i></i></span>
@@ -229,7 +266,7 @@
         </button>
 
         <button class="icon-action-btn install-app-btn" id="btn-install-app" title="Baixar e Instalar App no Celular com ícone Papaléguas">
-          <img src="icon-192.png" class="papaleguas-btn-icon" alt="Papaléguas" onerror="this.onerror=null;this.src='papaleguas_icon.png';" />
+          <img src="icon-192.png" class="papaleguas-btn-icon" alt="Papaléguas" loading="lazy" decoding="async" onerror="this.onerror=null;this.src='papaleguas_icon.png';" />
           <span id="install-app-label">Baixar App</span>
         </button>
         <button class="icon-action-btn spotify-btn" id="btn-spotify" title="Músicas">
@@ -284,52 +321,101 @@
       <div class="bookmarks-bar-items" id="bookmarks-bar-items" style="display:flex; gap:8px;"></div>
     </div>
 
-    <!-- MODAL BAIXAR / INSTALAR APP NO CELULAR -->
+    <!-- MODAL MULTIPLATAFORMA: BAIXAR APP (WINDOWS, ANDROID, IOS, LINUX) -->
     <div class="circuit-modal hidden" id="install-app-modal">
       <div class="circuit-header">
         <div style="display:flex;align-items:center;gap:10px;">
-          <img src="icon-192.png" alt="Papaléguas" style="width:26px;height:26px;border-radius:8px;object-fit:cover;box-shadow:0 0 10px rgba(56,189,248,0.5);" onerror="this.onerror=null;this.src='papaleguas_icon.png';" />
-          <h3 style="font-size:15px;margin:0;">Baixar App no Celular</h3>
+          <img src="icon-192.png" alt="Papaléguas" loading="lazy" decoding="async" style="width:26px;height:26px;border-radius:8px;object-fit:cover;box-shadow:0 0 10px rgba(56,189,248,0.5);" onerror="this.onerror=null;this.src='papaleguas_icon.png';" />
+          <h3 id="install-modal-title" style="font-size:15px;margin:0;">Baixar Super Navegador Papaléguas</h3>
         </div>
         <button class="close-modal-btn" id="close-install-modal-btn">&times;</button>
       </div>
       <div class="circuit-content" style="padding:16px;">
-        <div style="display:flex;align-items:center;gap:14px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:14px;padding:12px;margin-bottom:14px;">
-          <img src="icon-192.png" alt="Papaléguas" style="width:52px;height:52px;border-radius:12px;box-shadow:0 4px 16px rgba(2,132,199,0.35);flex-shrink:0;" onerror="this.onerror=null;this.src='papaleguas_icon.png';" />
+        <div style="display:flex;align-items:center;gap:14px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:14px;padding:12px;margin-bottom:12px;">
+          <img src="icon-192.png" alt="Papaléguas" loading="lazy" decoding="async" style="width:52px;height:52px;border-radius:12px;box-shadow:0 4px 16px rgba(2,132,199,0.35);flex-shrink:0;" onerror="this.onerror=null;this.src='papaleguas_icon.png';" />
           <div>
-            <h4 style="margin:0 0 4px 0;font-size:15px;color:#f8fafc;font-weight:700;">Papaléguas BaixaTube <span id="install-modal-app-version" style="font-size:11px;color:#10b981;margin-left:6px;font-weight:bold;background:rgba(16,185,129,0.18);padding:2px 8px;border-radius:6px;border:1px solid rgba(16,185,129,0.35);">Versão 2026.10.11-v21 (Atualizada)</span></h4>
-            <p style="margin:0;font-size:12px;color:#94a3b8;line-height:1.35;">Central de entretenimento e vídeos com zero anúncios na tela inicial do seu celular.</p>
+            <h4 style="margin:0 0 4px 0;font-size:14.5px;color:#f8fafc;font-weight:700;">Super Navegador Papaléguas <span id="install-modal-app-version" style="font-size:10.5px;color:#10b981;margin-left:4px;font-weight:bold;background:rgba(16,185,129,0.18);padding:2px 7px;border-radius:6px;border:1px solid rgba(16,185,129,0.35);">Rust Engine v2.0</span></h4>
+            <p id="install-detected-os-banner" style="margin:0;font-size:12px;color:#38bdf8;font-weight:600;line-height:1.35;">🔍 Detectando seu sistema operacional...</p>
           </div>
         </div>
 
-        <div id="pwa-install-action-box" style="margin-bottom:14px;text-align:center;">
-          <button type="button" id="btn-trigger-pwa-install" class="pwa-primary-install-btn">
+        <div id="install-auto-status-box" style="display:none;margin-bottom:12px;padding:10px 12px;border-radius:10px;background:rgba(16,185,129,0.14);border:1px solid rgba(16,185,129,0.45);color:#6ee7b7;font-size:12px;font-weight:700;text-align:center;">
+          ⚡ Iniciando download e instalação automática...
+        </div>
+
+        <div id="pwa-install-action-box" style="margin-bottom:12px;text-align:center;">
+          <button type="button" id="btn-trigger-pwa-install" class="pwa-primary-install-btn" style="width:100%;justify-content:center;">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-            <span>Instalar no Celular Agora</span>
+            <span id="btn-trigger-pwa-install-label">Baixar e Instalar Automaticamente</span>
           </button>
         </div>
 
-        <div id="install-external-link-card" style="margin-bottom:14px;background:rgba(2,132,199,0.12);border:1px solid rgba(56,189,248,0.35);border-radius:12px;padding:12px;text-align:center;">
-          <span style="font-size:11.5px;color:#94a3b8;display:block;margin-bottom:6px;">Link fixo para abrir e instalar no celular:</span>
-          <a id="install-external-link" href="#" target="_blank" style="font-size:12.5px;color:#38bdf8;font-weight:700;word-break:break-all;text-decoration:none;">Carregando link Ngrok...</a>
-          <div style="margin-top:8px;">
-            <button type="button" id="btn-copy-install-link" style="padding:4px 12px;font-size:11px;font-weight:700;color:#fff;background:rgba(56,189,248,0.25);border:1px solid rgba(56,189,248,0.5);border-radius:6px;cursor:pointer;">📋 Copiar Link do Celular</button>
+        <div style="margin-bottom:12px;">
+          <span style="font-size:11px;color:#94a3b8;font-weight:700;text-transform:uppercase;letter-spacing:0.4px;display:block;margin-bottom:8px;">Escolha ou baixe para qualquer sistema operacional:</span>
+          <div id="os-download-grid" style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;">
+            <a href="/api/download-app?os=windows" download="Instalar-Papaleguas-Windows.cmd" data-os="windows" class="os-download-card" style="display:flex;align-items:center;gap:8px;padding:9px 10px;border-radius:10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.12);color:#f8fafc;text-decoration:none;font-size:12px;font-weight:700;transition:all 0.2s;">
+              <span style="font-size:18px;">🪟</span>
+              <span style="display:flex;flex-direction:column;line-height:1.2;">
+                <span>Windows</span>
+                <small style="font-size:10px;color:#94a3b8;font-weight:500;">Win 10 / 11 (64-bit)</small>
+              </span>
+            </a>
+            <a href="/api/download-app?os=android" download="Papaleguas-Android-App.html" data-os="android" class="os-download-card" style="display:flex;align-items:center;gap:8px;padding:9px 10px;border-radius:10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.12);color:#f8fafc;text-decoration:none;font-size:12px;font-weight:700;transition:all 0.2s;">
+              <span style="font-size:18px;">🤖</span>
+              <span style="display:flex;flex-direction:column;line-height:1.2;">
+                <span>Android</span>
+                <small style="font-size:10px;color:#94a3b8;font-weight:500;">Celular / Tablet / TV</small>
+              </span>
+            </a>
+            <a href="/api/download-app?os=ios" download="Papaleguas-iOS.mobileconfig" data-os="ios" class="os-download-card" style="display:flex;align-items:center;gap:8px;padding:9px 10px;border-radius:10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.12);color:#f8fafc;text-decoration:none;font-size:12px;font-weight:700;transition:all 0.2s;">
+              <span style="font-size:18px;">🍎</span>
+              <span style="display:flex;flex-direction:column;line-height:1.2;">
+                <span>iOS (iPhone/iPad)</span>
+                <small style="font-size:10px;color:#94a3b8;font-weight:500;">WebClip Tela Cheia</small>
+              </span>
+            </a>
+            <a href="/api/download-app?os=linux" download="instalar-papaleguas-linux.sh" data-os="linux" class="os-download-card" style="display:flex;align-items:center;gap:8px;padding:9px 10px;border-radius:10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.12);color:#f8fafc;text-decoration:none;font-size:12px;font-weight:700;transition:all 0.2s;">
+              <span style="font-size:18px;">🐧</span>
+              <span style="display:flex;flex-direction:column;line-height:1.2;">
+                <span>Linux</span>
+                <small style="font-size:10px;color:#94a3b8;font-weight:500;">Ubuntu / Debian / Mint</small>
+              </span>
+            </a>
           </div>
         </div>
 
-        <div class="install-instructions-card">
-          <strong style="color:#38bdf8;display:block;margin-bottom:8px;font-size:12.5px;">📲 Como instalar pelo navegador do celular:</strong>
+        <div id="install-update-card" style="margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border-radius:10px;background:rgba(56,189,248,0.08);border:1px solid rgba(56,189,248,0.25);">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span style="font-size:18px;">⚡</span>
+            <div style="line-height:1.2;">
+              <strong style="font-size:12px;color:#f8fafc;display:block;">Atualizar Navegador / App</strong>
+              <small style="font-size:10.5px;color:#94a3b8;">Verificar se há nova versão e atualizar imediatamente</small>
+            </div>
+          </div>
+          <button type="button" id="btn-modal-update-app" onclick="if(window.papaleguasForceUpdate)window.papaleguasForceUpdate();else window.location.reload();" style="padding:6px 12px;font-size:11px;font-weight:700;color:#04070e;background:#38bdf8;border:none;border-radius:8px;cursor:pointer;white-space:nowrap;transition:all 0.2s;">Atualizar Agora</button>
+        </div>
+
+        <div id="install-external-link-card" style="margin-bottom:12px;background:rgba(2,132,199,0.12);border:1px solid rgba(56,189,248,0.35);border-radius:12px;padding:10px;text-align:center;">
+          <span style="font-size:11px;color:#94a3b8;display:block;margin-bottom:4px;">Link oficial multiplataforma (Windows • Android • iOS • Linux):</span>
+          <a id="install-external-link" href="https://papaleguas.app" target="_blank" style="font-size:12px;color:#38bdf8;font-weight:700;word-break:break-all;text-decoration:none;">https://papaleguas.app</a>
+          <div style="margin-top:6px;">
+            <button type="button" id="btn-copy-install-link" style="padding:4px 12px;font-size:11px;font-weight:700;color:#fff;background:rgba(56,189,248,0.25);border:1px solid rgba(56,189,248,0.5);border-radius:6px;cursor:pointer;">📋 Copiar Link de Instalação</button>
+          </div>
+        </div>
+
+        <div class="install-instructions-card" id="install-os-instructions-card">
+          <strong id="install-steps-title" style="color:#38bdf8;display:block;margin-bottom:8px;font-size:12.5px;">📲 Como instalar no seu sistema:</strong>
           <div class="install-step-item">
             <span class="install-step-badge">1</span>
-            <span>Toque nos <strong>três pontinhos (⋮)</strong> no canto superior do Google Chrome.</span>
+            <span id="install-step-1">Clique no botão principal acima ou escolha seu sistema (Windows, Android, iOS ou Linux).</span>
           </div>
           <div class="install-step-item">
             <span class="install-step-badge">2</span>
-            <span>Toque em <strong>"Instalar aplicativo"</strong> ou <strong>"Adicionar à tela inicial"</strong>.</span>
+            <span id="install-step-2">Execute o instalador baixado ou confirme <strong>"Instalar aplicativo"</strong>.</span>
           </div>
           <div class="install-step-item">
             <span class="install-step-badge">3</span>
-            <span>O ícone do <strong>Papaléguas</strong> aparecerá na tela do seu celular, abrindo em tela cheia super rápido!</span>
+            <span id="install-step-3">O <strong>Super Navegador Papaléguas</strong> ficará salvo com ícone oficial na sua Área de Trabalho ou Tela Inicial!</span>
           </div>
         </div>
       </div>
@@ -389,7 +475,7 @@
             <div class="priv-status-value" id="tor-mode-text">Ativo (SOCKS5: 9050)</div>
           </div>
           <div class="priv-status-card">
-            <div class="priv-status-label" id="tor-ip-label">IPv4 do cliente</div>
+            <div class="priv-status-label" id="tor-ip-label">IP de Saída Tor (Navegação Anônima)</div>
             <div class="priv-status-value code-val" id="tor-ip-display">Consultando...</div>
           </div>
           <div class="priv-status-card">
@@ -410,7 +496,7 @@
           </div>
         </div>
         <div class="modal-actions">
-          <button class="secondary-btn tor-action-btn connect" id="btn-modal-toggle-tor" title="Conectar este dispositivo à rede Tor">Conectar este Dispositivo ao Tor</button>
+          <button class="secondary-btn tor-action-btn connect" id="btn-modal-toggle-tor" title="Tor Ativo e Protegido">Tor Conectado e Protegido</button>
           <button class="secondary-btn" id="btn-refresh-ip">Checar IP Atual</button>
           <button class="secondary-btn" id="btn-check-tor-web">Abrir check.torproject.org</button>
         </div>
@@ -464,7 +550,10 @@
             <div class="page-player-badge">Player Papaléguas</div>
             <div class="page-player-title" id="page-player-title">Vídeo</div>
           </div>
-          <button type="button" class="page-player-close" id="page-player-close" title="Fechar e voltar para a página">✕</button>
+          <div class="page-player-top-actions">
+            <button type="button" class="page-player-disable-btn" id="page-player-disable-top" title="Desativar reconhecimento de vídeo neste site">🚫 Desativar no Site</button>
+            <button type="button" class="page-player-close" id="page-player-close" title="Fechar e voltar para a página">✕</button>
+          </div>
         </div>
         <div class="page-player-stage">
           <iframe id="page-player-frame" hidden allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen></iframe>
@@ -472,11 +561,18 @@
           <div class="page-player-status" id="page-player-status">Abrindo no player do Papaléguas…</div>
         </div>
         <div class="page-player-actions">
-          <button type="button" id="page-player-mp4">🎬 Baixar MP4</button>
-          <button type="button" id="page-player-mp3">🎵 Baixar MP3</button>
+          <button type="button" id="page-player-mp4" class="page-player-act-btn mp4">🎬 Baixar MP4</button>
+          <button type="button" id="page-player-mp3" class="page-player-act-btn mp3">🎵 Baixar MP3</button>
+          <button type="button" id="page-player-disable" class="page-player-act-btn disable" title="Desativar reconhecimento de vídeo neste site">🚫 Desativar Reconhecimento no Site</button>
         </div>
       </div>
     </div>
+
+    <!-- Botão flutuante transparente para reativar reconhecimento de vídeo no site -->
+    <button type="button" class="btn-reactivate-video-recognition" id="btn-reactivate-video-recognition" style="display: none;" title="Clique para reativar o reconhecimento de vídeo neste site">
+      <span class="reactivate-icon">🎥</span>
+      <span class="reactivate-text">Ativar Reconhecimento de Vídeo</span>
+    </button>
 
     <!-- Media Download Modal -->
     <div class="circuit-modal hidden" id="global-media-download-modal">
@@ -517,7 +613,7 @@
     <div class="global-music-mini-player hidden" id="global-music-mini-player">
       <div class="gm-drag-header" id="gm-drag-header" title="Segure e arraste para posicionar onde quiser na tela">
         <div class="gm-brand">
-          <img src="papaleguas_icon.png" class="gm-brand-icon" alt="" onerror="if(!this.dataset.retry){this.dataset.retry='1';this.src='/papaleguas_icon.png';}" />
+          <img src="papaleguas_icon.png" class="gm-brand-icon" alt="" loading="lazy" decoding="async" onerror="if(!this.dataset.retry){this.dataset.retry='1';this.src='/papaleguas_icon.png';}" />
         </div>
         <div class="gm-window-actions">
           <button class="gm-action-btn" id="gm-btn-maximize" title="Maximizar / Ir para a aba da música">
@@ -529,7 +625,7 @@
         </div>
       </div>
       <div class="gm-content">
-        <img src="papaleguas_icon.png" class="gm-track-thumb" id="gm-track-thumb" alt="Capa da música" onerror="if(!this.dataset.retry){this.dataset.retry='1';this.src='/papaleguas_icon.png';}" />
+        <img src="papaleguas_icon.png" class="gm-track-thumb" id="gm-track-thumb" alt="Capa da música" loading="lazy" decoding="async" onerror="if(!this.dataset.retry){this.dataset.retry='1';this.src='/papaleguas_icon.png';}" />
         <div class="gm-track-details">
           <div class="gm-track-title" id="gm-track-title">--</div>
           <div class="gm-track-artist" id="gm-track-artist">Nenhuma faixa tocando</div>
@@ -560,7 +656,7 @@
         </div>
       </div>
       <div class="gyt-video-box">
-        <img id="gyt-thumb" class="gyt-thumb" alt="Vídeo">
+        <img id="gyt-thumb" class="gyt-thumb" alt="Vídeo" loading="lazy" decoding="async">
         <iframe id="gyt-iframe" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe>
       </div>
       <div class="gyt-meta">
@@ -572,10 +668,26 @@
         </div>
       </div>
     </div>
-    <button type="button" class="fs-home-btn" id="fs-home-btn" title="Voltar para a Home">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 10.5L12 3l9 7.5"/><path d="M5 10v10h5v-6h4v6h5V10"/></svg>
-      <span>Home</span>
+    <button type="button" class="fs-home-btn" id="fs-home-btn" title="Minimizar (Restaurar janela)">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M10 14l-7 7"/></svg>
+      <span>Minimizar</span>
     </button>
+    <!-- Botão Flutuante Central de Histórico (Voltar / Avançar sem atrapalhar a visão) -->
+    <div class="floating-nav-pill is-hidden" id="floating-nav-pill" role="toolbar" aria-label="Navegação rápida de página" hidden>
+      <button type="button" class="floating-nav-btn floating-nav-back" id="floating-nav-back" title="Voltar para a página anterior (Alt + Seta Esquerda)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="15 18 9 12 15 6"></polyline>
+        </svg>
+        <span class="floating-nav-text">Voltar</span>
+      </button>
+      <div class="floating-nav-divider"></div>
+      <button type="button" class="floating-nav-btn floating-nav-forward" id="floating-nav-forward" title="Ir para a frente (Alt + Seta Direita)">
+        <span class="floating-nav-text">Avançar</span>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="9 18 15 12 9 6"></polyline>
+        </svg>
+      </button>
+    </div>
     <audio id="yt-notify-audio" playsinline webkit-playsinline></audio>
     <video id="yt-pip-video" playsinline webkit-playsinline muted disablepictureinpicture="false" style="position:fixed;width:160px;height:90px;left:-200px;bottom:0;opacity:0.02;pointer-events:none;z-index:0;"></video>
 
@@ -600,7 +712,7 @@
       </button>
       <div class="search-fs-field">
         <svg class="search-fs-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        <input type="text" id="search-fs-input" class="search-fs-input" placeholder="Pesquise na web ou digite um endereço" spellcheck="false" autocomplete="off" />
+        <input type="text" id="search-fs-input" class="search-fs-input" placeholder="Pesquise na web ou digite um endereço" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" data-form-type="other" />
         <button type="button" class="search-fs-clear" id="search-fs-clear" title="Limpar" hidden>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
@@ -615,10 +727,7 @@
       <span class="search-fs-net" id="search-fs-net">Conexão direta</span>
     </div>
     <div class="search-fs-body" id="search-fs-body">
-      <section class="search-fs-section" id="search-fs-recent-box" hidden>
-        <h3 class="search-fs-heading">Pesquisas desta sessão</h3>
-        <div class="search-fs-chips" id="search-fs-recent"></div>
-      </section>
+      <section class="search-fs-section" id="search-fs-recent-box" style="display:none !important;" hidden></section>
       <div class="search-fs-list" id="search-fs-list"></div>
       <div class="search-fs-status" id="search-fs-status" hidden></div>
     </div>
@@ -629,10 +738,114 @@
     try {
       document.cookie = "ngrok-skip-browser-warning=1; path=/; max-age=31536000; SameSite=Lax";
     } catch (e) {}
+
+    // Detector imediato de Sistema Operacional + Auto-Instalador (independente de cache de scripts externos)
+    (function initImmediateOsInstaller() {
+      function detectOsNow() {
+        var ua = (navigator.userAgent || '').toLowerCase();
+        var plat = (navigator.platform || '').toLowerCase();
+        var isTouchMac = /macintosh/.test(ua) && navigator.maxTouchPoints > 1;
+        if (/iphone|ipad|ipod/.test(ua) || isTouchMac) {
+          return { osId: 'ios', osName: 'iPhone / iPad (iOS)', icon: '🍎', btn: '🍎 Baixar e Instalar no iPhone / iPad (iOS)', topLabel: 'Baixar App iOS' };
+        }
+        if (/android/.test(ua)) {
+          return { osId: 'android', osName: 'Android (Smartphone / Tablet / TV)', icon: '🤖', btn: '🤖 Baixar e Instalar no Android Agora', topLabel: 'Baixar App Android' };
+        }
+        if (/win/.test(plat) || /windows|win64|win32/.test(ua)) {
+          return { osId: 'windows', osName: 'Windows 10 / 11 (64-bit)', icon: '🪟', btn: '🪟 Baixar e Instalar no Windows Agora', topLabel: 'Baixar p/ Windows' };
+        }
+        if (/linux/.test(plat) || /linux|x11|ubuntu/.test(ua)) {
+          return { osId: 'linux', osName: 'Linux (Ubuntu / Debian / Mint • 64-bit)', icon: '🐧', btn: '🐧 Baixar e Instalar no Linux Agora', topLabel: 'Baixar p/ Linux' };
+        }
+        return { osId: 'windows', osName: 'Multiplataforma (Windows / Android / iOS / Linux)', icon: '🚀', btn: '🚀 Baixar e Instalar Super Navegador', topLabel: 'Baixar App' };
+      }
+
+      var osInfo = detectOsNow();
+      window.__plDetectedOs = osInfo;
+
+      function syncImmediateUi(selectedOsId) {
+        var activeId = selectedOsId || osInfo.osId;
+        var bannerEl = document.getElementById('install-detected-os-banner');
+        if (bannerEl) {
+          bannerEl.innerHTML = osInfo.icon + ' Sistema reconhecido: <strong style="color:#10b981;">' + osInfo.osName + '</strong>';
+        }
+        var topLabelEl = document.getElementById('install-app-label');
+        if (topLabelEl) {
+          topLabelEl.textContent = osInfo.topLabel;
+          topLabelEl.setAttribute('data-os-locked', 'true');
+        }
+        var btnLabelEl = document.getElementById('btn-trigger-pwa-install-label');
+        if (btnLabelEl) {
+          btnLabelEl.textContent = osInfo.btn;
+        }
+        var cards = document.querySelectorAll('.os-download-card');
+        for (var i = 0; i < cards.length; i++) {
+          var c = cards[i];
+          var isMatch = c.getAttribute('data-os') === activeId;
+          c.style.borderColor = isMatch ? 'rgba(16, 185, 129, 0.9)' : 'rgba(255,255,255,0.12)';
+          c.style.background = isMatch ? 'rgba(16, 185, 129, 0.18)' : 'rgba(255,255,255,0.04)';
+          c.style.boxShadow = isMatch ? '0 0 15px rgba(16, 185, 129, 0.3)' : 'none';
+        }
+      }
+
+      if (window.location && window.location.protocol !== 'file:') {
+        var winCtrls = document.querySelector('.window-controls');
+        if (winCtrls) winCtrls.style.display = 'none';
+      }
+
+      syncImmediateUi(osInfo.osId);
+
+      window.__plRunAutoInstall = function(targetOsId) {
+        var osTarget = targetOsId || osInfo.osId || 'linux';
+        syncImmediateUi(osTarget);
+        var statusBox = document.getElementById('install-auto-status-box');
+        if (statusBox) {
+          statusBox.style.display = 'block';
+          statusBox.style.background = 'rgba(2, 132, 199, 0.18)';
+          statusBox.style.borderColor = 'rgba(56, 189, 248, 0.55)';
+          statusBox.style.color = '#7dd3fc';
+          statusBox.innerHTML = '⏳ Baixando, instalando e abrindo a <strong>Janela Nativa Própria</strong> para <strong>' + osTarget.toUpperCase() + '</strong>...';
+        }
+
+        // 1. Dispara instalação no sistema e abre a Janela Nativa Própria via API (/api/auto-install-app + /api/open-native-window)
+        fetch('/api/open-native-window', { method: 'POST' }).catch(function() {});
+        fetch('/api/auto-install-app?os=' + encodeURIComponent(osTarget), { method: 'POST' })
+          .then(function(r) { return r.json(); })
+          .then(function(res) {
+            if (statusBox) {
+              statusBox.style.background = 'rgba(16, 185, 129, 0.18)';
+              statusBox.style.borderColor = 'rgba(16, 185, 129, 0.65)';
+              statusBox.style.color = '#6ee7b7';
+              if (res && res.hostAutoInstalled) {
+                statusBox.innerHTML = '✅ <strong>Janela Nativa aberta e instalada!</strong> O aplicativo próprio do <em>Papaléguas Super Navegador</em> foi aberto em janela dedicada e salvo na sua Área de Trabalho.';
+              } else {
+                statusBox.innerHTML = '✅ <strong>Instalador ' + osTarget.toUpperCase() + ' baixado automaticamente!</strong> Clique no arquivo baixado para abrir a janela nativa.';
+              }
+            }
+          })
+          .catch(function() {});
+
+        // 2. Inicia o download automático do pacote/instalador do sistema operacional
+        try {
+          var dlFrame = document.getElementById('pl-hidden-dl-frame');
+          if (!dlFrame) {
+            dlFrame = document.createElement('iframe');
+            dlFrame.id = 'pl-hidden-dl-frame';
+            dlFrame.style.display = 'none';
+            document.body.appendChild(dlFrame);
+          }
+          dlFrame.src = '/api/download-app?os=' + encodeURIComponent(osTarget) + '&t=' + Date.now();
+        } catch (e) {
+          window.location.href = '/api/download-app?os=' + encodeURIComponent(osTarget);
+        }
+      };
+    })();
   </script>
-  <script defer src="auto-update.js?v=27"></script>
-  <script defer src="fab-drag.js?v=1"></script>
-  <script defer src="client-cast.js?v=9"></script>
-  <script defer src="renderer.js?v=27"></script>
+  <script defer src="auto-update.js?v=136"></script>
+  <script defer src="fab-drag.js?v=108"></script>
+  <script defer src="client-cast.js?v=108"></script>
+  <script defer src="cast-hub.js?v=108"></script>
+  <script defer src="renderer.js?v=108"></script>
+  <script defer src="i18n-ip.js?v=108"></script>
 </body>
 </html>

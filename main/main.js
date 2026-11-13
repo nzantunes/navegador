@@ -4,6 +4,7 @@ const { app, BrowserWindow, ipcMain, session, Menu, components, screen, dialog, 
 const path = require('path');
 const fs = require('fs');
 const TorManager = require('./tor-manager');
+const nativeCore = require('./native-core');
 const { runGptNavigator, callOpenAiChat } = require('./gpt-agent');
 const { setupAdblocker, getAdblockStatus, toggleAdblock } = require('./adblocker');
 
@@ -24,6 +25,13 @@ const WEBRTC_LEAK_SHIELD = `(function(){
 
 function installWebRtcLeakShield(contents) {
   if (!contents || contents.__plWebRtcShield) return;
+  try {
+    const sess = contents.session;
+    const directSess = session.fromPartition('persist:papaleguas-direct');
+    if (sess === session.defaultSession || sess === directSess) {
+      return; // Portais internos diretos (BaixaTube, Filmes e Música) não passam pelo Tor nem bloqueiam conexões diretas
+    }
+  } catch (e) {}
   contents.__plWebRtcShield = true;
   try {
     if (typeof contents.setWebRTCIPHandlingPolicy === 'function') {
@@ -182,6 +190,8 @@ app.commandLine.appendSwitch('webrtc-ip-handling-policy', 'disable_non_proxied_u
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+// Remove flag de automação/WebDriver para evitar bloqueios Cloudflare/Akamai/DataDome
+app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
 // BackForwardCache: voltar reusa a página que já estava carregada em vez de baixar de novo.
 app.commandLine.appendSwitch('enable-features', 'WidevineCdm,AudioServiceOutOfProcess,BackForwardCache:enable_same_site/true,BackForwardCacheMemoryControls');
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -199,35 +209,40 @@ app.on('web-contents-created', (event, contents) => {
 });
 // Só erros fatais do Chromium. O resto às vezes imprime o endereço da página.
 app.commandLine.appendSwitch('log-level', '3');
-// DNS local só para o app, túnel e domínios essenciais com bypass de proxy. O resto não resolve na máquina:
-// o Chromium é obrigado a mandar o nome pelo SOCKS, senão o IP real vaza.
+// Resolução direta de DNS habilitada para que BaixaTube, Filmes e Música conectem diretamente sem passar pela rede Tor
 app.commandLine.appendSwitch(
   'host-resolver-rules',
   [
     'MAP *.trycloudflare.com 104.16.231.132',
-    'MAP *.cfargotunnel.com 104.16.231.132',
-    'EXCLUDE 127.0.0.1',
-    'EXCLUDE localhost',
-    'EXCLUDE *.local',
-    'EXCLUDE googlevideo.com',
-    'EXCLUDE *.googlevideo.com',
-    'EXCLUDE ytimg.com',
-    'EXCLUDE *.ytimg.com',
-    'EXCLUDE ggpht.com',
-    'EXCLUDE *.ggpht.com',
-    'EXCLUDE gstatic.com',
-    'EXCLUDE *.gstatic.com',
-    'EXCLUDE gvt1.com',
-    'EXCLUDE *.gvt1.com',
-    'MAP * ~NOTFOUND'
+    'MAP *.cfargotunnel.com 104.16.231.132'
   ].join(', ')
 );
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
-  console.log('[APP] Papaléguas já está em execução. Use a janela que já está aberta.');
-  app.quit();
-  process.exit(0);
+  console.log('[APP] Papaléguas já está em execução. Abrindo a janela nativa principal...');
+  try {
+    const http = require('http');
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port: 8080,
+      path: '/api/open-native-window',
+      method: 'POST',
+      timeout: 1500
+    }, () => {
+      app.quit();
+      process.exit(0);
+    });
+    req.on('error', () => {
+      app.quit();
+      process.exit(0);
+    });
+    req.end();
+    setTimeout(() => process.exit(0), 1600);
+  } catch (e) {
+    app.quit();
+    process.exit(0);
+  }
 }
 
 let papaleguasServer = null;
@@ -242,48 +257,48 @@ let ytPipWindow = null;
 let forceQuitBrowser = false;
 let pipQueryPending = false;
 const torManager = new TorManager({ socksPort: 9050, socksHost: '127.0.0.1' });
-let torEnabled = false;
+let torEnabled = true;
 
 function getAppSessions() {
   return [
-    session.defaultSession,
     session.fromPartition('persist:tor-browser'),
     session.fromPartition('persist:papaleguas-tor')
   ];
 }
 
-// Catálogo do Papaléguas Music (Deezer) e DJ: saem direto, sem passar pelo proxy Tor.
+function getDirectPortalSessions() {
+  return [
+    session.defaultSession,
+    session.fromPartition('persist:papaleguas-direct')
+  ];
+}
+
+// Catálogo do Papaléguas Music (Deezer), BaixaTube e vídeos do YouTube: saem direto, sem passar pelo proxy Tor.
 // Só a pesquisa de URLs usa a rede Tor.
 function getNodeTorAgent() {
   return undefined;
 }
 
+async function configureDirectProxy(directSession) {
+  await directSession.setProxy({ mode: 'direct' });
+}
+
 async function configureTorProxy(torSession) {
-  if (torEnabled) {
-    await torSession.setProxy({
-      mode: 'fixed_servers',
-      proxyRules: 'socks5://127.0.0.1:9050',
-      // Navegação do YouTube e Google sai pela rede Tor para garantir recomendações e IP do país conectado.
-      // Apenas streaming pesado de chunks de vídeo do googlevideo tem opção de bypass de CDN.
-      proxyBypassRules: 'localhost;127.0.0.1;[::1];192.168.0.0/16;10.0.0.0/8;172.16.0.0/12;*.local;239.255.255.250;*.trycloudflare.com;*.cfargotunnel.com;'
-        + 'youtube.com;*.youtube.com;youtu.be;*.youtu.be;googlevideo.com;*.googlevideo.com;ytimg.com;*.ytimg.com;ggpht.com;*.ggpht.com;gstatic.com;*.gstatic.com;gvt1.com;*.gvt1.com'
-    });
-    if (typeof torSession.closeAllConnections === 'function') {
-      await torSession.closeAllConnections().catch(() => {});
-    }
-  } else {
-    await torSession.setProxy({
-      mode: 'direct',
-      proxyRules: 'direct://'
-    });
+  // Mantém toda a navegação externa SEMPRE ativa na rede Tor (SOCKS5 127.0.0.1:9050),
+  // exceto endereços locais e os portais de mídia dedicada (BaixaTube, Filmes e Música)
+  await torSession.setProxy({
+    mode: 'fixed_servers',
+    proxyRules: 'socks5://127.0.0.1:9050',
+    proxyBypassRules: 'localhost;127.0.0.1;[::1];192.168.0.0/16;10.0.0.0/8;172.16.0.0/12;*.local;239.255.255.250;*.trycloudflare.com;*.cfargotunnel.com;*.ngrok.app;*.ngrok-free.app;*.youtube.com;*.googlevideo.com;*.ytimg.com;*.youtube-nocookie.com;youtu.be;*.ggpht.com;*.gvt1.com;*.gstatic.com;*.googleapis.com;*.googlesyndication.com;*.deezer.com;*.dzcdn.net'
+  });
+  if (typeof torSession.closeAllConnections === 'function') {
+    await torSession.closeAllConnections().catch(() => {});
   }
 }
 
 function applyTorDnsMode() {
   if (typeof app.configureHostResolver !== 'function') return;
   try {
-    // O resolver embutido é quem obedece host-resolver-rules.
-    // Desligá-lo manda o DNS para o sistema e a consulta sai com o IP real.
     app.configureHostResolver({
       enableBuiltInResolver: true,
       secureDnsMode: 'off'
@@ -292,13 +307,18 @@ function applyTorDnsMode() {
 }
 
 async function applyTorRouting() {
-  if (typeof torManager.ensureRunning === 'function') {
-    await torManager.ensureRunning().catch(() => {});
+  // Garante imediatamente conexão direta nas sessões de BaixaTube, Filmes e Música (sem esperar o Tor iniciar)
+  const directSessions = getDirectPortalSessions();
+  for (const ds of directSessions) {
+    await configureDirectProxy(ds).catch(() => {});
   }
   applyTorDnsMode();
   const sessions = getAppSessions();
   for (const s of sessions) {
-    await configureTorProxy(s);
+    await configureTorProxy(s).catch(() => {});
+  }
+  if (typeof torManager.ensureRunning === 'function') {
+    torManager.ensureRunning().catch(() => {});
   }
 }
 
@@ -310,6 +330,35 @@ function openUrlInsideApp(url) {
     mainWindow.webContents.send('open-url-in-app', target);
   }
 }
+
+function openOrFocusNativeWindow(targetUrl = '') {
+  try {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      createWindow();
+    } else {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      try { mainWindow.setAlwaysOnTop(true); } catch (e) {}
+      try { mainWindow.moveTop(); } catch (e) {}
+      mainWindow.focus();
+      setTimeout(() => {
+        try {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.setAlwaysOnTop(false);
+          }
+        } catch (e) {}
+      }, 900);
+    }
+    if (targetUrl) {
+      setTimeout(() => openUrlInsideApp(targetUrl), 350);
+    }
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+global.openPapaleguasNativeWindow = openOrFocusNativeWindow;
 
 function createWindow() {
   Menu.setApplicationMenu(null);
@@ -337,6 +386,7 @@ function createWindow() {
   mainWindow.removeMenu();
 
   const torPartitionSession = session.fromPartition('persist:tor-browser');
+  const directPartitionSession = session.fromPartition('persist:papaleguas-direct');
   applyTorRouting().finally(() => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.loadFile(path.join(__dirname, '../src/index.html'));
@@ -358,14 +408,17 @@ function createWindow() {
   };
 
   torPartitionSession.setPermissionRequestHandler(handlePermissions);
+  directPartitionSession.setPermissionRequestHandler(handlePermissions);
   session.defaultSession.setPermissionRequestHandler(handlePermissions);
 
   torPartitionSession.setPermissionCheckHandler(handlePermissionCheck);
+  directPartitionSession.setPermissionCheckHandler(handlePermissionCheck);
   session.defaultSession.setPermissionCheckHandler(handlePermissionCheck);
 
   // User-Agent padrão moderno e realista do Chrome para compatibilidade máxima (Google, Spotify, etc.)
   const modernChromeUA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
   torPartitionSession.setUserAgent(modernChromeUA);
+  directPartitionSession.setUserAgent(modernChromeUA);
   session.defaultSession.setUserAgent(modernChromeUA);
 
   // Garante que cabeçalhos HTTP reflitam um navegador Chrome desktop autêntico (evitando bloqueio anti-bot do YouTube/Google)
@@ -379,13 +432,28 @@ function createWindow() {
     delete headers['X-Electron-Version'];
     delete headers['x-electron-version'];
 
+    const nativeCore = require('./native-core');
+    // Escudo Anti-Rastreamento Nativo em Rust: bloqueia cookies apenas de domínios de anúncios/rastreadores,
+    // preservando cookies temporários de desafio anti-bot (Cloudflare __cf_bm / cf_clearance) para evitar bloqueios
+    if (details.url && nativeCore.isTrackerOrAd(details.url)) {
+      delete headers['Cookie'];
+      delete headers['cookie'];
+    }
+
     // Se for requisição para embed do YouTube ou streaming de vídeo, garante Referer e Origin válidos.
-    // O YouTube bloqueia com Erro 152-4 se o Referer for 'https://www.youtube.com/' ou se for 'file://'/nulo.
+    // O YouTube bloqueia com Erro 152-4 / 153 se o Referer do embed for 'file://'/nulo.
     if (details.url && (details.url.includes('youtube.com') || details.url.includes('youtube-nocookie.com') || details.url.includes('googlevideo.com') || details.url.includes('youtu.be'))) {
       const currentRef = headers['Referer'] || headers['referer'] || '';
-      if (!currentRef || currentRef.startsWith('file:') || currentRef.includes('youtube.com') || currentRef.includes('youtu.be')) {
+      const isEmbedDoc = details.url.includes('/embed/');
+      if (!currentRef || currentRef.startsWith('file:') || (isEmbedDoc && (currentRef.includes('youtube.com') || currentRef.includes('youtu.be')))) {
         headers['Referer'] = 'http://localhost:8080/';
         headers['Origin'] = 'http://localhost:8080';
+      }
+      const hlMatch = (details.url + ' ' + currentRef).match(/[?&]hl=([a-zA-Z]{2}(?:-[a-zA-Z0-9]+)?)/);
+      if (hlMatch && hlMatch[1]) {
+        const hlVal = hlMatch[1];
+        const baseLang = hlVal.split('-')[0].toLowerCase();
+        headers['Accept-Language'] = `${hlVal},${baseLang};q=0.9,en;q=0.7`;
       }
     }
 
@@ -393,6 +461,7 @@ function createWindow() {
   };
 
   session.defaultSession.webRequest.onBeforeSendHeaders(setDesktopHeaders);
+  directPartitionSession.webRequest.onBeforeSendHeaders(setDesktopHeaders);
   torPartitionSession.webRequest.onBeforeSendHeaders(setDesktopHeaders);
 
   // Permite que players de filmes e transmissões embutidas carreguem sem restrições de X-Frame-Options
@@ -401,6 +470,12 @@ function createWindow() {
     // Remove cabeçalhos que impedem a exibição em iframe
     delete responseHeaders['x-frame-options'];
     delete responseHeaders['X-Frame-Options'];
+    // Escudo Anti-Rastreamento Nativo em Rust: impede que rastreadores/anúncios gravem cookies
+    const nativeCore = require('./native-core');
+    if (details.url && nativeCore.isTrackerOrAd(details.url)) {
+      delete responseHeaders['set-cookie'];
+      delete responseHeaders['Set-Cookie'];
+    }
     const cleanCsp = (cspList) => {
       if (!Array.isArray(cspList)) return [];
       return cspList
@@ -422,10 +497,12 @@ function createWindow() {
   };
 
   session.defaultSession.webRequest.onHeadersReceived(allowFrameHeaders);
+  directPartitionSession.webRequest.onHeadersReceived(allowFrameHeaders);
   torPartitionSession.webRequest.onHeadersReceived(allowFrameHeaders);
 
-  // Inicializa o adblocker na sessão Tor persistente e na sessão padrão da janela
+  // Inicializa o adblocker na sessão Tor persistente, na sessão direta dos portais e na sessão padrão
   setupAdblocker(torPartitionSession);
+  setupAdblocker(directPartitionSession);
   setupAdblocker(session.defaultSession);
 
   // Nenhum link abre janela do sistema: a URL volta para uma aba do Papaléguas.
@@ -436,8 +513,29 @@ function createWindow() {
   mainWindow.webContents.on('did-attach-webview', (_event, guestContents) => {
     if (!guestContents || typeof guestContents.setWindowOpenHandler !== 'function') return;
     guestContents.setWindowOpenHandler(({ url }) => {
-      openUrlInsideApp(url);
+      openUrlInsideApp(nativeCore.stripTrackingParams(url));
       return { action: 'deny' };
+    });
+    // Limpa parâmetros de rastreamento (utm_*, fbclid, gclid) via Rust antes de navegar na aba nativa
+    guestContents.on('will-navigate', (ev, navUrl) => {
+      if (!navUrl || navUrl.includes('localhost') || navUrl.includes('127.0.0.1')) return;
+      const cleaned = nativeCore.stripTrackingParams(navUrl);
+      if (cleaned && cleaned !== navUrl) {
+        ev.preventDefault();
+        guestContents.loadURL(cleaned).catch(() => {});
+      }
+    });
+    // Auto-indexa páginas visitadas nas abas nativas direto no Motor de Busca Rust v2.0 (BM25)
+    guestContents.on('did-finish-load', () => {
+      try {
+        if (guestContents.isDestroyed()) return;
+        const pageUrl = guestContents.getURL() || '';
+        if (!/^https?:\/\//i.test(pageUrl) || pageUrl.includes('localhost') || pageUrl.includes('127.0.0.1')) return;
+        const pageTitle = guestContents.getTitle() || '';
+        if (pageTitle && pageTitle.length > 2) {
+          nativeCore.indexDocument(pageUrl, pageTitle, '', '', 'native-tab');
+        }
+      } catch (e) {}
     });
   });
 
@@ -511,7 +609,7 @@ ipcMain.handle('toggle-tor', async (event, enabled) => {
 });
 
 ipcMain.handle('get-newtab-url', () => {
-  return 'file://' + path.join(__dirname, '../src/newtab.html');
+  return 'http://localhost:8080/newtab.html';
 });
 
 ipcMain.handle('get-adblock-status', () => {
@@ -692,9 +790,6 @@ function showYtPipWindow(state) {
   });
   ytPipWindow.on('closed', () => {
     ytPipWindow = null;
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      try { mainWindow.webContents.send('pip-closed'); } catch (e) {}
-    }
     if (forceQuitBrowser) return;
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.show();
@@ -728,7 +823,6 @@ ipcMain.on('restore-main-from-pip', () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.show();
     mainWindow.focus();
-    try { mainWindow.webContents.send('pip-closed'); } catch (e) {}
   } else {
     forceQuitBrowser = false;
     createWindow();
@@ -2175,7 +2269,8 @@ ipcMain.handle('delete-favorite-playlist', async (_event, name) => {
   }
 });
 
-ipcMain.handle('delete-favorite-track', async (_event, playlist, fileName) => {
+ipcMain.handle('delete-favorite-track', async (_event, playlist, fileName, title, artist) => {
+  const normTitle = String(title || '').trim().toLowerCase();
   // Se for da pasta de downloads
   if (playlist === '__download__' || playlist === 'Downloads' || String(fileName).includes('/')) {
     const downloadsDir = path.resolve(app.getPath('downloads'));
@@ -2194,15 +2289,21 @@ ipcMain.handle('delete-favorite-track', async (_event, playlist, fileName) => {
   }
 
   if (!dir || !fs.existsSync(dir)) return { success: false, error: 'Playlist não encontrada' };
-  const target = path.join(dir, path.basename(fileName));
-  if (target && fs.existsSync(target)) {
-    try { fs.unlinkSync(target); } catch (e) {}
+  if (fileName) {
+    const target = path.join(dir, path.basename(fileName));
+    if (target && fs.existsSync(target)) {
+      try { fs.unlinkSync(target); } catch (e) {}
+    }
   }
   const manifestPath = path.join(dir, 'playlist.json');
   if (fs.existsSync(manifestPath)) {
     try {
       const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-      manifest.tracks = (manifest.tracks || []).filter((t) => t.file !== fileName && path.basename(t.file) !== path.basename(fileName));
+      manifest.tracks = (manifest.tracks || []).filter((t) => {
+        if (fileName && (t.file === fileName || path.basename(t.file) === path.basename(fileName))) return false;
+        if (normTitle && t.title && t.title.trim().toLowerCase() === normTitle) return false;
+        return true;
+      });
       manifest.savedAt = Date.now();
       fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
       return { success: true, count: manifest.tracks.length };
@@ -2356,9 +2457,7 @@ const CLEARABLE_STORAGES = [
   'cookies',
   'localstorage',
   'sessionstorage',
-  'indexdb',
   'websql',
-  'serviceworkers',
   'cachestorage',
   'filesystem',
   'shadercache'
@@ -2451,9 +2550,9 @@ async function clearAllBrowsingData() {
     const partitionDir = path.join(app.getPath('userData'), 'Partitions', 'tor-browser');
     const leftovers = [
       'Cache', 'Code Cache', 'GPUCache', 'DawnGraphiteCache', 'DawnWebGPUCache',
-      'Session Storage', 'Local Storage', 'Shared Dictionary', 'Network',
-      'blob_storage', 'databases', 'IndexedDB', 'Service Worker', 'File System',
-      'SharedStorage', 'Cookies', 'Cookies-journal', 'Trust Tokens', 'Trust Tokens-journal'
+      'Session Storage', 'Shared Dictionary', 'Network',
+      'blob_storage', 'databases', 'File System',
+      'SharedStorage', 'Trust Tokens', 'Trust Tokens-journal'
     ];
     for (const name of leftovers) {
       try { fs.rmSync(path.join(partitionDir, name), { recursive: true, force: true }); } catch (e) {}

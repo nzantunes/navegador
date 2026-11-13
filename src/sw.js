@@ -1,5 +1,5 @@
 // Service Worker para Papaléguas PWA com tela de reconexão inteligente e auto-update
-const CACHE_NAME = 'papaleguas-pwa-v58';
+const CACHE_NAME = 'papaleguas-pwa-2026.11.12-v139';
 const OFFLINE_URL = '/offline.html';
 
 const OFFLINE_HTML = `<!DOCTYPE html>
@@ -116,6 +116,7 @@ const OFFLINE_HTML = `<!DOCTYPE html>
 
 const SHELL_ASSETS = [
   '/',
+  '/baixatube',
   '/index.html',
   '/newtab.html',
   '/musica.html',
@@ -127,6 +128,7 @@ const SHELL_ASSETS = [
   '/client-cast.js?v=9',
   '/cast-hub.js?v=8',
   '/auto-update.js',
+  '/i18n-ip.js',
   '/manifest.json',
   '/icon-192.png',
   '/icon-512.png',
@@ -173,6 +175,8 @@ self.addEventListener('message', (event) => {
 // Função auxiliar para injetar cabeçalho que pula tela 'Visit Site' do ngrok
 function withAntiWarningHeaders(request) {
   try {
+    // Domínios de terceiros: não altera (cabeçalho customizado quebraria CORS / no-cors)
+    if (new URL(request.url).origin !== self.location.origin) return request;
     const headers = new Headers(request.headers);
     headers.set('ngrok-skip-browser-warning', '1');
     return new Request(request, { headers });
@@ -196,8 +200,9 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Chamadas para API não passam pelo cache do Service Worker, mas recebem injeção do cabeçalho
-  if (url.includes('/api/')) {
+  // Chamadas para API e navegação via Proxy não passam pelo cache do Service Worker
+  // Evita que requisições proxy no iframe caiam no fallback offline (/index.html) e quebrem com tela branca
+  if (url.includes('/api/') || url.includes('/proxy')) {
     event.respondWith(fetch(withAntiWarningHeaders(event.request)));
     return;
   }

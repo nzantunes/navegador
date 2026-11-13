@@ -95,6 +95,7 @@
     <div class="pip-stage">
       <img class="pip-thumb" id="pip-thumb" alt="Miniatura do vídeo">
       <iframe id="pip-iframe" sandbox="allow-scripts allow-same-origin allow-presentation allow-forms" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen></iframe>
+      <video id="pip-native-video" controls playsinline webkit-playsinline style="display:none;position:absolute;inset:0;width:100%;height:100%;z-index:2;background:#000;object-fit:contain;"></video>
     </div>
   </div>
   <script>
@@ -102,21 +103,59 @@
     const videoId = params.get('v') || '';
     const start = parseInt(params.get('t') || '0', 10) || 0;
     const title = params.get('title') || 'BaixaTube';
-    const origin = (location.origin && location.origin.indexOf('http') === 0) ? location.origin : 'http://127.0.0.1:8080';
+    const origin = (location.origin && location.origin.indexOf('http') === 0) ? location.origin : 'http://localhost:8080';
     document.getElementById('pip-title').textContent = title;
     document.title = title;
     const iframe = document.getElementById('pip-iframe');
+    const nativeVideo = document.getElementById('pip-native-video');
+    let usingNative = false;
+    const pipHl = params.get('hl') || navigator.language || 'pt-BR';
+    const pipLang = (params.get('lang') || pipHl.split('-')[0] || 'pt').toLowerCase();
+    function activatePipNative() {
+      if (usingNative || !videoId || !nativeVideo) return;
+      usingNative = true;
+      iframe.style.display = 'none';
+      iframe.src = 'about:blank';
+      nativeVideo.style.display = 'block';
+      nativeVideo.src = origin + '/api/stream-video?v=' + encodeURIComponent(videoId) + '&lang=' + encodeURIComponent(pipLang);
+      if (start > 1) {
+        nativeVideo.addEventListener('loadedmetadata', function seekOnce() {
+          nativeVideo.removeEventListener('loadedmetadata', seekOnce);
+          try { nativeVideo.currentTime = start; } catch (e) {}
+        });
+      }
+      nativeVideo.play().catch(() => {});
+    }
     if (videoId) {
       document.getElementById('pip-thumb').src = 'https://i.ytimg.com/vi/' + encodeURIComponent(videoId) + '/hqdefault.jpg';
       iframe.src = 'https://www.youtube.com/embed/' + encodeURIComponent(videoId) +
-        '?autoplay=1&start=' + start + '&enablejsapi=1&playsinline=1&rel=0&origin=' +
+        '?autoplay=1&start=' + start + '&enablejsapi=1&playsinline=1&rel=0&hl=' + encodeURIComponent(pipHl) + '&cc_lang_pref=' + encodeURIComponent(pipLang) + '&origin=' +
         encodeURIComponent(origin) + '&widget_referrer=' + encodeURIComponent(origin);
     }
     function pipCommand(func) {
+      if (usingNative && nativeVideo) {
+        if (func === 'playVideo') nativeVideo.play().catch(() => {});
+        else if (func === 'pauseVideo') try { nativeVideo.pause(); } catch (e) {}
+        return;
+      }
       try {
         iframe.contentWindow.postMessage(JSON.stringify({ event: 'command', func: func, args: '' }), '*');
       } catch (e) {}
     }
+    setInterval(() => {
+      if (!usingNative && iframe && iframe.contentWindow) {
+        try { iframe.contentWindow.postMessage(JSON.stringify({ event: 'listening' }), '*'); } catch (e) {}
+      }
+    }, 1200);
+    window.addEventListener('message', (ev) => {
+      try {
+        const msg = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data;
+        const vd = msg && msg.info && msg.info.videoData;
+        if ((msg && msg.event === 'onError') || (vd && (vd.isPlayable === false || vd.errorCode))) {
+          activatePipNative();
+        }
+      } catch (e) {}
+    });
     iframe.addEventListener('load', () => {
       setTimeout(() => pipCommand('playVideo'), 400);
       setTimeout(() => pipCommand('playVideo'), 1400);

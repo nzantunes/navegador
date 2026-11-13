@@ -2,6 +2,7 @@ const { net } = require('electron');
 const querystring = require('querystring');
 const { executeCode } = require('./code-runner');
 const aiClient = require('./ai-client');
+const { searchOnionLinks } = require('./onion-search');
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "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";
 aiClient.setOpenAiFallbackKey(OPENAI_API_KEY);
@@ -150,6 +151,16 @@ async function runGptNavigator(userPromptOrMessages, torSession) {
       webResults.map((r, i) => `[FONTE ${i+1}] ${r.title}\nURL: ${r.url}\nCONTEÚDO EXTRAÍDO: ${r.snippet}`).join("\n\n");
   }
 
+  let onionResults = [];
+  try {
+    onionResults = await searchOnionLinks(userPrompt);
+  } catch (err) {}
+
+  if (onionResults && onionResults.length > 0) {
+    webContext += "\n\nSERVIÇOS E SITES .ONION (REDE TOR) RELACIONADOS AO TEMA:\n" +
+      onionResults.slice(0, 5).map((r, i) => `[TOR ONION ${i+1}] ${r.title}\nURL: ${r.url}\nCATEGORIA: ${r.category || 'Rede Tor'}\nDESCRIÇÃO: ${r.description || r.snippet || ''}`).join("\n\n");
+  }
+
   const systemInstructions = `Você é o Papaléguas AI, com Grok (xAI) como agente principal: assistente autônomo com navegação profunda e em tempo real do Papaléguas Tor Browser.
 Estamos no ano de 2026. Considere 2026 como o presente atual e contemporâneo para todas as pesquisas, notícias, lançamentos, músicas em alta e cotações.
 
@@ -173,7 +184,10 @@ DIRETRIZES FUNDAMENTAIS PARA RESPOSTAS COM DADOS DA INTERNET:
    - Se o código Python for uma aplicação web ou servidor (Flask, FastAPI, etc.), a ferramenta iniciará o servidor e retornará a porta e o link. Você DEVE fornecer ao usuário na resposta o link clicável Markdown: [🚀 Abrir Aplicação Python](/python-app?port=PORTA) ou [🔗 Acesso Direto](/python-proxy/PORTA/). NUNCA use 'localhost'.
 
 4. FORMATO DE LINKS:
-   - Toda URL ou fonte DEVE ser formatada como link Markdown clicável: [Nome da Fonte](URL).`;
+   - Toda URL ou fonte DEVE ser formatada como link Markdown clicável: [Nome da Fonte](URL).
+
+5. LINKS E SERVIÇOS .ONION (REDE TOR):
+   - Se houver serviços ou links .onion fornecidos nas fontes ou se o usuário perguntar sobre o tema, SEMPRE cite e liste os links .onion relevantes em Markdown clicável [Nome do Serviço](http://...onion) com uma breve explicação do que cada nó oferece.`;
 
   const tools = [
     {

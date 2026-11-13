@@ -1,5 +1,9 @@
 node_modules/
 papaleguas/data/
+data/logs/
+data/.guard-secret
+data/device_video_prefs.json
+papaleguas-core/target/
 *.log
 app.log
 electron.log
@@ -15,3 +19,4 @@ cloudflared.deb
 __pycache__/
 *.pyc
 *.pyo
+.agent_backups/

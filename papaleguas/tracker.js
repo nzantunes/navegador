@@ -4,6 +4,13 @@ const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
 
+let nativeCore = null;
+try {
+  nativeCore = require('../main/native-core.js');
+} catch (e) {
+  nativeCore = null;
+}
+
 const DATA_DIR = path.join(__dirname, 'data');
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -13,6 +20,171 @@ const ADMIN_FILE = path.join(DATA_DIR, 'admin.json');
 const ANALYTICS_FILE = path.join(DATA_DIR, 'analytics.json');
 const GEO_CACHE_FILE = path.join(DATA_DIR, 'geo_cache.json');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
+const CAPTURED_REQUESTS_FILE = path.join(DATA_DIR, 'captured_requests.json');
+const BLOCKED_IPS_FILE = path.join(DATA_DIR, 'blocked_ips.json');
+
+const MAX_CAPTURED_REQUESTS = 250;
+let capturedRequests = [];
+
+// Carrega requisições capturadas salvas
+if (fs.existsSync(CAPTURED_REQUESTS_FILE)) {
+  try {
+    const loaded = JSON.parse(fs.readFileSync(CAPTURED_REQUESTS_FILE, 'utf8'));
+    if (Array.isArray(loaded)) {
+      capturedRequests = loaded.slice(0, MAX_CAPTURED_REQUESTS);
+    }
+  } catch (e) {
+    capturedRequests = [];
+  }
+}
+
+let saveRequestsTimer = null;
+function queueSaveCapturedRequests() {
+  if (saveRequestsTimer) return;
+  saveRequestsTimer = setTimeout(() => {
+    saveRequestsTimer = null;
+    try {
+      const toSave = JSON.stringify(capturedRequests.slice(0, 150));
+      fs.promises.writeFile(CAPTURED_REQUESTS_FILE, toSave, 'utf8').catch(() => {});
+    } catch (e) {}
+  }, 2000);
+}
+
+// ---------------------------------------------------------------------------
+// BLOQUEADOR DE IPS (FIREWALL & ANTI-ABUSO EM TEMPO REAL)
+// ---------------------------------------------------------------------------
+const blockedIpsMap = new Map();
+let lastBlockedIpsMtime = 0;
+
+function loadBlockedIps() {
+  if (!fs.existsSync(BLOCKED_IPS_FILE)) return;
+  try {
+    const stat = fs.statSync(BLOCKED_IPS_FILE);
+    if (stat.mtimeMs <= lastBlockedIpsMtime) return;
+    lastBlockedIpsMtime = stat.mtimeMs;
+    const raw = fs.readFileSync(BLOCKED_IPS_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      blockedIpsMap.clear();
+      parsed.forEach((item) => {
+        if (item && item.ip) {
+          const ip = String(item.ip).trim().replace(/^::ffff:/, '');
+          blockedIpsMap.set(ip, {
+            ip,
+            reason: item.reason || 'Bloqueado pelo administrador',
+            blockedAt: item.blockedAt || new Date().toISOString(),
+            hitsBlocked: Number(item.hitsBlocked) || 0,
+            lastBlockedHit: item.lastBlockedHit || null
+          });
+        }
+      });
+    }
+  } catch (e) {
+    console.warn('[TRACKER BLOCKED IPS LOAD ERR]', e.message);
+  }
+}
+loadBlockedIps();
+
+let saveBlockedIpsTimer = null;
+function queueSaveBlockedIps() {
+  if (saveBlockedIpsTimer) return;
+  saveBlockedIpsTimer = setTimeout(() => {
+    saveBlockedIpsTimer = null;
+    try {
+      const arr = Array.from(blockedIpsMap.values());
+      fs.promises.writeFile(BLOCKED_IPS_FILE, JSON.stringify(arr, null, 2), 'utf8')
+        .then(() => {
+          try { lastBlockedIpsMtime = fs.statSync(BLOCKED_IPS_FILE).mtimeMs; } catch (e) {}
+        })
+        .catch((e) => console.warn('[TRACKER BLOCKED IPS SAVE ERR]', e.message));
+    } catch (e) {}
+  }, 1000);
+}
+
+function saveBlockedIpsSync() {
+  try {
+    const arr = Array.from(blockedIpsMap.values());
+    fs.writeFileSync(BLOCKED_IPS_FILE, JSON.stringify(arr, null, 2), 'utf8');
+    try { lastBlockedIpsMtime = fs.statSync(BLOCKED_IPS_FILE).mtimeMs; } catch (e) {}
+  } catch (e) {
+    console.warn('[TRACKER BLOCKED IPS SYNC ERR]', e.message);
+  }
+}
+
+function isCloudflareInfraIp(ip) {
+  if (!ip) return false;
+  const s = String(ip).toLowerCase().trim();
+  if (s.startsWith('2a06:98c0:') || s.startsWith('2606:4700:') || s.startsWith('2803:f800:')) return true;
+  if (/^172\.(6[4-9]|7[0-1])\./.test(s) || /^104\.(1[6-9]|2\d|3[0-1])\./.test(s)) return true;
+  return false;
+}
+
+function cleanIpForCheck(ip) {
+  if (!ip) return '';
+  return String(ip).trim().replace(/^::ffff:/, '');
+}
+
+function isIpBlocked(ip) {
+  const clean = cleanIpForCheck(ip);
+  if (!clean || isPrivateIp(clean) || isCloudflareInfraIp(clean)) return false;
+  try {
+    if (fs.existsSync(BLOCKED_IPS_FILE)) {
+      const st = fs.statSync(BLOCKED_IPS_FILE);
+      if (st.mtimeMs > lastBlockedIpsMtime) {
+        loadBlockedIps();
+      }
+    }
+  } catch (e) {}
+  return blockedIpsMap.has(clean);
+}
+
+function blockIp(ip, reason = 'Bloqueado pelo administrador') {
+  const clean = cleanIpForCheck(ip);
+  if (!clean) return { success: false, error: 'Endereço de IP inválido.' };
+  if (isPrivateIp(clean)) {
+    return { success: false, error: 'Não é permitido bloquear IPs locais/privados (127.0.0.1 ou rede interna).' };
+  }
+  if (isCloudflareInfraIp(clean)) {
+    return { success: false, error: 'Não é permitido bloquear IPs de infraestrutura Cloudflare.' };
+  }
+  const existing = blockedIpsMap.get(clean);
+  const record = {
+    ip: clean,
+    reason: String(reason || 'Bloqueado pelo administrador').slice(0, 250),
+    blockedAt: existing && existing.blockedAt ? existing.blockedAt : new Date().toISOString(),
+    hitsBlocked: existing ? (existing.hitsBlocked || 0) : 0,
+    lastBlockedHit: existing ? existing.lastBlockedHit : null
+  };
+  blockedIpsMap.set(clean, record);
+  saveBlockedIpsSync();
+  return { success: true, message: `IP ${clean} bloqueado com sucesso.`, record };
+}
+
+function unblockIp(ip) {
+  const clean = cleanIpForCheck(ip);
+  if (!clean) return { success: false, error: 'Endereço de IP inválido.' };
+  if (!blockedIpsMap.has(clean)) {
+    return { success: false, error: `O IP ${clean} não está na lista de bloqueio.` };
+  }
+  blockedIpsMap.delete(clean);
+  saveBlockedIpsSync();
+  return { success: true, message: `IP ${clean} desbloqueado com sucesso.`, ip: clean };
+}
+
+function getBlockedIps() {
+  return Array.from(blockedIpsMap.values()).sort((a, b) => new Date(b.blockedAt) - new Date(a.blockedAt));
+}
+
+function recordBlockedHit(ip, url = '') {
+  const clean = cleanIpForCheck(ip);
+  if (!clean) return;
+  const record = blockedIpsMap.get(clean);
+  if (record) {
+    record.hitsBlocked = (record.hitsBlocked || 0) + 1;
+    record.lastBlockedHit = new Date().toISOString();
+    queueSaveBlockedIps();
+  }
+}
 
 // Configurações do Rastreamento
 let trackerSettings = {
@@ -84,6 +256,9 @@ function clearAllAnalyticsData() {
     }
   } catch (e) {}
 
+  // Limpa requisições capturadas
+  clearCapturedRequests();
+
   // Limpa também arquivos de log adicionais do projeto caso existam
   try {
     const rootDir = path.join(__dirname, '..');
@@ -99,6 +274,24 @@ function clearAllAnalyticsData() {
   };
 }
 
+function clearCapturedRequests() {
+  capturedRequests = [];
+  try {
+    if (fs.existsSync(CAPTURED_REQUESTS_FILE)) {
+      fs.unlinkSync(CAPTURED_REQUESTS_FILE);
+    }
+  } catch (e) {}
+  return {
+    success: true,
+    count: 0,
+    message: 'Histórico de requisições capturadas limpo com sucesso.'
+  };
+}
+
+function getCapturedRequests(limit = 100) {
+  return capturedRequests.slice(0, Math.min(MAX_CAPTURED_REQUESTS, Math.max(1, limit)));
+}
+
 // Memória de sessões ativas
 const activeSessions = new Map();
 
@@ -112,6 +305,14 @@ try {
 
 function saveGeoCache() {
   // Mantido exclusivamente em memória RAM durante a execução (não grava no disco)
+  try {
+    const keys = Object.keys(geoCache);
+    if (keys.length > 2000) {
+      for (let i = 0; i < keys.length - 1500; i++) {
+        delete geoCache[keys[i]];
+      }
+    }
+  } catch (e) {}
 }
 
 // Carrega ou inicializa Analytics
@@ -163,47 +364,17 @@ function isExcludedFromTracking(pathname, fullUrl) {
 
 function sanitizeAnalyticsData() {
   if (!analyticsData) return;
-  let changed = false;
-
-  // 1. Privacidade total: remove qualquer rastreamento de páginas / URLs
-  if (analyticsData.pageStats && Object.keys(analyticsData.pageStats).length > 0) {
-    analyticsData.pageStats = {};
-    changed = true;
-  }
-
-  // 2. Limpa histórico de requisições de URLs
-  if (Array.isArray(analyticsData.visits) && analyticsData.visits.length > 0) {
-    analyticsData.visits = [];
-    changed = true;
-  }
-
-  // 3. Limpa ipStats removendo páginas, urls e recentUrls
+  // Mantém os dados estruturados e limpos sem apagar o histórico de requisições por IP
   if (analyticsData.ipStats) {
     for (const ip of Object.keys(analyticsData.ipStats)) {
       const stat = analyticsData.ipStats[ip];
       if (stat) {
-        if (stat.pages) {
-          delete stat.pages;
-          changed = true;
-        }
-        if (stat.urls) {
-          delete stat.urls;
-          changed = true;
-        }
-        if (stat.recentUrls) {
-          delete stat.recentUrls;
-          changed = true;
+        if (!stat.pages) stat.pages = {};
+        if (!Array.isArray(stat.recentRequests)) stat.recentRequests = [];
+        if (stat.recentRequests.length > 25) {
+          stat.recentRequests = stat.recentRequests.slice(0, 25);
         }
       }
-    }
-  }
-
-  if (changed) {
-    try {
-      fs.writeFileSync(ANALYTICS_FILE, JSON.stringify(analyticsData, null, 2), 'utf8');
-      console.log(`[ANALYTICS SANITIZE] Privacidade total aplicada: URLs expurgadas com sucesso.`);
-    } catch (e) {
-      console.warn('[ANALYTICS SANITIZE ERR]', e.message);
     }
   }
 }
@@ -248,7 +419,9 @@ function saveAnalyticsNow() {
     }
     const payload = JSON.stringify(analyticsData);
     isSavingAnalytics = true;
-    fs.promises.writeFile(ANALYTICS_FILE, payload, 'utf8')
+    const tmpFile = `${ANALYTICS_FILE}.tmp`;
+    fs.promises.writeFile(tmpFile, payload, 'utf8')
+      .then(() => fs.promises.rename(tmpFile, ANALYTICS_FILE))
       .catch((e) => console.warn('[ANALYTICS SAVE ERR]', e.message))
       .finally(() => {
         isSavingAnalytics = false;
@@ -446,6 +619,9 @@ function extractClientIp(req) {
 }
 
 function isPrivateIp(ip) {
+  if (nativeCore && typeof nativeCore.isPrivateIp === 'function') {
+    return nativeCore.isPrivateIp(ip);
+  }
   if (!ip) return false;
   let clean = String(ip).trim();
 
@@ -606,6 +782,23 @@ function detectDevice(userAgent, ip) {
   let brand = '';
   let os = '';
 
+  // 0. Detecção de Robôs de Busca, Crawlers e Ferramentas HTTP
+  if (ua.includes('googlebot')) {
+    return '🤖 Googlebot (Crawler)';
+  }
+  if (ua.includes('bingbot')) {
+    return '🤖 Bingbot (Crawler)';
+  }
+  if (ua.includes('duckduckbot') || ua.includes('slurp') || ua.includes('yandexbot') || ua.includes('baiduspider')) {
+    return '🤖 Robô / Rastreador Web';
+  }
+  if (ua.includes('curl/') || ua.startsWith('curl/')) {
+    return '⚡ Terminal / cURL';
+  }
+  if (ua.includes('postmanruntime')) {
+    return '🛠️ Postman / API Client';
+  }
+
   // 1. Detecção de Smart TVs
   if (ua.includes('smart-tv') || ua.includes('smarttv') || ua.includes('tizen') || ua.includes('web0s') || ua.includes('webos') || ua.includes('roku') || ua.includes('googletv') || ua.includes('androidtv')) {
     if (ua.includes('tizen')) os = '📺 Smart TV Samsung (Tizen)';
@@ -710,6 +903,141 @@ function logAccess(req, pathname, fullUrl) {
   if (!stat.ipVersion) stat.ipVersion = ipVer;
 
   queueSaveAnalytics();
+}
+
+function captureHttpRequest({ req, res, statusCode, durationMs, pathname, fullUrl, method }) {
+  if (!isTrackingEnabled()) return;
+  if (!req) return;
+
+  const m = (method || req.method || 'GET').toUpperCase();
+  const rawUrl = fullUrl || req.url || pathname || '/';
+  const urlPath = pathname || rawUrl.split('?')[0] || '/';
+  const lowerPath = urlPath.toLowerCase();
+
+  // Exclui apenas polling contínuo do próprio painel admin e arquivos estáticos internos do admin
+  if (
+    lowerPath === '/api/papaleguas/metrics' ||
+    lowerPath === '/api/papaleguas/status' ||
+    lowerPath === '/api/papaleguas/requests' ||
+    lowerPath === '/papaleguas/admin.js' ||
+    lowerPath === '/papaleguas/admin.css' ||
+    lowerPath.endsWith('.map')
+  ) {
+    return;
+  }
+
+  const clientIp = extractClientIp(req);
+  if (!clientIp) return;
+
+  const userAgent = req.headers['user-agent'] || 'Navegador Web';
+  const referer = req.headers['referer'] || req.headers['referrer'] || '';
+  const device = detectDevice(userAgent, clientIp);
+  const now = new Date();
+  const timeFormatted = now.toLocaleTimeString('pt-BR', { hour12: false });
+  const isLocal = isPrivateIp(clientIp);
+  const ipVer = getIpVersion(clientIp);
+  const finalStatus = statusCode || (res && res.statusCode) || 200;
+  const latency = Math.max(1, Math.round(durationMs || 0));
+
+  let geo = geoCache[clientIp] || null;
+  if (!geo && isLocal) {
+    geo = {
+      flag: '🏠',
+      country: 'Rede Local',
+      city: 'Wi-Fi / Localhost',
+      isp: 'Rede Privada'
+    };
+  }
+
+  const reqItem = {
+    id: `req_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    timestamp: now.toISOString(),
+    time: timeFormatted,
+    method: m,
+    path: rawUrl,
+    pathname: urlPath,
+    status: finalStatus,
+    durationMs: latency,
+    ip: clientIp,
+    ipVersion: ipVer,
+    isLocal,
+    device,
+    userAgent: userAgent.slice(0, 140),
+    referer: referer ? referer.slice(0, 100) : null,
+    geo: geo ? {
+      flag: geo.flag || '🌐',
+      country: geo.country || 'Desconhecido',
+      city: geo.city || '',
+      isp: geo.isp || ''
+    } : { flag: '🌐', country: 'Online', city: '', isp: '' }
+  };
+
+  if (!geoCache[clientIp] && !isLocal) {
+    resolveIpGeo(clientIp).then(resolvedGeo => {
+      if (resolvedGeo) {
+        reqItem.geo = {
+          flag: resolvedGeo.flag || '🌐',
+          country: resolvedGeo.country || 'Desconhecido',
+          city: resolvedGeo.city || '',
+          isp: resolvedGeo.isp || ''
+        };
+      }
+    }).catch(() => {});
+  }
+
+  capturedRequests.unshift(reqItem);
+  if (capturedRequests.length > MAX_CAPTURED_REQUESTS) {
+    capturedRequests = capturedRequests.slice(0, MAX_CAPTURED_REQUESTS);
+  }
+
+  // Registra a requisição diretamente no histórico específico deste IP
+  if (!analyticsData.ipStats[clientIp]) {
+    analyticsData.ipStats[clientIp] = {
+      ip: clientIp,
+      ipVersion: ipVer,
+      firstSeen: now.toISOString(),
+      lastSeen: now.toISOString(),
+      visitsCount: 0,
+      device,
+      userAgent: userAgent.slice(0, 100),
+      conversions: 0,
+      geo,
+      pages: {},
+      recentRequests: []
+    };
+  }
+
+  const stat = analyticsData.ipStats[clientIp];
+  stat.visitsCount = (stat.visitsCount || 0) + 1;
+  stat.lastSeen = now.toISOString();
+  stat.device = device;
+  if (!stat.ipVersion) stat.ipVersion = ipVer;
+  if (!stat.pages) stat.pages = {};
+  if (!Array.isArray(stat.recentRequests)) stat.recentRequests = [];
+
+  const cleanPath = urlPath || '/';
+  stat.pages[cleanPath] = (stat.pages[cleanPath] || 0) + 1;
+
+  stat.recentRequests.unshift({
+    time: timeFormatted,
+    method: m,
+    path: rawUrl,
+    status: finalStatus,
+    durationMs: latency
+  });
+  if (stat.recentRequests.length > 60) {
+    stat.recentRequests = stat.recentRequests.slice(0, 60);
+  }
+
+  queueSaveCapturedRequests();
+  queueSaveAnalytics();
+
+  // Atualiza métricas agregadas gerais de visita se não for chamada de infraestrutura excluída
+  if (!isExcludedFromTracking(urlPath, rawUrl)) {
+    try {
+      logAccess(req, urlPath, rawUrl);
+    } catch (e) {}
+  }
 }
 
 function logConversion(ip, type = 'download', details = {}) {
@@ -883,6 +1211,114 @@ function calculateAcceptanceAndEvolutionMetrics() {
     };
   });
 
+  function classifyClient(ip, stat) {
+    if (!stat) return { isBot: false, isHuman: true, type: 'human', label: '👤 Usuário Real' };
+
+    if (nativeCore && typeof nativeCore.classifyClient === 'function') {
+      const nativeClassification = nativeCore.classifyClient(ip, stat);
+      if (nativeClassification) {
+        return nativeClassification;
+      }
+    }
+
+    const ua = (stat.userAgent || '').toLowerCase();
+    const dev = (stat.device || '').toLowerCase();
+    const pages = Object.keys(stat.pages || {});
+    const isLocal = ip === '127.0.0.1' || ip.startsWith('192.168.') || ip.startsWith('10.') || ip.startsWith('172.16.');
+
+    // 1. Robôs, rastreadores e crawlers conhecidos explicitamente
+    if (
+      dev.includes('crawler') ||
+      dev.includes('robô') ||
+      dev.includes('terminal / curl') ||
+      dev.includes('postman') ||
+      ua.includes('googlebot') ||
+      ua.includes('bingbot') ||
+      ua.includes('claudebot') ||
+      ua.includes('yandex') ||
+      ua.includes('duckduckbot') ||
+      ua.includes('baiduspider') ||
+      ua.includes('google-display-ads') ||
+      ua.includes('applebot') ||
+      ua.includes('sitewatch') ||
+      ua.includes('curl/') ||
+      ua.includes('postman') ||
+      ua.includes('python') ||
+      ua.includes('axios') ||
+      ua.includes('go-http-client') ||
+      ua.includes('wget') ||
+      ua.includes('aiman') ||
+      ua.includes('crawler') ||
+      ua.includes('spider') ||
+      ua.includes('bot') ||
+      ua.includes('scan') ||
+      ua.startsWith('http://') ||
+      ua.startsWith('https://')
+    ) {
+      let lbl = '🤖 Robô / Crawler';
+      if (ua.includes('google') || dev.includes('google')) lbl = '🤖 Googlebot';
+      else if (ua.includes('claude')) lbl = '🤖 ClaudeBot (IA)';
+      else if (ua.includes('sitewatch')) lbl = '📡 SiteWatch (Monitor)';
+      else if (ua.includes('curl')) lbl = '⚡ Terminal / cURL';
+      return { isBot: true, isHuman: false, type: 'bot', label: lbl };
+    }
+
+    // 2. Scanners de vulnerabilidade (procurando falhas de WordPress, PHP, .env, .git)
+    const hasExploitPages = pages.some(p => 
+      p.includes('wp-') || 
+      p.includes('xmlrpc') || 
+      p.includes('.env') || 
+      p.includes('.git') || 
+      p.includes('phpmyadmin') ||
+      p.includes('actuator') ||
+      p.includes('.aws') ||
+      p.includes('config.json')
+    );
+    if (hasExploitPages) {
+      return { isBot: true, isHuman: false, type: 'bot', label: '🛡️ Scanner de Falhas' };
+    }
+
+    // 3. Usuário no Wi-Fi / Rede Local Privada
+    if (isLocal) {
+      return { isBot: false, isHuman: true, type: 'human', label: '👤 Usuário Real (Wi-Fi Local)' };
+    }
+
+    // 4. Se tem telemetria de tela, resolução ou LAN de aparelho real
+    if (stat.deviceLanIpv4 || stat.screen || (Array.isArray(stat.discoveredDevices) && stat.discoveredDevices.length > 0)) {
+      return { isBot: false, isHuman: true, type: 'human', label: '👤 Usuário Real (Dispositivo Confirmado)' };
+    }
+
+    // 5. Usuário que navegou interativamente pelo app (tocou música, abriu filmes, fez buscas, etc.)
+    const hasInteractiveActivity = pages.some(p => 
+      p.includes('musica') || 
+      p.includes('filmes') || 
+      p.includes('query-ai') || 
+      p.includes('favorite-playlists') ||
+      p.includes('prewarm-playlist') ||
+      p.includes('stream-video') ||
+      p.includes('curator') ||
+      p.includes('device-telemetry')
+    );
+
+    const isResidentialIpv6 = ip.startsWith('2804:') || ip.startsWith('2800:');
+
+    if (hasInteractiveActivity || (isResidentialIpv6 && pages.length >= 2)) {
+      return { isBot: false, isHuman: true, type: 'human', label: '👤 Usuário Real (Navegação Ativa)' };
+    }
+
+    // 6. Varredura simples de porta / ping raso
+    if (pages.length <= 2 && (pages.includes('/') || pages.includes('/robots.txt') || pages.includes('/favicon.ico') || pages.includes('/ads.txt'))) {
+      return { isBot: true, isHuman: false, type: 'bot', label: '🤖 Varredura Web (Scanner)' };
+    }
+
+    // 7. Qualquer outro que só baixa bundles JS repetidos de datacenters sem interação
+    if (pages.length >= 3 && !isResidentialIpv6) {
+      return { isBot: true, isHuman: false, type: 'bot', label: '🤖 Scraper / Bot Automático' };
+    }
+
+    return { isBot: true, isHuman: false, type: 'bot', label: '🤖 Robô Automático' };
+  }
+
   const ipList = ips.map(ip => {
     const stat = analyticsData.ipStats[ip];
     const ipVer = stat.ipVersion || getIpVersion(ip);
@@ -895,6 +1331,7 @@ function calculateAcceptanceAndEvolutionMetrics() {
 
     const lastSeenMs = stat.lastSeen ? new Date(stat.lastSeen).getTime() : 0;
     const isOnline = (Date.now() - lastSeenMs) <= (5 * 60 * 1000); // Visto nos últimos 5 minutos
+    const clientClass = classifyClient(ip, stat);
 
     return {
       ip: shownIp,
@@ -904,6 +1341,11 @@ function calculateAcceptanceAndEvolutionMetrics() {
       ipVersion: shownVersion,
       isLocal,
       isOnline,
+      isBlocked: isIpBlocked(ip) || isIpBlocked(shownIp) || (deviceIpv4 && isIpBlocked(deviceIpv4)),
+      isBot: clientClass.isBot,
+      isHuman: clientClass.isHuman,
+      clientType: clientClass.type,
+      clientCategory: clientClass.label,
       visitsCount: stat.visitsCount,
       firstSeen: stat.firstSeen,
       lastSeen: stat.lastSeen,
@@ -913,6 +1355,8 @@ function calculateAcceptanceAndEvolutionMetrics() {
       screen: stat.screen || '',
       networkType: stat.networkType || '',
       conversions: stat.conversions || 0,
+      pages: stat.pages || {},
+      recentRequests: Array.isArray(stat.recentRequests) ? stat.recentRequests.slice(0, 60) : [],
       geo: stat.geo || geoCache[ip] || {
         country: isLocal ? 'Brasil (Local)' : 'Desconhecido',
         city: isLocal ? 'Rede Local / Túnel' : 'Internet',
@@ -923,6 +1367,8 @@ function calculateAcceptanceAndEvolutionMetrics() {
   }).sort((a, b) => new Date(b.lastSeen) - new Date(a.lastSeen));
 
   const onlineIpsCount = ipList.filter(item => item.isOnline).length;
+  const humanIpsCount = ipList.filter(item => item.isHuman).length;
+  const botIpsCount = ipList.filter(item => item.isBot).length;
 
   return {
     isTrackingEnabled: isTrackingEnabled(),
@@ -930,6 +1376,8 @@ function calculateAcceptanceAndEvolutionMetrics() {
       totalVisits,
       totalUniqueIps,
       onlineIpsCount,
+      humanIpsCount,
+      botIpsCount,
       totalConversions,
       retentionRate: Math.round(retentionRate * 100) + '%',
       avgPagesPerVisitor: Math.round(avgPagesPerIp * 10) / 10
@@ -941,7 +1389,17 @@ function calculateAcceptanceAndEvolutionMetrics() {
       description: acceptanceDescription
     },
     evolutionChart,
-    ipList: ipList.slice(0, 150)
+    ipList: ipList.slice(0, 150),
+    recentRequests: getCapturedRequests(120),
+    totalCapturedRequests: capturedRequests.length,
+    blockedIps: getBlockedIps(),
+    totalBlockedIps: blockedIpsMap.size,
+    totalHitsBlocked: Array.from(blockedIpsMap.values()).reduce((sum, r) => sum + (r.hitsBlocked || 0), 0),
+    rustEngine: nativeCore ? {
+      isActive: nativeCore.isRustActive,
+      version: nativeCore.rustVersion(),
+      metrics: nativeCore.getEngineMetrics()
+    } : { isActive: false, version: 'JS-Only', metrics: null }
   };
 }
 
@@ -965,5 +1423,14 @@ module.exports = {
   setTrackingEnabled,
   clearAllAnalyticsData,
   isServerLogsPaused,
-  setServerLogsPaused
+  setServerLogsPaused,
+  captureHttpRequest,
+  getCapturedRequests,
+  clearCapturedRequests,
+  isIpBlocked,
+  blockIp,
+  unblockIp,
+  getBlockedIps,
+  recordBlockedHit,
+  nativeCore
 };

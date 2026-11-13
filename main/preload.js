@@ -21,10 +21,6 @@ contextBridge.exposeInMainWorld('torBrowserAPI', {
     ipcRenderer.removeAllListeners('query-youtube-pip');
     ipcRenderer.on('query-youtube-pip', () => { if (typeof cb === 'function') cb(); });
   },
-  onPipClosed: (cb) => {
-    ipcRenderer.removeAllListeners('pip-closed');
-    ipcRenderer.on('pip-closed', () => { if (typeof cb === 'function') cb(); });
-  },
   getCastDevices: (opts = {}) => ipcRenderer.invoke('get-cast-devices', opts),
   scanClientLan: () => ipcRenderer.invoke('scan-client-lan'),
   castToDevice: (deviceId, url, title = '') => ipcRenderer.invoke('cast-to-device', { deviceId, url, title }),
@@ -51,7 +47,7 @@ contextBridge.exposeInMainWorld('torBrowserAPI', {
   readFavoriteTrack: (playlist, fileName) => ipcRenderer.invoke('read-favorite-track', playlist, fileName),
   openFavoriteFolder: (name) => ipcRenderer.invoke('open-favorite-folder', name),
   deleteFavoritePlaylist: (name) => ipcRenderer.invoke('delete-favorite-playlist', name),
-  deleteFavoriteTrack: (playlist, fileName) => ipcRenderer.invoke('delete-favorite-track', playlist, fileName),
+  deleteFavoriteTrack: (playlist, fileName, title, artist) => ipcRenderer.invoke('delete-favorite-track', playlist, fileName, title, artist),
   renameFavoritePlaylist: (payload) => ipcRenderer.invoke('rename-favorite-playlist', payload),
   editFavoriteTrack: (payload) => ipcRenderer.invoke('edit-favorite-track', payload),
   setFavoritePlaylistCover: (payload) => ipcRenderer.invoke('set-favorite-playlist-cover', payload),

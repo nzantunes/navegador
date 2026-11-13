@@ -328,7 +328,10 @@
     const hit = await firstTrue([
       probeUrl('http://' + ip + ':8060/query/device-info', 700),
       probeUrl('http://' + ip + ':8060/', 700),
-      probeImage('http://' + ip + ':8060/query/icon/12?t=' + Date.now(), 600)
+      probeImage('http://' + ip + ':8060/query/icon/12?t=' + Date.now(), 600),
+      probeUrl('http://' + ip + ':8008/ssdp/device-desc.xml', 700),
+      probeUrl('http://' + ip + ':8008/apps/YouTube', 700),
+      probeUrl('http://' + ip + ':8001/api/v2/', 700)
     ]);
     return hit ? ip : null;
   }
@@ -392,7 +395,7 @@
         const item = {
           id: (dev && dev.id) || ('roku-' + ip),
           name: (dev && dev.name) || ('Smart TV no seu Wi-Fi (' + ip + ')'),
-          type: 'roku',
+          type: (dev && dev.type) || 'roku',
           ip
         };
         out.push(item);
@@ -420,10 +423,11 @@
     lastScanInfo.localIps = [];
     lastScanInfo.subnets = [];
 
-    // Somente em modo desktop Electron da mesma máquina utiliza varredura nativa do host
+    // Em modo local (Electron ou navegador na mesma LAN do servidor), usa a descoberta nativa/API do host
     try {
-      if (!lastScanInfo.remote && nativeScanApi()) {
-        await nativeDiscover(report);
+      if (!lastScanInfo.remote) {
+        if (nativeScanApi()) await nativeDiscover(report);
+        await apiDiscover(report);
         if (found.size > 0) return Array.from(found.values());
       }
     } catch (e) {}
@@ -456,7 +460,7 @@
     lastScanInfo.subnets = subnets.slice();
 
     const checkIp = async (ip) => {
-      if (found.size > 0) return;
+      if (found.has(ip)) return;
       const hit = await probeRoku(ip);
       if (!hit) return;
       try { localStorage.setItem('papaleguas_client_roku_ip', hit); } catch (e) {}
@@ -470,7 +474,6 @@
 
     if (isPrivateIpv4(saved) && (!currentSubs.length || currentSubs.indexOf(savedSub) !== -1)) {
       await checkIp(saved);
-      if (found.size > 0) return Array.from(found.values());
     }
 
     const preferred = currentSubs.length ? currentSubs : subnets.slice(0, 4);
@@ -487,7 +490,7 @@
         })())
         : PRIORITY_HOSTS;
       await mapPool(hosts.map((h) => sub + '.' + h), 48, checkIp);
-      if (found.size > 0) break;
+      if (found.size > 0 && isPreferred) break;
     }
 
     return Array.from(found.values());

@@ -7,6 +7,7 @@
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const { swallowed } = require('../logger');
 
 /**
  * Manipulador principal do módulo YouTube / BaixaTube.
@@ -15,6 +16,22 @@ const https = require('https');
 async function handle(req, res, ctx) {
   const { reqUrl, pathname, body = {} } = ctx;
 
+  async function resolveRequestAudioLang() {
+    const rawLang = reqUrl.searchParams.get('lang') || body.lang || '';
+    if (rawLang && /^[a-zA-Z]{2}(?:-[a-zA-Z0-9]+)?$/.test(rawLang)) {
+      return rawLang.split('-')[0].toLowerCase();
+    }
+    const rawCountry = reqUrl.searchParams.get('country') || body.country || '';
+    let country = (/^[A-Z]{2}$/i.test(rawCountry) && rawCountry.toUpperCase() !== 'AUTO') ? rawCountry.toUpperCase() : '';
+    if (!country && typeof ctx.getClientCountryCode === 'function') {
+      const clientIpParam = reqUrl.searchParams.get('deviceIp') || req.headers['x-device-ip'] || req.headers['x-client-ip'] || '';
+      const clientIp = typeof ctx.extractRequestDeviceIp === 'function' ? ctx.extractRequestDeviceIp(req, clientIpParam) : clientIpParam;
+      country = await ctx.getClientCountryCode(req, clientIp, false).catch(() => 'BR');
+    }
+    const hl = typeof ctx.getHlForCountry === 'function' ? ctx.getHlForCountry(country || 'BR') : 'pt-BR';
+    return String(hl || 'pt').split('-')[0].toLowerCase();
+  }
+
   // -----------------------------------------------------------------------
   // 1. STREAMING DE ÁUDIO DO YOUTUBE (/api/stream-audio)
   // -----------------------------------------------------------------------
@@ -22,7 +39,8 @@ async function handle(req, res, ctx) {
     const title = reqUrl.searchParams.get('title') || body.title || '';
     const artist = reqUrl.searchParams.get('artist') || body.artist || '';
     const videoId = reqUrl.searchParams.get('v') || reqUrl.searchParams.get('id') || body.id || '';
-    ctx.handleAudioStreamingProxy(req, res, { title, artist, videoId });
+    const lang = await resolveRequestAudioLang();
+    ctx.handleAudioStreamingProxy(req, res, { title, artist, videoId, lang });
     return true;
   }
 
@@ -31,7 +49,8 @@ async function handle(req, res, ctx) {
   // -----------------------------------------------------------------------
   if (pathname === '/api/stream-video') {
     const videoId = reqUrl.searchParams.get('v') || reqUrl.searchParams.get('id') || body.id || body.v || '';
-    ctx.handleAudioStreamingProxy(req, res, { videoId, preferVideo: true });
+    const lang = await resolveRequestAudioLang();
+    ctx.handleAudioStreamingProxy(req, res, { videoId, preferVideo: true, lang });
     return true;
   }
 
@@ -49,9 +68,42 @@ async function handle(req, res, ctx) {
 
   if (pathname === '/api/audio-stream-id') {
     const videoId = body.id || reqUrl.searchParams.get('id') || body.v || reqUrl.searchParams.get('v') || '';
-    const result = await ctx.getFullAudioStreamByVideoId(videoId);
+    const lang = await resolveRequestAudioLang();
+    const result = await ctx.getFullAudioStreamByVideoId(videoId, lang);
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(result));
+    return true;
+  }
+
+  if (pathname === '/api/youtube-oembed') {
+    const videoId = String(reqUrl.searchParams.get('v') || reqUrl.searchParams.get('id') || '').replace(/[^a-zA-Z0-9_-]/g, '');
+    if (!videoId) {
+      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ error: 'v ausente' }));
+      return true;
+    }
+    const agent = typeof ctx.getOutboundAgent === 'function' ? ctx.getOutboundAgent(false) : undefined;
+    const oembedUrl = 'https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=' + encodeURIComponent(videoId) + '&format=json';
+    https.get(oembedUrl, {
+      agent: agent,
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    }, (oRes) => {
+      let raw = '';
+      oRes.on('data', (c) => { raw += c; });
+      oRes.on('end', () => {
+        res.writeHead(oRes.statusCode || 200, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'public, max-age=86400',
+          'Access-Control-Allow-Origin': '*'
+        });
+        res.end(raw || '{}');
+      });
+    }).on('error', () => {
+      if (!res.headersSent) {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end('{}');
+      }
+    });
     return true;
   }
 
@@ -100,13 +152,14 @@ async function handle(req, res, ctx) {
     }
 
     try {
-      const media = await ctx.downloadMediaFile(url, format);
+      const lang = await resolveRequestAudioLang();
+      const media = await ctx.downloadMediaFile(url, format, null, '720', lang);
       try {
         const clientIp = ctx.papaleguasTracker ? ctx.papaleguasTracker.extractClientIp(req) : '';
         if (ctx.papaleguasTracker && clientIp) {
           ctx.papaleguasTracker.logConversion(clientIp, 'download', { url, format });
         }
-      } catch (eConv) {}
+      } catch (eConv) { swallowed(eConv, 'youtube:handle@162'); }
       if (isDirectDownload) {
         res.writeHead(302, { 'Location': media.url });
         res.end();
@@ -135,13 +188,14 @@ async function handle(req, res, ctx) {
       return true;
     }
 
-    const job = ctx.startMediaDownloadJob(url, format, quality);
+    const lang = await resolveRequestAudioLang();
+    const job = ctx.startMediaDownloadJob(url, format, quality, lang);
     try {
       const clientIp = ctx.papaleguasTracker ? ctx.papaleguasTracker.extractClientIp(req) : '';
       if (ctx.papaleguasTracker && clientIp) {
         ctx.papaleguasTracker.logConversion(clientIp, 'download', { url, format, quality });
       }
-    } catch (e) {}
+    } catch (e) { swallowed(e, 'youtube:handle@198'); }
     res.writeHead(200, {
       'Content-Type': 'application/json; charset=utf-8',
       'Cache-Control': 'no-cache, no-store, must-revalidate',
@@ -211,7 +265,7 @@ async function handle(req, res, ctx) {
     res.write(':\n' + ' '.repeat(4096) + '\n\n');
 
     function sendSSE(data) {
-      try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch (e) {}
+      try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch (e) { swallowed(e, 'youtube:sendSSE@268'); }
     }
 
     sendSSE({ stage: 'init', progress: 3, text: 'Iniciando motor de download do Papaléguas...' });

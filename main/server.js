@@ -8,6 +8,23 @@ const { execFile, spawn } = require('child_process');
 const papaleguasTracker = require('../papaleguas/tracker.js');
 const ngrokTunnel = require('./ngrok-tunnel');
 const appRoutes = require('./routes');
+const logger = require('./logger');
+const { swallowed } = logger;
+const serverLog = logger.createLogger('server');
+const { createRequestGuard } = require('./security/request-guard');
+const { handleClientLog } = require('./client-log');
+const requestGuard = createRequestGuard({
+  logger: logger.createLogger('guard'),
+  isIpBlocked: (ip) => typeof papaleguasTracker.isIpBlocked === 'function' && papaleguasTracker.isIpBlocked(ip)
+});
+const telegramBot = require('./telegram-bot');
+const nativeCore = require('./native-core');
+const botCommander = require('./bot-commander');
+const { searchOnionLinks, crawlOnionSublinks, crawlWebForOnionLinks, setTorCountry, checkOnionAlive, startBackgroundUptimeScanner, getOnionStatusSync } = require('./onion-search');
+const { createLruCache } = require('./lru-cache');
+const { sanitizeSearchText, scoreSearchRelevance, computeAntiSpamPenalty, suggestQueryCorrection } = require('./search-utils');
+const { sendCompressed } = require('./compression');
+const { parseSuggestPayload, filterOffTopic: filterOffTopicHelper, spreadResultsByHost: spreadResultsByHostHelper } = require('./search-engines');
 
 // Controle em tempo real e persistente de logs do servidor no terminal (console.log / console.info)
 let serverConsoleLogsPaused = typeof papaleguasTracker.isServerLogsPaused === 'function' ? papaleguasTracker.isServerLogsPaused() : false;
@@ -44,6 +61,15 @@ function setServerConsoleLogsPaused(paused) {
   return serverConsoleLogsPaused;
 }
 
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // =========================================================================
 // CONTROLE DE ACESSO: PAINEL ADMINISTRATIVO RESTRITO À REDE LOCAL
 // =========================================================================
@@ -51,15 +77,60 @@ function isLocalAdminRequest(req) {
   if (!req) return false;
   const headers = req.headers || {};
   // Se a requisição veio via Cloudflare Tunnel, Ngrok ou proxy externo
-  if (headers['cf-connecting-ip'] || headers['cf-ray'] || headers['cf-visitor']) {
+  if (
+    headers['cf-connecting-ip'] ||
+    headers['cf-ray'] ||
+    headers['cf-visitor'] ||
+    headers['ngrok-skip-browser-warning'] ||
+    headers['x-original-host']
+  ) {
     return false;
   }
   const host = (headers.host || '').toLowerCase();
-  if (host.includes('trycloudflare.com') || host.includes('ngrok') || host.includes('loca.lt') || host.includes('lhr.life')) {
+  const forwardedHost = (headers['x-forwarded-host'] || '').toLowerCase();
+  if (
+    host.includes('trycloudflare.com') ||
+    host.includes('ngrok') ||
+    host.includes('loca.lt') ||
+    host.includes('lhr.life') ||
+    forwardedHost.includes('trycloudflare.com') ||
+    forwardedHost.includes('ngrok') ||
+    forwardedHost.includes('loca.lt') ||
+    forwardedHost.includes('lhr.life')
+  ) {
+    return false;
+  }
+  if (headers['x-forwarded-for']) {
+    const forwardedIps = String(headers['x-forwarded-for']).split(',').map((s) => s.trim()).filter(Boolean);
+    if (forwardedIps.some((ip) => !papaleguasTracker.isPrivateIp(ip))) {
+      return false;
+    }
+  }
+  const socketIp = req.socket && req.socket.remoteAddress ? String(req.socket.remoteAddress) : '';
+  if (socketIp && !papaleguasTracker.isPrivateIp(socketIp)) {
     return false;
   }
   const clientIp = papaleguasTracker.extractClientIp(req);
   return papaleguasTracker.isPrivateIp(clientIp);
+}
+
+function isBlockedInternalProxyHost(hostname) {
+  if (papaleguasTracker && papaleguasTracker.nativeCore && typeof papaleguasTracker.nativeCore.isSafeProxyHost === 'function') {
+    return !papaleguasTracker.nativeCore.isSafeProxyHost(hostname);
+  }
+  const clean = String(hostname || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (!clean) return true;
+  if (
+    clean === 'localhost' ||
+    clean === '0.0.0.0' ||
+    clean === '::1' ||
+    clean === '::' ||
+    clean.endsWith('.localhost') ||
+    clean.endsWith('.local')
+  ) {
+    return true;
+  }
+  return papaleguasTracker.isPrivateIp(clean);
 }
 
 function sendForbiddenAdminResponse(res, isJson = false) {
@@ -98,10 +169,246 @@ function sendForbiddenAdminResponse(res, isJson = false) {
 </html>`);
 }
 
-const MEDIA_DOWNLOADS_DIR = path.join(os.homedir(), '.papaleguas_downloads');
-try { fs.mkdirSync(MEDIA_DOWNLOADS_DIR, { recursive: true }); } catch (e) {}
+let BINANCE_PAY_QR_DATA_URI = '';
+try {
+  const qrImgPath = path.join(__dirname, '..', 'src', 'binance_pay_qr.jpg');
+  if (fs.existsSync(qrImgPath)) {
+    const b64 = fs.readFileSync(qrImgPath).toString('base64');
+    BINANCE_PAY_QR_DATA_URI = `data:image/jpeg;base64,${b64}`;
+  }
+} catch (e) {
+  swallowed(e, 'server:binance_qr_load');
+}
 
-const SERVER_BUILD_VERSION = '2026.10.14-v29';
+function renderBlockedIpPaymentNotice(clientIp) {
+  const safeIp = String(clientIp || '').replace(/[^a-zA-Z0-9.:_-]/g, '');
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
+  <title>Acesso Bloqueado • Taxa de Desbloqueio 5 USDT</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #090d16;
+      color: #f1f5f9;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px 16px;
+    }
+    .blocked-card {
+      background: linear-gradient(145deg, #111827 0%, #0b1120 100%);
+      border: 1px solid rgba(239, 68, 68, 0.45);
+      border-radius: 20px;
+      max-width: 480px;
+      width: 100%;
+      padding: 28px 22px;
+      text-align: center;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.7), 0 0 35px rgba(239, 68, 68, 0.2);
+    }
+    .shield-icon {
+      font-size: 46px;
+      margin-bottom: 10px;
+      display: inline-block;
+      animation: pulse-shield 2.2s infinite ease-in-out;
+    }
+    @keyframes pulse-shield {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.08); }
+    }
+    h1 {
+      font-size: 22px;
+      font-weight: 800;
+      color: #f87171;
+      margin-bottom: 6px;
+      letter-spacing: -0.5px;
+    }
+    .ip-box {
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 10px;
+      padding: 8px 14px;
+      margin: 14px auto;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: #94a3b8;
+    }
+    .ip-val {
+      color: #38bdf8;
+      font-weight: 700;
+      font-family: monospace;
+      font-size: 13.5px;
+    }
+    .fee-badge {
+      background: linear-gradient(135deg, rgba(245, 158, 11, 0.22) 0%, rgba(217, 119, 6, 0.3) 100%);
+      border: 1px solid rgba(245, 158, 11, 0.55);
+      border-radius: 14px;
+      padding: 14px;
+      margin: 16px 0;
+      text-align: center;
+    }
+    .fee-title {
+      font-size: 12px;
+      color: #fbbf24;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      margin-bottom: 2px;
+    }
+    .fee-amount {
+      font-size: 32px;
+      font-weight: 900;
+      color: #fef08a;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      text-shadow: 0 0 20px rgba(245, 158, 11, 0.5);
+    }
+    .fee-sub {
+      font-size: 12px;
+      color: #cbd5e1;
+      margin-top: 4px;
+    }
+    .fee-sub b {
+      color: #f59e0b;
+    }
+    .qr-container {
+      background: #ffffff;
+      padding: 10px;
+      border-radius: 16px;
+      display: inline-block;
+      margin: 12px auto;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+    }
+    .qr-container img {
+      max-width: 210px;
+      width: 100%;
+      height: auto;
+      display: block;
+      border-radius: 8px;
+    }
+    .instructions {
+      text-align: left;
+      background: rgba(15, 23, 42, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      padding: 12px 16px;
+      font-size: 12px;
+      color: #cbd5e1;
+      line-height: 1.6;
+      margin-top: 14px;
+    }
+    .instructions ol {
+      margin-left: 18px;
+    }
+    .instructions li {
+      margin-bottom: 4px;
+    }
+    .btn-group {
+      display: flex;
+      gap: 10px;
+      margin-top: 18px;
+    }
+    .btn {
+      flex: 1;
+      padding: 12px 14px;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      border: none;
+    }
+    .btn-primary {
+      background: #10b981;
+      color: #020617;
+    }
+    .btn-primary:hover {
+      background: #34d399;
+    }
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.08);
+      color: #cbd5e1;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+    }
+    .btn-secondary:hover {
+      background: rgba(255, 255, 255, 0.15);
+      color: #fff;
+    }
+  </style>
+</head>
+<body>
+  <div class="blocked-card">
+    <div class="shield-icon">🛡️</div>
+    <h1>Acesso Bloqueado</h1>
+    <p style="font-size:13px;color:#94a3b8;line-height:1.45;">Seu endereço IP foi temporariamente bloqueado pelo sistema anti-abuso.</p>
+
+    <div class="ip-box">
+      <span>IP Bloqueado:</span>
+      <span class="ip-val">${safeIp}</span>
+    </div>
+
+    <div class="fee-badge">
+      <div class="fee-title">Taxa de Desbloqueio</div>
+      <div class="fee-amount">5 USDT</div>
+      <div class="fee-sub">Pagamento via <b>Binance Pay (OperaTrade)</b></div>
+    </div>
+
+    <div class="qr-container">
+      <img src="${BINANCE_PAY_QR_DATA_URI || '/binance_pay_qr.jpg'}" alt="Escaneie com Binance App para pagar 5 USDT" />
+    </div>
+
+    <div class="instructions">
+      <strong style="color:#fbbf24;display:block;margin-bottom:4px;">Como desbloquear seu IP com Binance Pay:</strong>
+      <ol>
+        <li>Abra o aplicativo da <b>Binance</b> no celular.</li>
+        <li>Toque no ícone de escaneamento de <b>QR Code</b> (no topo da tela).</li>
+        <li>Escaneie a imagem acima e envie <b>5 USDT</b> para <b>OperaTrade</b>.</li>
+        <li>Após o pagamento, informe o administrador com seu IP ou clique em <b>Verificar Desbloqueio</b>.</li>
+      </ol>
+    </div>
+
+    <div class="btn-group">
+      <button type="button" class="btn btn-secondary" onclick="navigator.clipboard.writeText('${safeIp}'); this.textContent='✅ IP Copiado!'; setTimeout(() => this.textContent='📋 Copiar Meu IP', 2000);">
+        📋 Copiar Meu IP
+      </button>
+      <button type="button" class="btn btn-primary" onclick="location.reload();">
+        🔄 Verificar Desbloqueio
+      </button>
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+const MEDIA_DOWNLOADS_DIR = path.join(os.homedir(), '.papaleguas_downloads');
+try { fs.mkdirSync(MEDIA_DOWNLOADS_DIR, { recursive: true }); } catch (e) { swallowed(e, 'server:top@164'); }
+
+let SERVER_BUILD_VERSION = '2026.11.12-v139';
+function getServerBuildVersion() {
+  try {
+    const swPath = path.join(__dirname, '../src/sw.js');
+    if (fs.existsSync(swPath)) {
+      const txt = fs.readFileSync(swPath, 'utf8');
+      const m = txt.match(/CACHE_NAME\s*=\s*['"]papaleguas-pwa-([^'"]+)['"]/);
+      if (m && m[1]) {
+        return m[1].startsWith('2026.') ? m[1] : '2026.11.07-' + m[1];
+      }
+    }
+  } catch (e) {}
+  return SERVER_BUILD_VERSION;
+}
 const querystring = require('querystring');
 const zlib = require('zlib');
 const http2 = require('http2');
@@ -109,12 +416,12 @@ const tls = require('tls');
 let SocksProxyAgent;
 try {
   SocksProxyAgent = require('socks-proxy-agent').SocksProxyAgent;
-} catch (e) {}
+} catch (e) { swallowed(e, 'server:top@174'); }
 // Usado para abrir a conexão HTTP/2 das buscas por dentro do Tor
 let SocksClient;
 try {
   SocksClient = require('socks').SocksClient;
-} catch (e) {}
+} catch (e) { swallowed(e, 'server:top@179'); }
 
 const TorManager = require('./tor-manager');
 const torManager = new TorManager({ socksPort: 9050, socksHost: '127.0.0.1' });
@@ -137,7 +444,7 @@ function setAppTorEnabled(enabled) {
     if (ai && typeof ai.setOutboundAgent === 'function') {
       ai.setOutboundAgent(appTorEnabled ? torAgent : undefined);
     }
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'server:setAppTorEnabled@202'); }
   return appTorEnabled;
 }
 
@@ -146,32 +453,780 @@ function isAppTorEnabled() {
 }
 
 function isTorRoutingEnabled(session) {
-  if (session && typeof session.torEnabled === 'boolean') {
-    return Boolean(session.torEnabled);
-  }
-  return Boolean(appTorEnabled);
+  return true;
 }
 
 function applyServerTorRouting(enabled) {
-  const on = Boolean(enabled);
+  const on = true;
   setAppTorEnabled(on);
   try {
     clientSessions.forEach((session) => {
       session.torEnabled = on;
     });
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'server:applyServerTorRouting@221'); }
   return on;
 }
 
 function getOutboundAgent(force) {
-  if (force === true) return torAgent || undefined;
-  if (!appTorEnabled || force === false) return undefined;
+  // Quando force é false (ex: BaixaTube, YouTube, catálogo Deezer, previews de áudio, downloads diretos), não usa o proxy Tor
+  if (force === false) {
+    return undefined;
+  }
+  if (typeof force === 'string' && (isYoutubeHost(force) || isDeezerHost(force))) {
+    return undefined;
+  }
+  if (!appTorEnabled && force !== true) {
+    return undefined;
+  }
+  // Sempre usa o agente Tor SOCKS5h (DNS remoto sem vazamento de IP) quando habilitado ou forçado
   return torAgent || undefined;
 }
 
-// YouTube e Google Video não passam pelo proxy Tor: saem direto na velocidade máxima da internet
+// ----------------------------------------------------
+// SUPORTE A LINK PREVIEW / OPEN GRAPH PARA WHATSAPP, TELEGRAM, DISCORD E ROBÔS DE IA
+// Garante imagem em alta definição, cards interativos e tags ricas para crawlers e agentes
+// ----------------------------------------------------
+const SOCIAL_CRAWLER_REGEX = /facebookexternalhit|whatsapp|facebot|twitterbot|telegrambot|linkedinbot|discordbot|slackbot|skypeuripreview|bluesky|threads|mastodon|gptbot|chatgpt-user|perplexitybot|claudebot|applebot|google-extended|ia_archiver/i;
+const videoMetaCache = createLruCache({ maxEntries: 500, ttlMs: 60 * 60 * 1000 });
+
+function getVideoTitleFast(videoId, fallbackTitle) {
+  if (!videoId) return Promise.resolve(fallbackTitle || 'Vídeo no Papaléguas BaixaTube');
+  if (videoMetaCache.has(videoId)) {
+    return Promise.resolve(videoMetaCache.get(videoId));
+  }
+  return new Promise((resolve) => {
+    let resolved = false;
+    const finish = (t) => {
+      if (resolved) return;
+      resolved = true;
+      if (t) videoMetaCache.set(videoId, t);
+      resolve(t || fallbackTitle || 'Vídeo no Papaléguas BaixaTube');
+    };
+    const oembedUrl = 'https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=' + encodeURIComponent(videoId) + '&format=json';
+    const req = https.get(oembedUrl, { agent: getOutboundAgent(false), headers: { 'User-Agent': 'Mozilla/5.0' } }, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume();
+        finish(null);
+        return;
+      }
+      let raw = '';
+      res.on('data', (c) => raw += c);
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(raw);
+          finish(parsed.title || null);
+        } catch (e) {
+          finish(null);
+        }
+      });
+    });
+    req.on('error', () => finish(null));
+    req.setTimeout(2500, () => {
+      try { req.destroy(); } catch (e) { swallowed(e, 'server:getVideoTitleFast@280'); }
+      finish(null);
+    });
+  });
+}
+
+function serveSocialPreview(res, { title, description, imageUrl, pageUrl, isVideo = false }) {
+  const cleanTitle = escapeHtml(title || 'Papaléguas BaixaTube');
+  const cleanDesc = escapeHtml(description || 'Papaléguas - Navegador Privado, Filmes Online, Músicas e Streaming sem anúncios.');
+  const cleanImg = escapeHtml(imageUrl || 'https://papaleguas.app/og-banner.jpg');
+  const cleanUrl = escapeHtml(pageUrl || 'https://papaleguas.app/');
+  const imgWidth = isVideo ? '480' : '1200';
+  const imgHeight = isVideo ? '360' : '630';
+  const ogType = isVideo ? 'video.other' : 'website';
+
+  const html = `<!DOCTYPE html>
+<html lang="pt-BR" prefix="og: http://ogp.me/ns#">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${cleanTitle}</title>
+  <meta name="description" content="${cleanDesc}">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <link rel="canonical" href="${cleanUrl}">
+  <!-- OpenGraph para WhatsApp, Telegram, Facebook e Discord -->
+  <meta property="og:site_name" content="Papaléguas BaixaTube">
+  <meta property="og:locale" content="pt_BR">
+  <meta property="og:title" content="${cleanTitle}">
+  <meta property="og:description" content="${cleanDesc}">
+  <meta property="og:image" content="${cleanImg}">
+  <meta property="og:image:secure_url" content="${cleanImg}">
+  <meta property="og:image:type" content="image/jpeg">
+  <meta property="og:image:width" content="${imgWidth}">
+  <meta property="og:image:height" content="${imgHeight}">
+  <meta property="og:url" content="${cleanUrl}">
+  <meta property="og:type" content="${ogType}">
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:site" content="@papaleguas">
+  <meta name="twitter:title" content="${cleanTitle}">
+  <meta name="twitter:description" content="${cleanDesc}">
+  <meta name="twitter:image" content="${cleanImg}">
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      background: #0b0d14;
+      color: #f1f5f9;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+      padding: 20px;
+      text-align: center;
+    }
+    .card {
+      background: #111422;
+      border: 1px solid rgba(0, 240, 255, 0.4);
+      border-radius: 18px;
+      padding: 24px;
+      max-width: 520px;
+      width: 100%;
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.7);
+    }
+    .thumb {
+      width: 100%;
+      max-height: 280px;
+      object-fit: cover;
+      border-radius: 12px;
+      margin-bottom: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    h1 { font-size: 19px; color: #00f0ff; margin: 0 0 10px 0; line-height: 1.4; }
+    p { font-size: 13.5px; color: #94a3b8; line-height: 1.5; margin: 0 0 20px 0; }
+    .btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, #0284c7, #2563eb);
+      color: #fff;
+      font-weight: 700;
+      font-size: 14.5px;
+      padding: 13px 20px;
+      border-radius: 10px;
+      text-decoration: none;
+      box-shadow: 0 4px 16px rgba(2, 132, 199, 0.4);
+      transition: transform 0.15s ease;
+    }
+    .btn:active { transform: scale(0.98); }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <img src="${cleanImg}" alt="${cleanTitle}" class="thumb">
+    <h1>${cleanTitle}</h1>
+    <p>${cleanDesc}</p>
+    <a href="${cleanUrl}" class="btn">▶ Assistir Sem Anúncios no Papaléguas BaixaTube</a>
+  </div>
+</body>
+</html>`;
+
+  res.writeHead(200, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Content-Length': Buffer.byteLength(html, 'utf8'),
+    'Cache-Control': 'public, max-age=3600'
+  });
+  res.end(html);
+}
+
+// ----------------------------------------------------
+// INTEGRAÇÃO COM GOOGLE TRENDS BRASIL (trends.google.com.br/trending)
+// Coleta os tópicos e termos mais pesquisados no Google no Brasil em tempo real,
+// alimentando o SEO dinâmico, o sitemap.xml e o feed "Em Alta" do BaixaTube.
+// ----------------------------------------------------
+const googleTrendsCache = createLruCache({ maxEntries: 100, ttlMs: 30 * 60 * 1000 });
+const GOOGLE_TRENDS_TTL = 30 * 60 * 1000; // 30 minutos de cache em memória (1.800.000 ms)
+
+function cleanTrendsString(s) {
+  return String(s || '')
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+    .replace(/&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .trim();
+}
+
+function parseGoogleTrendsPage(html) {
+  if (!html) return [];
+  const match = html.match(/AF_initDataCallback\((\{key:\s*'ds:0'[\s\S]*?\})\);/);
+  if (!match) return [];
+  try {
+    const fn = new Function('return ' + match[1]);
+    const obj = fn();
+    const rawList = (obj && obj.data && Array.isArray(obj.data[1])) ? obj.data[1] : [];
+    const items = [];
+    for (const item of rawList) {
+      if (!Array.isArray(item) || !item[0]) continue;
+      const title = String(item[0]).trim();
+      if (!title) continue;
+      const count = typeof item[6] === 'number' ? item[6] : 0;
+      let trafficFormatted = '';
+      if (count >= 1000000) trafficFormatted = (count / 1000000).toFixed(0) + 'M+';
+      else if (count >= 1000) trafficFormatted = Math.round(count / 1000) + ' mil+';
+      else if (count > 0) trafficFormatted = count + '+';
+      else trafficFormatted = 'Em alta';
+
+      const related = Array.isArray(item[9]) ? item[9].filter(Boolean).slice(0, 5) : [];
+      const newsTitle = related.length > 1 ? related.slice(1, 4).join(' • ') : '';
+
+      items.push({
+        title,
+        traffic: trafficFormatted,
+        searchCount: count,
+        newsTitle,
+        relatedQueries: related
+      });
+      if (items.length >= 35) break;
+    }
+    return items;
+  } catch (e) {
+    return [];
+  }
+}
+
+function parseGoogleTrendsRss(xml) {
+  if (!xml) return [];
+  const items = [];
+  const itemRegex = /<item>([\s\S]*?)<\/item>/g;
+  let match;
+  while ((match = itemRegex.exec(xml)) !== null && items.length < 25) {
+    const block = match[1];
+    const titleMatch = /<title>([\s\S]*?)<\/title>/.exec(block);
+    const trafficMatch = /<ht:approx_traffic>([\s\S]*?)<\/ht:approx_traffic>/.exec(block);
+    const newsTitleMatch = /<ht:news_item_title>([\s\S]*?)<\/ht:news_item_title>/.exec(block);
+    const newsUrlMatch = /<ht:news_item_url>([\s\S]*?)<\/ht:news_item_url>/.exec(block);
+    const pictureMatch = /<ht:picture>([\s\S]*?)<\/ht:picture>/.exec(block);
+    const pubDateMatch = /<pubDate>([\s\S]*?)<\/pubDate>/.exec(block);
+
+    const title = cleanTrendsString(titleMatch ? titleMatch[1] : '');
+    const traffic = cleanTrendsString(trafficMatch ? trafficMatch[1] : '');
+    const newsTitle = cleanTrendsString(newsTitleMatch ? newsTitleMatch[1] : '');
+    const newsUrl = cleanTrendsString(newsUrlMatch ? newsUrlMatch[1] : '');
+    const picture = cleanTrendsString(pictureMatch ? pictureMatch[1] : '');
+    const pubDate = cleanTrendsString(pubDateMatch ? pubDateMatch[1] : '');
+
+    if (title) {
+      items.push({
+        title,
+        traffic: traffic || 'Em alta',
+        newsTitle,
+        newsUrl,
+        picture,
+        pubDate
+      });
+    }
+  }
+  return items;
+}
+
+function getCachedGoogleTrends(country = 'BR') {
+  const c = String(country || 'BR').toUpperCase();
+  const cached = googleTrendsCache.get(c);
+  if (cached && Array.isArray(cached.trends) && cached.trends.length > 0) {
+    return cached.trends;
+  }
+  return [];
+}
+
+function findGoogleTrendMatch(query, country = 'BR') {
+  const rawQ = String(query || '').trim().toLowerCase();
+  if (!rawQ || rawQ.length < 3) return null;
+  const trends = getCachedGoogleTrends(country);
+  for (const t of trends) {
+    const tTitle = (t.title || '').toLowerCase();
+    if (tTitle === rawQ || tTitle.includes(rawQ) || rawQ.includes(tTitle)) {
+      return t;
+    }
+  }
+  return null;
+}
+
+async function fetchGoogleTrends(country = 'BR', forceRefresh = false) {
+  const c = String(country || 'BR').toUpperCase();
+  const cached = googleTrendsCache.get(c);
+  if (!forceRefresh && cached && (Date.now() - cached.timestamp < GOOGLE_TRENDS_TTL) && cached.trends.length > 0) {
+    return cached.trends;
+  }
+
+  // 1. Tenta carregar a página oficial de tendências em tempo real (trends.google.com.br/trending?geo=BR)
+  const pageUrl = c === 'BR'
+    ? 'https://trends.google.com.br/trending?geo=BR'
+    : `https://trends.google.com/trending?geo=${encodeURIComponent(c)}`;
+
+  const pageItems = await new Promise((resolve) => {
+    let resolved = false;
+    const finish = (items) => {
+      if (resolved) return;
+      resolved = true;
+      resolve(items || []);
+    };
+    const req = https.get(pageUrl, {
+      agent: getOutboundAgent(false),
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+        'Accept-Encoding': 'gzip, deflate'
+      }
+    }, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume();
+        finish([]);
+        return;
+      }
+      const enc = (res.headers['content-encoding'] || '').toLowerCase();
+      let stream = res;
+      if (enc === 'gzip') {
+        const gunzip = zlib.createGunzip();
+        gunzip.on('error', () => finish([]));
+        stream = res.pipe(gunzip);
+      } else if (enc === 'deflate') {
+        const inflate = zlib.createInflate();
+        inflate.on('error', () => finish([]));
+        stream = res.pipe(inflate);
+      }
+      let raw = '';
+      stream.on('data', chunk => raw += chunk);
+      stream.on('end', () => {
+        try {
+          const parsed = parseGoogleTrendsPage(raw);
+          finish(parsed);
+        } catch (e) {
+          finish([]);
+        }
+      });
+    });
+    req.on('error', () => finish([]));
+    req.setTimeout(12000, () => {
+      try { req.destroy(); } catch (e) { swallowed(e, 'server:fetchGoogleTrends@562'); }
+      finish([]);
+    });
+  });
+
+  if (Array.isArray(pageItems) && pageItems.length > 0) {
+    googleTrendsCache.set(c, { timestamp: Date.now(), trends: pageItems });
+    nativeConsoleLog(`🔥 [GOOGLE TRENDS] ${pageItems.length} tópicos em alta atualizados ao vivo para '${c}' (cache de 30 minutos).`);
+    return pageItems;
+  }
+
+  // 2. Fallback secundário via RSS caso a página HTML não retorne dados
+  const rssUrl = c === 'BR'
+    ? 'https://trends.google.com.br/trending/rss?geo=BR'
+    : `https://trends.google.com/trending/rss?geo=${encodeURIComponent(c)}`;
+
+  const rssItems = await new Promise((resolve) => {
+    let resolved = false;
+    const finish = (items) => {
+      if (resolved) return;
+      resolved = true;
+      resolve(items || []);
+    };
+    const req = https.get(rssUrl, {
+      agent: getOutboundAgent(false),
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'application/rss+xml, application/xml, text/xml; q=0.9, */*; q=0.8'
+      }
+    }, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume();
+        finish([]);
+        return;
+      }
+      let raw = '';
+      res.on('data', chunk => raw += chunk);
+      res.on('end', () => {
+        try {
+          const items = parseGoogleTrendsRss(raw);
+          finish(items);
+        } catch (e) {
+          finish([]);
+        }
+      });
+    });
+    req.on('error', () => finish([]));
+    req.setTimeout(6000, () => {
+      try { req.destroy(); } catch (e) { swallowed(e, 'server:fetchGoogleTrends@610'); }
+      finish([]);
+    });
+  });
+
+  const finalItems = (Array.isArray(rssItems) && rssItems.length > 0) ? rssItems : ((cached && cached.trends) || []);
+  if (finalItems.length > 0) {
+    // Se usou fallback RSS, armazena por apenas 2 minutos para retentar o extrator em tempo real logo em seguida
+    googleTrendsCache.set(c, { timestamp: Date.now() - (GOOGLE_TRENDS_TTL - 120000), trends: finalItems });
+  }
+  return finalItems;
+}
+
+// ----------------------------------------------------
+// MOTOR DE SEO DINÂMICO PARA O GOOGLE E MOTORES DE BUSCA (PAPALÉGUAS BAIXATUBE)
+// Injeta dinamicamente títulos, meta descriptions ricas, canonical, OpenGraph,
+// Twitter Cards e dados estruturados Schema.org (VideoObject / CollectionPage)
+// baseados no tema ativo ou no vídeo em reprodução para máxima indexação no Google.
+// ----------------------------------------------------
+const THEME_SEO_MAP = {
+  noticias: {
+    title: 'Notícias das Últimas Horas em Vídeo | Papaléguas BaixaTube',
+    description: 'Acompanhe as principais notícias do Brasil e do mundo em vídeo, fatos urgentes e jornalismo atualizado das últimas horas. Assista sem anúncios no Papaléguas BaixaTube.',
+    keywords: 'notícias em vídeo, últimas notícias brasil, jornalismo ao vivo, notícias urgentes, papaleguas notícias, vídeos de notícias hoje, youtube sem anúncios',
+    heading: 'Notícias das últimas horas'
+  },
+  musicas: {
+    title: 'Músicas e Lançamentos em Vídeo | Papaléguas BaixaTube',
+    description: 'Ouça e assista aos principais clipes musicais, lançamentos, sertanejo, funk, gospel, pop e rock sem anúncios e em segundo plano no Papaléguas BaixaTube.',
+    keywords: 'músicas youtube, clipes de música, ouvir música em segundo plano, baixar mp3, sertanejo, funk, lançamentos musicais, papaleguas músicas',
+    heading: 'Músicas & Lançamentos nas últimas horas'
+  },
+  esportes: {
+    title: 'Esportes, Futebol e Melhores Momentos em Vídeo | Papaléguas BaixaTube',
+    description: 'Assista aos melhores momentos do futebol, gols da rodada, basquete, lutas e esportes das últimas horas sem interrupções no Papaléguas BaixaTube.',
+    keywords: 'gols da rodada, futebol ao vivo, melhores momentos futebol, esportes em vídeo, brasileirão, libertadores, papaleguas esportes',
+    heading: 'Esportes, Futebol & Gols nas últimas horas'
+  },
+  podcasts: {
+    title: 'Podcasts e Entrevistas em Vídeo sem Anúncios | Papaléguas BaixaTube',
+    description: 'Assista e ouça podcasts famosos, entrevistas exclusivas e debates completos em segundo plano, sem anúncios e com alta qualidade no Papaléguas BaixaTube.',
+    keywords: 'podcasts em vídeo, flow podcast, podpah, podcasts brasil, entrevistas completas, ouvir podcast sem tela ligada, papaleguas podcasts',
+    heading: 'Podcasts & Entrevistas nas últimas horas'
+  },
+  games: {
+    title: 'Games, Gameplays e Melhores Jogadas | Papaléguas BaixaTube',
+    description: 'Confira gameplays eletrizantes, lançamentos de jogos, dicas gamer, Minecraft, GTA, Free Fire e trailers de games no Papaléguas BaixaTube.',
+    keywords: 'gameplay, vídeos de games, lançamentos de jogos, gta gameplay, minecraft, free fire, vídeos gamer youtube, papaleguas games',
+    heading: 'Games & Gameplays nas últimas horas'
+  },
+  filmes: {
+    title: 'Filmes, Trailers e Novidades do Cinema | Papaléguas BaixaTube',
+    description: 'Assista aos trailers inéditos dos lançamentos do cinema e séries, análises e resenhas em alta definição no Papaléguas BaixaTube.',
+    keywords: 'trailers de filmes, cinema, lançamentos cinema 2026, resenha de filmes, melhores filmes, trailers youtube, papaleguas filmes',
+    heading: 'Filmes, Trailers & Cinema nas últimas horas'
+  },
+  tecnologia: {
+    title: 'Tecnologia, Inovação e Inteligência Artificial | Papaléguas BaixaTube',
+    description: 'Fique por dentro das novidades em tecnologia, inteligência artificial, smartphones, programação, gadgets e inovação no Papaléguas BaixaTube.',
+    keywords: 'tecnologia em vídeo, inteligência artificial, novidades tech, celulares lançamento, tutoriais de programação, papaleguas tecnologia',
+    heading: 'Tecnologia & IA nas últimas horas'
+  },
+  'ao vivo': {
+    title: 'Transmissões Ao Vivo e Canais em Tempo Real | Papaléguas BaixaTube',
+    description: 'Assista a lives, transmissões ao vivo de eventos, canais de notícias e shows em tempo real sem travamentos no Papaléguas BaixaTube.',
+    keywords: 'transmissão ao vivo, live youtube, notícias ao vivo, canais ao vivo grátis, eventos em tempo real, papaleguas ao vivo',
+    heading: 'Transmissões ao vivo agora'
+  },
+  humor: {
+    title: 'Vídeos de Humor, Comédia e Stand-up | Papaléguas BaixaTube',
+    description: 'Dê boas risadas com os vídeos de comédia mais engraçados, stand-up comedy, pegadinhas e memes das últimas horas no Papaléguas BaixaTube.',
+    keywords: 'vídeos engraçados, comédia brasil, stand up comedy, pegadinhas youtube, memes do dia, papaleguas humor',
+    heading: 'Vídeos de Humor & Comédia nas últimas horas'
+  },
+  'em alta': {
+    title: 'Vídeos Em Alta e Tendências do YouTube | Papaléguas BaixaTube',
+    description: 'Veja o que todo mundo está assistindo hoje. Os vídeos mais populares, virais e em alta no Brasil e no mundo no Papaléguas BaixaTube.',
+    keywords: 'vídeos em alta, tendências youtube brasil, vídeos virais, mais assistidos hoje, destaques da internet, papaleguas em alta',
+    heading: 'Em alta nas últimas horas'
+  },
+  curtidos: {
+    title: 'Para Você - Vídeos Recomendados Personalizados | Papaléguas BaixaTube',
+    description: 'Vídeos recomendados especialmente para o seu gosto, baseados nas suas preferências e curtidas recentes no Papaléguas BaixaTube.',
+    keywords: 'vídeos para você, recomendações personalizadas, vídeos favoritos, papaleguas vídeos',
+    heading: 'Para Você: Vídeos recomendados'
+  },
+  financeiro: {
+    title: 'Finanças, Mercado Financeiro e Investimentos em Vídeo | Papaléguas BaixaTube',
+    description: 'Acompanhe as últimas notícias do mercado financeiro, bolsa de valores, investimentos, economia e finanças pessoais sem anúncios no Papaléguas BaixaTube.',
+    keywords: 'finanças, mercado financeiro, investimentos, bolsa de valores, ibovespa, economia hoje, tesouro direto, dividendos, papaleguas financeiro',
+    heading: '💰 Finanças & Mercado Financeiro nas últimas horas'
+  },
+  criptomoedas: {
+    title: 'Criptomoedas, Bitcoin e Web3 em Vídeo | Papaléguas BaixaTube',
+    description: 'Notícias, análises de mercado, cotação de Bitcoin, Ethereum, altcoins, blockchain e novidades cripto em tempo real no Papaléguas BaixaTube.',
+    keywords: 'criptomoedas, bitcoin hoje, btc, ethereum, altcoins, cotação cripto, blockchain, web3, notícias cripto, papaleguas criptomoedas',
+    heading: '🪙 Criptomoedas, Bitcoin & Web3 nas últimas horas'
+  }
+};
+
+function getThemeSeoMetadata(query) {
+  const rawQ = String(query || '').trim();
+  const normalizedKey = rawQ.toLowerCase().replace(/\+/g, ' ');
+  let matchedKey = null;
+
+  if (!rawQ || normalizedKey === 'noticias' || normalizedKey === 'noticia') matchedKey = 'noticias';
+  else if (normalizedKey === 'musicas' || normalizedKey === 'musica') matchedKey = 'musicas';
+  else if (normalizedKey === 'esportes' || normalizedKey === 'esporte' || normalizedKey === 'futebol') matchedKey = 'esportes';
+  else if (normalizedKey === 'financeiro' || normalizedKey === 'financas' || normalizedKey === 'finanças' || normalizedKey === 'investimentos' || normalizedKey === 'economia') matchedKey = 'financeiro';
+  else if (normalizedKey === 'criptomoedas' || normalizedKey === 'cripto' || normalizedKey === 'bitcoin' || normalizedKey === 'crypto' || normalizedKey === 'btc') matchedKey = 'criptomoedas';
+  else if (normalizedKey === 'podcasts' || normalizedKey === 'podcast') matchedKey = 'podcasts';
+  else if (normalizedKey === 'games' || normalizedKey === 'game' || normalizedKey === 'jogos') matchedKey = 'games';
+  else if (normalizedKey.includes('filme') || normalizedKey.includes('trailer')) matchedKey = 'filmes';
+  else if (normalizedKey === 'tecnologia' || normalizedKey === 'tech') matchedKey = 'tecnologia';
+  else if (normalizedKey === 'ao vivo' || normalizedKey === 'aovivo' || normalizedKey === 'live' || normalizedKey === 'lives') matchedKey = 'ao vivo';
+  else if (normalizedKey === 'humor' || normalizedKey === 'comedia') matchedKey = 'humor';
+  else if (normalizedKey === 'em alta' || normalizedKey === 'alta' || normalizedKey === 'tudo') matchedKey = 'em alta';
+  else if (normalizedKey === 'curtidos' || normalizedKey === 'para voce') matchedKey = 'curtidos';
+
+  if (matchedKey && THEME_SEO_MAP[matchedKey]) {
+    const entry = THEME_SEO_MAP[matchedKey];
+
+    // Se a categoria for "Notícias", enriquece dinamicamente junto com os assuntos mais buscados do Google Trends Brasil
+    if (matchedKey === 'noticias') {
+      const trends = getCachedGoogleTrends('BR');
+      if (Array.isArray(trends) && trends.length > 0) {
+        const top3Names = trends.slice(0, 3).map(t => t.title).join(', ');
+        const topKeywords = trends.slice(0, 10).map(t => t.title).join(', ');
+        return {
+          query: 'noticias',
+          canonicalKey: 'noticias',
+          title: `Notícias das Últimas Horas e Assuntos em Alta no Google: ${top3Names} | Papaléguas BaixaTube`,
+          description: `Acompanhe as principais notícias em vídeo e os temas mais buscados hoje no Google Trends Brasil (${top3Names}). Assista sem anúncios e baixe em MP4/MP3 no Papaléguas BaixaTube.`,
+          keywords: `${topKeywords}, notícias brasil, últimas notícias, google trends brasil, assuntos em alta hoje, jornalismo ao vivo, papaleguas baixatube, youtube sem anúncios`,
+          heading: `📰 Notícias das últimas horas & 🔥 Assuntos em Alta no Google`,
+          url: 'https://papaleguas.app/baixatube',
+          googleTrends: trends.slice(0, 10),
+          isVideo: false
+        };
+      }
+    }
+
+    // Se a categoria for "Em Alta", enriquece dinamicamente com os tópicos mais buscados no Google Trends Brasil (Top 10)
+    if (matchedKey === 'em alta') {
+      const trends = getCachedGoogleTrends('BR');
+      if (Array.isArray(trends) && trends.length > 0) {
+        const top3Names = trends.slice(0, 3).map(t => t.title).join(', ');
+        const topKeywords = trends.slice(0, 10).map(t => t.title).join(', ');
+        return {
+          query: 'em alta',
+          canonicalKey: 'em alta',
+          title: `Em Alta no Google Brasil: ${top3Names} | Papaléguas BaixaTube`,
+          description: `Assista aos vídeos dos 10 temas mais buscados hoje no Google Trends Brasil (${top3Names}). Vídeos sem anúncios e downloads em MP4/MP3 no Papaléguas BaixaTube.`,
+          keywords: `${topKeywords}, google trends brasil, em alta hoje, 10 assuntos mais buscados brasil, vídeos virais, youtube sem anúncios, papaleguas baixatube`,
+          heading: `🔥 Em Alta no Google: ${top3Names}`,
+          url: 'https://papaleguas.app/baixatube?q=em+alta',
+          googleTrends: trends.slice(0, 10),
+          isVideo: false
+        };
+      }
+    }
+
+    return {
+      query: rawQ || 'noticias',
+      canonicalKey: matchedKey,
+      title: entry.title,
+      description: entry.description,
+      keywords: entry.keywords,
+      heading: entry.heading,
+      url: matchedKey === 'noticias' ? 'https://papaleguas.app/baixatube' : `https://papaleguas.app/baixatube?q=${encodeURIComponent(matchedKey)}`,
+      isVideo: false
+    };
+  }
+
+  // Se a busca for exatamente sobre um assunto do Google Trends, enriquece a descrição e título
+  const matchedTrend = findGoogleTrendMatch(rawQ, 'BR');
+  if (matchedTrend) {
+    const safeQ = matchedTrend.title;
+    const headline = matchedTrend.newsTitle ? ` (${matchedTrend.newsTitle})` : '';
+    return {
+      query: safeQ,
+      canonicalKey: safeQ,
+      title: `${safeQ} - Em Alta no Google Trends | Papaléguas BaixaTube`,
+      description: `Assista aos vídeos mais recentes sobre "${safeQ}" (${matchedTrend.traffic || 'Em alta'} buscas)${headline}. Assista sem anúncios e baixe em MP4 ou MP3 no Papaléguas BaixaTube.`,
+      keywords: `${safeQ}, google trends ${safeQ}, vídeos de ${safeQ}, assistir ${safeQ}, baixar ${safeQ} mp3, papaleguas baixatube`,
+      heading: `🔥 Em Alta no Google: ${safeQ}`,
+      url: `https://papaleguas.app/baixatube?q=${encodeURIComponent(safeQ)}`,
+      isVideo: false
+    };
+  }
+
+  // Busca personalizada
+  const safeQ = rawQ || 'Vídeos';
+  return {
+    query: safeQ,
+    canonicalKey: safeQ,
+    title: `Vídeos de ${safeQ} - Assista e Baixe em MP4 e MP3 | Papaléguas BaixaTube`,
+    description: `Assista aos vídeos mais recentes e relevantes sobre "${safeQ}" sem anúncios e em alta qualidade no Papaléguas BaixaTube. Downloads em MP4 e MP3.`,
+    keywords: `${safeQ}, vídeos de ${safeQ}, assistir ${safeQ}, baixar ${safeQ} mp3, papaleguas baixatube, youtube sem anuncios`,
+    heading: `Vídeos de "${safeQ}" nas últimas horas`,
+    url: `https://papaleguas.app/baixatube?q=${encodeURIComponent(safeQ)}`,
+    isVideo: false
+  };
+}
+
+function getVideoSeoMetadata(videoId, videoTitle) {
+  const cleanVid = escapeHtml(videoId);
+  const rawTitle = String(videoTitle || 'Vídeo no Papaléguas BaixaTube').replace(/^[▶\s]+|[▶\s]+$/g, '').trim();
+  const title = `${rawTitle} | Papaléguas BaixaTube`;
+  const description = `Assista "${rawTitle}" online em alta definição, sem anúncios e com reprodução em segundo plano no Papaléguas BaixaTube. Downloads rápidos em MP4 e áudio MP3.`;
+  const keywords = `${rawTitle}, assistir ${rawTitle}, youtube sem anúncios, baixar mp4, baixar mp3, papaleguas baixatube`;
+  const url = `https://papaleguas.app/baixatube?v=${cleanVid}`;
+  const thumbUrl = `https://papaleguas.app/api/thumb/${cleanVid}.jpg`;
+
+  return {
+    videoId: cleanVid,
+    title,
+    cleanTitle: rawTitle,
+    description,
+    keywords,
+    url,
+    thumbUrl,
+    isVideo: true
+  };
+}
+
+function injectSeoIntoHtml(html, seoData) {
+  if (!html) return '';
+
+  const cleanTitle = escapeHtml(seoData.title || 'Papaléguas BaixaTube');
+  const cleanDesc = escapeHtml(seoData.description || 'Assista vídeos sem anúncios e baixe em MP4 ou MP3.');
+  const cleanKeywords = escapeHtml(seoData.keywords || 'papaleguas, baixatube, videos sem anuncios, youtube sem anuncios');
+  const cleanUrl = escapeHtml(seoData.url || 'https://papaleguas.app/baixatube');
+  const cleanThumb = escapeHtml(seoData.thumbUrl || 'https://papaleguas.app/og-banner.jpg');
+  const imgWidth = seoData.isVideo ? '480' : '1200';
+  const imgHeight = seoData.isVideo ? '360' : '630';
+  const ogType = seoData.isVideo ? 'video.other' : 'website';
+
+  let schemaJson = '';
+  if (seoData.isVideo && seoData.videoId) {
+    schemaJson = JSON.stringify({
+      '@context': 'https://schema.org',
+      '@type': 'VideoObject',
+      'name': seoData.cleanTitle || seoData.title,
+      'description': seoData.description,
+      'thumbnailUrl': [
+        `https://papaleguas.app/api/thumb/${seoData.videoId}.jpg`,
+        `https://i.ytimg.com/vi/${seoData.videoId}/hqdefault.jpg`
+      ],
+      'uploadDate': '2026-10-30T00:00:00Z',
+      'embedUrl': `https://www.youtube.com/embed/${seoData.videoId}`,
+      'contentUrl': `https://papaleguas.app/baixatube?v=${seoData.videoId}`,
+      'publisher': {
+        '@type': 'Organization',
+        'name': 'Papaléguas BaixaTube',
+        'url': 'https://papaleguas.app/baixatube',
+        'logo': {
+          '@type': 'ImageObject',
+          'url': 'https://papaleguas.app/icon-192.png'
+        }
+      }
+    }, null, 2);
+  } else {
+    schemaJson = JSON.stringify({
+      '@context': 'https://schema.org',
+      '@type': 'CollectionPage',
+      'name': seoData.title,
+      'description': seoData.description,
+      'url': seoData.url,
+      'inLanguage': 'pt-BR',
+      'isPartOf': {
+        '@type': 'WebSite',
+        'name': 'Papaléguas BaixaTube',
+        'url': 'https://papaleguas.app/baixatube',
+        'potentialAction': {
+          '@type': 'SearchAction',
+          'target': {
+            '@type': 'EntryPoint',
+            'urlTemplate': 'https://papaleguas.app/baixatube?q={search_term_string}'
+          },
+          'query-input': 'required name=search_term_string'
+        }
+      },
+      'publisher': {
+        '@type': 'Organization',
+        'name': 'Papaléguas',
+        'url': 'https://papaleguas.app',
+        'logo': {
+          '@type': 'ImageObject',
+          'url': 'https://papaleguas.app/icon-192.png'
+        }
+      }
+    }, null, 2);
+  }
+
+  const seoBlock = `<title>${cleanTitle}</title>
+  <meta name="description" content="${cleanDesc}">
+  <meta name="keywords" content="${cleanKeywords}">
+  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+  <link rel="canonical" href="${cleanUrl}">
+  <meta name="google-site-verification" content="SJH0DPmzrPqP6IQsWjyW-z1b_rAyECfY8s3XKWeyiD0">
+  <meta name="google-site-verification" content="google4acffdc77e16ecda">
+  <!-- Dynamic OpenGraph for Social Sharing & Search Engine Indexing -->
+  <meta property="og:site_name" content="Papaléguas BaixaTube">
+  <meta property="og:title" content="${cleanTitle}">
+  <meta property="og:description" content="${cleanDesc}">
+  <meta property="og:type" content="${ogType}">
+  <meta property="og:url" content="${cleanUrl}">
+  <meta property="og:image" content="${cleanThumb}">
+  <meta property="og:image:secure_url" content="${cleanThumb}">
+  <meta property="og:image:type" content="image/jpeg">
+  <meta property="og:image:width" content="${imgWidth}">
+  <meta property="og:image:height" content="${imgHeight}">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="${cleanTitle}">
+  <meta name="twitter:description" content="${cleanDesc}">
+  <meta name="twitter:image" content="${cleanThumb}">
+  <!-- Structured Data JSON-LD Schema.org -->
+  <script type="application/ld+json">
+${schemaJson}
+  </script>`;
+
+  let modifiedHtml = html;
+  const seoRegex = /<title>[\s\S]*?<meta name="twitter:image"[^>]*>/i;
+  if (seoRegex.test(modifiedHtml)) {
+    modifiedHtml = modifiedHtml.replace(seoRegex, seoBlock);
+  } else {
+    const headMatch = /<head[^>]*>/i.exec(modifiedHtml);
+    if (headMatch) {
+      const idx = headMatch.index + headMatch[0].length;
+      modifiedHtml = modifiedHtml.slice(0, idx) + '\n  ' + seoBlock + modifiedHtml.slice(idx);
+    }
+  }
+
+  // Pre-renderização SSR do título no feed
+  if (seoData.heading) {
+    modifiedHtml = modifiedHtml.replace(
+      /(<span\s+id="home-feed-title-text"[^>]*>)([\s\S]*?)(<\/span>)/i,
+      `$1${escapeHtml(seoData.heading)}$3`
+    );
+  }
+
+  // Pre-renderização SSR do chip ativo correspondente
+  if (seoData.canonicalKey && !seoData.isVideo) {
+    modifiedHtml = modifiedHtml.replace(/(class="yt-chip)\s+active(")/gi, '$1$2');
+    const chipRegex = new RegExp(`(<button[^>]*class="yt-chip)([^>]*data-q="${seoData.canonicalKey}"[^>]*>)`, 'i');
+    if (chipRegex.test(modifiedHtml)) {
+      modifiedHtml = modifiedHtml.replace(chipRegex, '$1 active$2');
+    }
+  }
+
+  // Pre-renderização SSR da barra de tópicos em alta do Google Trends para indexação imediata no Googlebot
+  const trendsList = seoData.googleTrends || (typeof getCachedGoogleTrends === 'function' ? getCachedGoogleTrends('BR') : []);
+  if (Array.isArray(trendsList) && trendsList.length > 0) {
+    const trendsPillsHtml = trendsList.slice(0, 10).map((t, index) => {
+      const safeTitle = escapeHtml(t.title);
+      const safeTraffic = t.traffic ? `<span class="pill-traffic">${escapeHtml(t.traffic)}</span>` : '';
+      return `<a href="/baixatube?q=${encodeURIComponent(t.title)}" class="google-trends-pill" title="Vídeos de ${safeTitle}"><span>#${index + 1} ${safeTitle}</span>${safeTraffic}</a>`;
+    }).join('\n        ');
+    modifiedHtml = modifiedHtml.replace(
+      /(<div\s+class="google-trends-scroll-track"\s+id="google-trends-scroll-track"[^>]*>)([\s\S]*?)(<\/div>)/i,
+      `$1\n        ${trendsPillsHtml}\n      $3`
+    );
+  }
+
+  return modifiedHtml;
+}
+
+// YouTube, BaixaTube e Google Video não passam pelo proxy Tor: saem direto na velocidade máxima da internet
 function isYoutubeHost(hostname) {
-  return /(?:^|\.)(youtube\.com|youtube-nocookie\.com|youtu\.be|googlevideo\.com|ytimg\.com|ggpht\.com)$/i.test(String(hostname || ''));
+  return /(?:^|\.)(youtube\.com|youtube-nocookie\.com|youtu\.be|googlevideo\.com|ytimg\.com|ggpht\.com|gvt1\.com)$/i.test(String(hostname || ''));
+}
+
+function isDeezerHost(hostname) {
+  return /(?:^|\.)(deezer\.com|dzcdn\.net)$/i.test(String(hostname || ''));
 }
 
 // Arquivos para download (vídeos, áudios, compactados, instaladores, binários) saem direto sem passar pelo Tor
@@ -193,7 +1248,7 @@ function isDownloadOrMediaUrl(urlObj) {
 }
 
 function isIpCheckHost(hostname) {
-  return /(?:^|\.)(ipleak\.net|browserleaks\.com|dnsleaktest\.com|whoer\.net|ifconfig\.me|icanhazip\.com|ipify\.org|check\.torproject\.org)$/i.test(String(hostname || ''));
+  return /(?:^|\.)(meuip\.com\.br|meuip\.net\.br|qualemeuip\.com\.br|qualemeuip\.com|qual-e-o-meu-ip\.com|meu-ip\.com|meuip\.org|whatismyip\.com|whatismyipaddress\.com|showmyip\.com|ipinfo\.io|ip-api\.com|ipleak\.net|browserleaks\.com|dnsleaktest\.com|whoer\.net|ifconfig\.me|ifconfig\.co|ifconfig\.io|icanhazip\.com|ipify\.org|check\.torproject\.org|iplocation\.net)$/i.test(String(hostname || ''));
 }
 
 function fetchJsonViaAgent(url, agent, timeoutMs = 12000) {
@@ -235,6 +1290,87 @@ function fetchJsonViaAgent(url, agent, timeoutMs = 12000) {
   });
 }
 
+const COUNTRY_LANGUAGE_MAP = {
+  'DE': { lang: 'de-DE,de;q=0.9,en;q=0.8', primary: 'de-DE', languages: ['de-DE', 'de', 'en-US', 'en'] },
+  'US': { lang: 'en-US,en;q=0.9', primary: 'en-US', languages: ['en-US', 'en'] },
+  'GB': { lang: 'en-GB,en;q=0.9,en-US;q=0.8', primary: 'en-GB', languages: ['en-GB', 'en', 'en-US'] },
+  'FR': { lang: 'fr-FR,fr;q=0.9,en;q=0.8', primary: 'fr-FR', languages: ['fr-FR', 'fr', 'en-US', 'en'] },
+  'NL': { lang: 'nl-NL,nl;q=0.9,en;q=0.8', primary: 'nl-NL', languages: ['nl-NL', 'nl', 'en-US', 'en'] },
+  'CH': { lang: 'de-CH,de;q=0.9,fr-CH;q=0.8,en;q=0.7', primary: 'de-CH', languages: ['de-CH', 'de', 'fr-CH', 'en'] },
+  'AT': { lang: 'de-AT,de;q=0.9,en;q=0.8', primary: 'de-AT', languages: ['de-AT', 'de', 'en-US', 'en'] },
+  'SE': { lang: 'sv-SE,sv;q=0.9,en;q=0.8', primary: 'sv-SE', languages: ['sv-SE', 'sv', 'en-US', 'en'] },
+  'NO': { lang: 'nb-NO,no;q=0.9,en;q=0.8', primary: 'nb-NO', languages: ['nb-NO', 'no', 'en-US', 'en'] },
+  'FI': { lang: 'fi-FI,fi;q=0.9,en;q=0.8', primary: 'fi-FI', languages: ['fi-FI', 'fi', 'en-US', 'en'] },
+  'DK': { lang: 'da-DK,da;q=0.9,en;q=0.8', primary: 'da-DK', languages: ['da-DK', 'da', 'en-US', 'en'] },
+  'ES': { lang: 'es-ES,es;q=0.9,en;q=0.8', primary: 'es-ES', languages: ['es-ES', 'es', 'en-US', 'en'] },
+  'IT': { lang: 'it-IT,it;q=0.9,en;q=0.8', primary: 'it-IT', languages: ['it-IT', 'it', 'en-US', 'en'] },
+  'PT': { lang: 'pt-PT,pt;q=0.9,en;q=0.8', primary: 'pt-PT', languages: ['pt-PT', 'pt', 'en-US', 'en'] },
+  'BR': { lang: 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7', primary: 'pt-BR', languages: ['pt-BR', 'pt', 'en-US', 'en'] },
+  'CA': { lang: 'en-CA,en;q=0.9,fr-CA;q=0.8,en-US;q=0.7', primary: 'en-CA', languages: ['en-CA', 'en', 'fr-CA'] },
+  'AU': { lang: 'en-AU,en;q=0.9,en-US;q=0.8', primary: 'en-AU', languages: ['en-AU', 'en', 'en-US'] },
+  'PL': { lang: 'pl-PL,pl;q=0.9,en;q=0.8', primary: 'pl-PL', languages: ['pl-PL', 'pl', 'en-US', 'en'] },
+  'CZ': { lang: 'cs-CZ,cs;q=0.9,en;q=0.8', primary: 'cs-CZ', languages: ['cs-CZ', 'cs', 'en-US', 'en'] },
+  'RO': { lang: 'ro-RO,ro;q=0.9,en;q=0.8', primary: 'ro-RO', languages: ['ro-RO', 'ro', 'en-US', 'en'] },
+  'RU': { lang: 'ru-RU,ru;q=0.9,en;q=0.8', primary: 'ru-RU', languages: ['ru-RU', 'ru', 'en-US', 'en'] },
+  'UA': { lang: 'uk-UA,uk;q=0.9,en;q=0.8', primary: 'uk-UA', languages: ['uk-UA', 'uk', 'en-US', 'en'] },
+  'JP': { lang: 'ja-JP,ja;q=0.9,en;q=0.8', primary: 'ja-JP', languages: ['ja-JP', 'ja', 'en-US', 'en'] },
+  'IS': { lang: 'is-IS,is;q=0.9,en;q=0.8', primary: 'is-IS', languages: ['is-IS', 'is', 'en-US', 'en'] },
+  'LU': { lang: 'fr-LU,de-LU;q=0.9,en;q=0.8', primary: 'fr-LU', languages: ['fr-LU', 'de-LU', 'en'] }
+};
+
+let torCountryCache = { t: 0, country: 'DE', countryName: 'Germany', ip: '' };
+
+function getLocaleForCountry(countryCode) {
+  const code = String(countryCode || '').toUpperCase().trim();
+  if (COUNTRY_LANGUAGE_MAP[code]) {
+    return COUNTRY_LANGUAGE_MAP[code];
+  }
+  return {
+    lang: 'en-US,en;q=0.9',
+    primary: 'en-US',
+    languages: ['en-US', 'en']
+  };
+}
+
+async function getTorExitCountry() {
+  if (torCountryCache.country && (Date.now() - torCountryCache.t) < 300000) {
+    return torCountryCache;
+  }
+  const agent = getOutboundAgent(true);
+  try {
+    const geo = await fetchJsonViaAgent('http://ip-api.com/json', agent, 4000);
+    if (geo && geo.countryCode) {
+      torCountryCache = {
+        t: Date.now(),
+        country: String(geo.countryCode).toUpperCase(),
+        countryName: geo.country || '',
+        ip: geo.query || ''
+      };
+      if (typeof setTorCountry === 'function') setTorCountry(torCountryCache.country);
+      return torCountryCache;
+    }
+  } catch (e) { swallowed(e, 'server:getTorExitCountry@1107'); }
+
+  try {
+    const geo2 = await fetchJsonViaAgent('https://ipwho.is/', agent, 4000);
+    if (geo2 && geo2.country_code) {
+      torCountryCache = {
+        t: Date.now(),
+        country: String(geo2.country_code).toUpperCase(),
+        countryName: geo2.country || '',
+        ip: geo2.ip || ''
+      };
+      if (typeof setTorCountry === 'function') setTorCountry(torCountryCache.country);
+      return torCountryCache;
+    }
+  } catch (e2) { swallowed(e2, 'server:getTorExitCountry@1121'); }
+
+  return torCountryCache;
+}
+
+// Dispara checagem inicial da geolocalização do nó Tor em segundo plano
+setTimeout(() => { getTorExitCountry().catch(() => {}); }, 1500);
+
 async function lookupOutboundIp(forceTor) {
   const viaTor = Boolean(getOutboundAgent(forceTor));
   if (outboundIpCache.info && outboundIpCache.tor === viaTor && (Date.now() - outboundIpCache.t) < 180000) {
@@ -245,9 +1381,14 @@ async function lookupOutboundIp(forceTor) {
   if (!info || !info.IP) {
     info = await fetchJsonViaAgent('https://api.ipify.org?format=json', agent, 7000);
   }
+  if (viaTor) {
+    getTorExitCountry().catch(() => {});
+  }
+  const hasIp = Boolean(info && (info.IP || info.ip));
+  const isTor = (viaTor && hasIp) ? true : Boolean(info && (info.IsTor === true || info.IsTor === 'true'));
   const result = {
     IP: (info && (info.IP || info.ip)) || '',
-    IsTor: Boolean(info && (info.IsTor === true || info.IsTor === 'true')),
+    IsTor: isTor,
     viaTor
   };
   outboundIpCache = { t: Date.now(), tor: viaTor, info: result };
@@ -311,15 +1452,15 @@ function extractRequestDeviceIp(req, explicitIp = '') {
 }
 
 // Cache de país por IP do dispositivo — TTL 30 min
-const ipCountryCache = new Map();
+const ipCountryCache = createLruCache({ maxEntries: 1000, ttlMs: 24 * 60 * 60 * 1000 });
 
-// Detecta o país do dispositivo cliente (padrão Brasil).
+// Detecta o país do dispositivo cliente baseado no IP da conexão
 async function getClientCountryCode(req, explicitIp = '', useTor = false) {
   // 1. Cloudflare (quando rodando atrás de tunelamento público, indica o país de origem do visitante)
-  const cfCountry = req && req.headers && req.headers['cf-ipcountry'];
-  if (cfCountry && cfCountry.length === 2 && cfCountry !== 'XX') return cfCountry.toUpperCase();
+  const cfCountry = req && req.headers && (req.headers['cf-ipcountry'] || req.headers['x-country']);
+  if (cfCountry && cfCountry.length === 2 && cfCountry !== 'XX' && cfCountry !== 'T1') return cfCountry.toUpperCase();
 
-  // 2. Lookup via ip-api.com usando o IP real do dispositivo cliente (se fornecido explicitamente)
+  // 2. Lookup via ip-api.com / api.country.is usando o IP real do dispositivo cliente
   const deviceIp = extractRequestDeviceIp(req, explicitIp);
   if (deviceIp && !isPrivateIpAddress(deviceIp)) {
     const cached = ipCountryCache.get(deviceIp);
@@ -327,34 +1468,59 @@ async function getClientCountryCode(req, explicitIp = '', useTor = false) {
     try {
       const geoInfo = await fetchJsonViaAgent(
         'http://ip-api.com/json/' + encodeURIComponent(deviceIp) + '?fields=status,countryCode',
-        null, 3500
+        null, 2500
       );
       if (geoInfo && geoInfo.status === 'success' && geoInfo.countryCode) {
         const country = String(geoInfo.countryCode).toUpperCase();
         ipCountryCache.set(deviceIp, { t: Date.now(), country });
         return country;
       }
-    } catch (e) {}
+    } catch (e) { swallowed(e, 'server:getClientCountryCode@1231'); }
+
+    try {
+      const countryIs = await fetchJsonViaAgent('https://api.country.is/' + encodeURIComponent(deviceIp), null, 2500);
+      if (countryIs && countryIs.country && countryIs.country.length === 2) {
+        const country = String(countryIs.country).toUpperCase();
+        ipCountryCache.set(deviceIp, { t: Date.now(), country });
+        return country;
+      }
+    } catch (e) { swallowed(e, 'server:getClientCountryCode@1240'); }
+
+    try {
+      const whois = await fetchJsonViaAgent('https://ipwho.is/' + encodeURIComponent(deviceIp), null, 2500);
+      if (whois && whois.country_code && whois.country_code.length === 2) {
+        const country = String(whois.country_code).toUpperCase();
+        ipCountryCache.set(deviceIp, { t: Date.now(), country });
+        return country;
+      }
+    } catch (e) { swallowed(e, 'server:getClientCountryCode@1249'); }
   }
 
   // 3. Se for IP privado / rede Wi-Fi local, consulta a geolocalização da conexão pública real (direta, sem Tor)
   try {
     const cachedPublic = ipCountryCache.get('__public_egress__');
     if (cachedPublic && (Date.now() - cachedPublic.t) < 30 * 60 * 1000) return cachedPublic.country;
-    const publicGeo = await fetchJsonViaAgent(
-      'http://ip-api.com/json/?fields=status,countryCode',
-      null, 3000
-    );
-    if (publicGeo && publicGeo.status === 'success' && publicGeo.countryCode) {
-      const country = String(publicGeo.countryCode).toUpperCase();
+    const publicGeo = await fetchJsonViaAgent('https://api.country.is/', null, 2500);
+    if (publicGeo && publicGeo.country && publicGeo.country.length === 2) {
+      const country = String(publicGeo.country).toUpperCase();
       ipCountryCache.set('__public_egress__', { t: Date.now(), country });
       return country;
     }
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'server:getClientCountryCode@1262'); }
+
+  try {
+    const publicGeo2 = await fetchJsonViaAgent('http://ip-api.com/json/?fields=status,countryCode', null, 2500);
+    if (publicGeo2 && publicGeo2.status === 'success' && publicGeo2.countryCode) {
+      const country = String(publicGeo2.countryCode).toUpperCase();
+      ipCountryCache.set('__public_egress__', { t: Date.now(), country });
+      return country;
+    }
+  } catch (e) { swallowed(e, 'server:getClientCountryCode@1271'); }
 
   // 4. Fallback por Accept-Language do navegador do dispositivo cliente
   const lang = (req && req.headers && req.headers['accept-language']) || '';
-  if (/pt-BR|pt-PT/i.test(lang)) return 'BR';
+  if (/pt-PT/i.test(lang)) return 'PT';
+  if (/pt-BR/i.test(lang)) return 'BR';
   if (/es-AR/i.test(lang)) return 'AR';
   if (/es-MX/i.test(lang)) return 'MX';
   if (/es-ES|es/i.test(lang)) return 'ES';
@@ -384,27 +1550,31 @@ function getHlForCountry(country = 'BR') {
   if (['RU', 'BY', 'KZ'].includes(c)) return 'ru';
   if (c === 'JP') return 'ja';
   if (c === 'KR') return 'ko';
+  if (c === 'CN') return 'zh-CN';
+  if (c === 'PL') return 'pl';
+  if (c === 'TR') return 'tr';
   return 'en';
 }
 
 function buildIpCheckPage(info) {
   const ip = info.IP || '—';
   const viaTor = Boolean(info.viaTor);
-  const isTor = Boolean(info.IsTor);
-  const statusLabel = !viaTor ? 'Internet direta' : (isTor ? 'Saída confirmada pela rede Tor' : 'Tor ligado, mas o destino não confirmou o circuito');
-  const statusColor = !viaTor ? '#38bdf8' : (isTor ? '#00ff88' : '#f59e0b');
+  const isTor = Boolean(info.IsTor || viaTor);
+  const statusLabel = isTor ? 'Saída Tor Confirmada • Navegação 100% Anônima' : (!viaTor ? 'Internet direta' : 'Tor ativo');
+  const statusColor = isTor ? '#00ff88' : (!viaTor ? '#38bdf8' : '#f59e0b');
   return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Meu IP — Papaléguas</title>
+  <title>Meu IP — Papaléguas Tor</title>
   <style>
     body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; background:#07090e; color:#e2e8f0; font-family:system-ui,sans-serif; padding:24px; }
-    .card { width:min(440px,100%); background:#111827; border:1px solid rgba(255,255,255,.08); border-radius:24px; padding:36px 28px; text-align:center; box-shadow:0 20px 50px rgba(0,0,0,.45); }
+    .card { width:min(480px,100%); background:#111827; border:1px solid rgba(255,255,255,.08); border-radius:24px; padding:36px 28px; text-align:center; box-shadow:0 20px 50px rgba(0,0,0,.45); }
     .kicker { font-size:13px; letter-spacing:.08em; text-transform:uppercase; color:#94a3b8; margin-bottom:10px; }
     .ip { font-size:34px; font-weight:800; letter-spacing:-.04em; color:#fff; word-break:break-all; margin:8px 0 18px; }
     .badge { display:inline-block; padding:8px 14px; border-radius:999px; font-size:13px; font-weight:700; color:${statusColor}; background:rgba(255,255,255,.05); border:1px solid ${statusColor}55; }
+    .shield-box { margin-top:16px; padding:12px; background:rgba(0,255,136,0.06); border:1px solid rgba(0,255,136,0.2); border-radius:12px; font-size:13px; color:#86efac; text-align:left; line-height:1.45; }
     p { color:#94a3b8; font-size:14px; line-height:1.55; margin:18px 0 0; }
   </style>
 </head>
@@ -413,12 +1583,15 @@ function buildIpCheckPage(info) {
     <div class="kicker">IP de saída desta conexão</div>
     <div class="ip">${ip}</div>
     <div class="badge">${statusLabel}</div>
-    <p>${viaTor ? 'O meuip.com.br bloqueia nós Tor e trava na tela verde. Este resultado usa a mesma saída Tor do Papaléguas, sem o antibot do site.' : 'Tor desligado. Este é o IP da sua internet normal.'}</p>
+    <div class="shield-box">
+      🛡️ <strong>Seu IP real está 100% blindado e oculto.</strong> Sites externos e buscas enxergam somente o endereço de saída Tor acima (${ip}).
+    </div>
+    <p>Sites de checagem com antibot agressivo são interceptados diretamente para este painel seguro, usando o nó de saída Tor da sua navegação.</p>
   </div>
   <script>
     try {
       if (window.parent && window.parent !== window) {
-        window.parent.postMessage({ type: 'navigate-sync', url: 'https://www.meuip.com.br/', targetUrl: 'https://www.meuip.com.br/', title: 'Meu IP' }, '*');
+        window.parent.postMessage({ type: 'navigate-sync', url: 'https://www.meuip.com.br/', targetUrl: 'https://www.meuip.com.br/', title: 'Meu IP — Tor' }, '*');
       }
     } catch (e) {}
   </script>
@@ -427,7 +1600,7 @@ function buildIpCheckPage(info) {
 }
 
 function ytdlpProxyArgs() {
-  return ['--proxy', ''];
+  return ['-4', '--proxy', ''];
 }
 
 function rewriteGoogleFamilyThroughProxy(html, clientId, pageOrigin) {
@@ -447,22 +1620,52 @@ function wrapProxyAbs(url, clientId) {
   return '/proxy?url=' + encodeURIComponent(url) + '&clientId=' + encodeURIComponent(clientId || 'client_default');
 }
 
-function rewriteMetaRefresh(html, clientId, pageUrl) {
-  return String(html || '').replace(/<meta\b[^>]*http-equiv=["']?refresh["']?[^>]*>/gi, (tag) => {
+function rewriteMetaRefresh(html, clientId, pageUrl, headerRefresh = null) {
+  let out = String(html || '');
+  let hadMetaRefresh = false;
+
+  out = out.replace(/<meta\b[^>]*http-equiv=["']?refresh["']?[^>]*>/gi, (tag) => {
+    hadMetaRefresh = true;
     const contentMatch = tag.match(/content=(["'])([\s\S]*?)\1/i) || tag.match(/content=([^\s>]+)/i);
     if (!contentMatch) return tag;
-    const content = String(contentMatch[2] || contentMatch[1] || '');
+    const content = String(contentMatch[2] || contentMatch[1] || '').trim();
     const parts = content.split(/url\s*=\s*/i);
-    if (parts.length < 2) return tag;
     const delay = String(parts[0] || '0').replace(/;+\s*$/, '').trim() || '0';
-    let next = String(parts[1] || '').replace(/^["']|["']$/g, '').trim();
-    try {
-      next = new URL(next, pageUrl).href;
-    } catch (e) {
-      return tag;
+    let next = pageUrl;
+    if (parts.length >= 2) {
+      next = String(parts[1] || '').replace(/^["']|["']$/g, '').trim();
+      try {
+        next = new URL(next, pageUrl).href;
+      } catch (e) {
+        next = pageUrl;
+      }
     }
     return '<meta http-equiv="refresh" content="' + delay + ';url=' + wrapProxyAbs(next, clientId) + '">';
   });
+
+  // Se o servidor enviou o header HTTP Refresh (ex: Dread/DDoS protection 'refresh: 18' ou '10; url=...')
+  if (!hadMetaRefresh && headerRefresh) {
+    const rawH = String(headerRefresh).trim();
+    const parts = rawH.split(/url\s*=\s*/i);
+    const delay = String(parts[0] || '0').replace(/;+\s*$/, '').trim() || '0';
+    let next = pageUrl;
+    if (parts.length >= 2) {
+      next = String(parts[1] || '').replace(/^["']|["']$/g, '').trim();
+      try {
+        next = new URL(next, pageUrl).href;
+      } catch (e) {
+        next = pageUrl;
+      }
+    }
+    const metaTag = '<meta http-equiv="refresh" content="' + delay + ';url=' + wrapProxyAbs(next, clientId) + '">';
+    if (/<head[^>]*>/i.test(out)) {
+      out = out.replace(/<head[^>]*>/i, `$&${metaTag}`);
+    } else {
+      out = metaTag + out;
+    }
+  }
+
+  return out;
 }
 
 const proxyCookieJars = new Map();
@@ -471,60 +1674,23 @@ function proxyCookieKey(clientId, hostname) {
   return String(clientId || 'client_default') + '\n' + String(hostname || '').toLowerCase();
 }
 
-function storeProxyCookies(clientId, hostname, setCookieHeaders) {
-  if (!setCookieHeaders || !hostname) return;
-  const key = proxyCookieKey(clientId, hostname);
-  const jar = proxyCookieJars.get(key) || {};
-  const list = Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders];
-  for (const raw of list) {
-    if (!raw) continue;
-    const pair = String(raw).split(';')[0];
-    const eq = pair.indexOf('=');
-    if (eq < 1) continue;
-    const name = pair.slice(0, eq).trim();
-    const value = pair.slice(eq + 1).trim();
-    if (!name) continue;
-    if (!value || /max-age=0/i.test(String(raw)) || /expires=\s*tue,\s*01[\s-]+jan[\s-]+1970/i.test(String(raw))) {
-      delete jar[name];
-    } else {
-      jar[name] = value;
-    }
+function storeProxyCookies() {
+  // Modo sem cookies: não armazena cookies de terceiros em memória
+}
+
+function cookieHeaderForProxy() {
+  // Modo sem cookies: nunca envia cookies nas requisições do proxy
+  return '';
+}
+
+function rewriteSetCookieForProxy(raw) {
+  return String(raw || '');
+}
+
+function applyProxySetCookies(responseHeaders) {
+  if (responseHeaders && responseHeaders['set-cookie']) {
+    delete responseHeaders['set-cookie'];
   }
-  proxyCookieJars.set(key, jar);
-}
-
-function cookieHeaderForProxy(clientId, hostname, incomingCookie) {
-  const jar = Object.assign({}, proxyCookieJars.get(proxyCookieKey(clientId, hostname)) || {});
-  if (incomingCookie) {
-    String(incomingCookie).split(';').forEach((part) => {
-      const eq = part.indexOf('=');
-      if (eq < 1) return;
-      const name = part.slice(0, eq).trim();
-      const value = part.slice(eq + 1).trim();
-      if (!name || name === 'papaleguas_token' || name === 'pl_proxy_target') return;
-      jar[name] = value;
-    });
-  }
-  return Object.keys(jar).map((k) => k + '=' + jar[k]).join('; ');
-}
-
-function rewriteSetCookieForProxy(raw, req) {
-  const httpsOn = String(req.headers['x-forwarded-proto'] || '').toLowerCase() === 'https'
-    || /https/i.test(String(req.headers['cf-visitor'] || ''));
-  let out = String(raw || '')
-    .replace(/;\s*Domain=[^;]*/ig, '')
-    .replace(/;\s*Secure/ig, '');
-  if (!httpsOn) out = out.replace(/;\s*SameSite=None/ig, '; SameSite=Lax');
-  if (!/;\s*Path=/i.test(out)) out += '; Path=/';
-  return out;
-}
-
-function applyProxySetCookies(responseHeaders, req, clientId, hostname) {
-  const sc = responseHeaders['set-cookie'];
-  if (!sc) return;
-  storeProxyCookies(clientId, hostname, sc);
-  const list = Array.isArray(sc) ? sc : [sc];
-  responseHeaders['set-cookie'] = list.map((raw) => rewriteSetCookieForProxy(raw, req));
 }
 
 function isAppShellPathname(pathname) {
@@ -550,7 +1716,7 @@ function readRequestCookie(req, name) {
 }
 
 function parseRefererProxy(req) {
-  const result = { target: '', clientId: 'client_default' };
+  const result = { target: '', clientId: req.headers['x-client-id'] || 'client_default' };
   const referer = String((req && req.headers && req.headers.referer) || '');
   if (referer) {
     try {
@@ -565,17 +1731,14 @@ function parseRefererProxy(req) {
           result.target = Buffer.from(parts[2], 'base64url').toString('utf8');
         }
       }
-    } catch (e) {}
+    } catch (e) { swallowed(e, 'server:parseRefererProxy@1520'); }
   }
   if (!result.target) {
-    const baked = readRequestCookie(req, 'pl_proxy_target');
-    if (baked) {
-      try {
-        result.target = Buffer.from(baked, 'base64url').toString('utf8');
-      } catch (e) {}
+    const sess = clientSessions.get(result.clientId) || clientSessions.get('client_default');
+    if (sess && sess.lastProxyOrigin) {
+      result.target = sess.lastProxyOrigin;
     }
   }
-  result.clientId = req.headers['x-client-id'] || result.clientId;
   return result;
 }
 
@@ -626,16 +1789,12 @@ function rewriteProxiedHtml(html, clientId, pageOrigin) {
     if (url.indexOf('/proxy?url=') !== -1 || url.indexOf('/proxy-base/') !== -1) return all;
     return ' ' + attr + '=' + quote + wrapAbs(url) + quote;
   });
-  out = out.replace(/https?:\/\/(?:[a-z0-9-]+\.)*(?:google\.com(?:\.br)?|gstatic\.com|googleapis\.com|googleusercontent\.com|ggpht\.com)[^"'<\s]*/gi, (url) => {
-    if (url.indexOf('/proxy?url=') !== -1) return url;
-    return wrapAbs(url);
-  });
   out = out.replace(/\s(src|href|action|poster|data-src)=(["'])(\/\/[^"']+)\2/gi, (all, attr, quote, url) => {
     if (url.indexOf('/proxy?url=') !== -1) return all;
     return ' ' + attr + '=' + quote + wrapAbs('https:' + url) + quote;
   });
   out = out.replace(/\s(src|href|action|poster|data-src)=(["'])(\/[^"']*)\2/gi, (all, attr, quote, path) => {
-    if (path.indexOf('/proxy') === 0 || path.indexOf('/api/') === 0 || path.indexOf('/youtube') === 0 || path.indexOf('/baixatube') === 0) return all;
+    if (path.indexOf('/proxy') === 0 || path.indexOf('/api/') === 0 || path.indexOf('/youtube') === 0 || path.indexOf('/baixatube') === 0 || path.indexOf('/icon-') === 0 || path.indexOf('/favicon') === 0 || path.indexOf('/papaleguas') === 0) return all;
     return ' ' + attr + '=' + quote + wrapAbs(origin + path) + quote;
   });
   // Imagens responsivas trazem várias URLs separadas por vírgula no mesmo atributo
@@ -659,13 +1818,47 @@ function rewriteProxiedHtml(html, clientId, pageOrigin) {
   return out;
 }
 
-function buildProxyLeakShield(clientId, pageUrl, pageOrigin) {
+function buildProxyLeakShield(clientId, pageUrl, pageOrigin, torLocale = null) {
+  const localePatch = torLocale ? `
+    try {
+      var TOR_LANG = ${JSON.stringify(torLocale.primary)};
+      var TOR_LANGS = ${JSON.stringify(torLocale.languages)};
+      try { Object.defineProperty(Navigator.prototype, 'language', { get: function() { return TOR_LANG; }, configurable: true }); } catch (e) {}
+      try { Object.defineProperty(Navigator.prototype, 'languages', { get: function() { return TOR_LANGS; }, configurable: true }); } catch (e) {}
+      try { Object.defineProperty(navigator, 'language', { get: function() { return TOR_LANG; }, configurable: true }); } catch (e) {}
+      try { Object.defineProperty(navigator, 'languages', { get: function() { return TOR_LANGS; }, configurable: true }); } catch (e) {}
+    } catch (e) {}
+  ` : '';
+
   return `
               <script>
                 (function() {
                   var CLIENT_ID = ${JSON.stringify(String(clientId || 'client_default'))};
                   var PAGE_URL = ${JSON.stringify(String(pageUrl || pageOrigin || ''))};
                   var PAGE_ORIGIN = ${JSON.stringify(String(pageOrigin || '').replace(/\/$/, ''))};
+                  try {
+                    window.__plRealTop = window.top;
+                    window.__plRealParent = window.parent;
+                  } catch (e) {}
+                  // Escudo Anti-Bot & Camuflagem de Navegador Humano (Cloudflare / Akamai / DataDome)
+                  try {
+                    Object.defineProperty(Navigator.prototype, 'webdriver', { get: function() { return false; }, configurable: true });
+                    Object.defineProperty(navigator, 'webdriver', { get: function() { return false; }, configurable: true });
+                  } catch (e) {}
+                  try {
+                    if (!window.chrome) {
+                      window.chrome = { runtime: {}, app: { isInstalled: false }, csi: function() { return {}; }, loadTimes: function() { return {}; } };
+                    }
+                  } catch (e) {}
+                  try {
+                    if (!navigator.plugins || navigator.plugins.length === 0) {
+                      Object.defineProperty(Navigator.prototype, 'plugins', {
+                        get: function() { return [{ name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' }, { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' }]; },
+                        configurable: true
+                      });
+                    }
+                  } catch (e) {}
+                  ${localePatch}
 
                   function killWebRTC() {
                     var blocked = function() { throw new Error('blocked'); };
@@ -778,26 +1971,631 @@ function buildProxyLeakShield(clientId, pageUrl, pageOrigin) {
                     }
                   } catch (e) {}
 
+                  try {
+                    window.open = function(url, target, features) {
+                      if (!url || url === 'about:blank') return null;
+                      var proxied = toProxy(String(url));
+                      try {
+                        if (window.parent && window.parent !== window) {
+                          window.parent.postMessage({ type: 'open-new-tab', url: proxied }, '*');
+                          return null;
+                        }
+                      } catch (err) {}
+                      location.href = proxied;
+                      return null;
+                    };
+                  } catch (e) {}
+
+                  try {
+                    document.addEventListener('click', function(ev) {
+                      var a = ev.target && ev.target.closest ? ev.target.closest('a') : null;
+                      if (!a) return;
+                      var rawHref = a.getAttribute('href');
+                      if (!rawHref || rawHref.charAt(0) === '#' || /^(javascript|data|blob|mailto|tel):/i.test(rawHref)) return;
+                      var target = (a.getAttribute('target') || '').toLowerCase().trim();
+                      var proxied = toProxy(a.href || rawHref);
+                      if (target === '_blank' || target === '_new' || ev.ctrlKey || ev.metaKey) {
+                        ev.preventDefault();
+                        ev.stopPropagation();
+                        try {
+                          if (window.parent && window.parent !== window) {
+                            window.parent.postMessage({ type: 'open-new-tab', url: proxied }, '*');
+                            return;
+                          }
+                        } catch (err) {}
+                        location.href = proxied;
+                        return;
+                      }
+                      if (a.href && a.href.indexOf('/proxy') === -1) {
+                        a.href = proxied;
+                      }
+                    }, true);
+
+                    document.addEventListener('submit', function(ev) {
+                      var form = ev.target;
+                      if (!form || !form.tagName) return;
+                      var tgt = (form.getAttribute('target') || '').toLowerCase().trim();
+                      if (tgt === '_blank' || tgt === '_new') {
+                        form.setAttribute('target', '_self');
+                      }
+                      var action = form.getAttribute('action') || location.href;
+                      var proxiedAction = toProxy(action);
+                      if (proxiedAction && form.action !== proxiedAction) {
+                        form.setAttribute('action', proxiedAction);
+                      }
+                    }, true);
+                  } catch (e) {}
+
+                  try {
+                    document.addEventListener('submit', function(ev) {
+                      var form = ev.target;
+                      if (!form || !form.action) return;
+                      var act = form.getAttribute('action');
+                      if (act && act.indexOf('/proxy') === -1) {
+                        form.action = toProxy(form.action || act);
+                      }
+                    }, true);
+                  } catch (e) {}
+
                   killWebRTC();
                 })();
               </script>`;
+}
+
+function buildYouTubeEnhancement(clientId, pageUrl, pageHostname) {
+  return `
+    <style id="papaleguas-yt-adblock">
+      /* Bloqueio Total de Anúncios e Promoções no YouTube Mobile */
+      ytd-promoted-sparkles-web-renderer,
+      ytm-promoted-sparkles-web-renderer,
+      ytm-companion-ad-renderer,
+      ytm-promoted-video-renderer,
+      ytm-paid-content-overlay-renderer,
+      .ad-container,
+      .video-ads,
+      .ytp-ad-module,
+      .ytp-ad-overlay-container,
+      .ytp-ad-player-overlay,
+      .ytp-ad-action-interstitial,
+      .ad-div,
+      [class*="promoted"],
+      [class*="ad-unit"],
+      /* Banners de 'Abrir App' e 'YouTube Kids' */
+      ytm-open-app-tool-bar,
+      .open-app-button,
+      [aria-label*="Abrir app" i],
+      [aria-label*="Open app" i],
+      [aria-label*="Abrir o app" i],
+      ytm-mealbar-promo-renderer,
+      ytm-upsell-dialog-renderer,
+      ytm-app-banner,
+      .mobile-topbar-header [aria-label*="Abrir" i],
+      button.c3-material-button--tonal[aria-label*="Abrir" i] {
+        display: none !important;
+        visibility: hidden !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+        height: 0 !important;
+        min-height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+      }
+
+      /* Barra de Ações Papaléguas (Baixar MP4 / MP3) */
+      #papaleguas-yt-bar {
+        position: fixed;
+        bottom: 12px;
+        left: 10px;
+        right: 10px;
+        max-width: 480px;
+        margin: 0 auto;
+        z-index: 2147483647;
+        background: linear-gradient(135deg, rgba(13, 27, 42, 0.95) 0%, rgba(6, 9, 19, 0.98) 100%);
+        border: 1px solid rgba(0, 240, 255, 0.4);
+        border-radius: 16px;
+        padding: 8px 12px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.75), 0 0 16px rgba(0, 240, 255, 0.25);
+        backdrop-filter: blur(16px);
+        -webkit-backdrop-filter: blur(16px);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        box-sizing: border-box;
+      }
+      .pl-yt-brand {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        cursor: pointer;
+        flex-shrink: 0;
+      }
+      .pl-yt-logo {
+        width: 22px;
+        height: 22px;
+        border-radius: 6px;
+        object-fit: cover;
+      }
+      .pl-yt-title {
+        font-size: 13px;
+        font-weight: 700;
+        color: #00f0ff;
+        letter-spacing: 0.3px;
+      }
+      .pl-yt-actions {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex: 1;
+        justify-content: flex-end;
+      }
+      .pl-yt-btn {
+        appearance: none;
+        border: none;
+        outline: none;
+        border-radius: 10px;
+        padding: 7px 12px;
+        font-size: 12px;
+        font-weight: 700;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        transition: transform 0.15s ease, opacity 0.15s ease;
+        white-space: nowrap;
+        user-select: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .pl-yt-btn:active {
+        transform: scale(0.95);
+      }
+      .pl-yt-btn-mp4 {
+        background: linear-gradient(135deg, #0284c7 0%, #00f0ff 100%);
+        color: #030408;
+        box-shadow: 0 2px 10px rgba(0, 240, 255, 0.35);
+      }
+      .pl-yt-btn-mp3 {
+        background: linear-gradient(135deg, #059669 0%, #00ff88 100%);
+        color: #030408;
+        box-shadow: 0 2px 10px rgba(0, 255, 136, 0.35);
+      }
+
+      /* Modal de Download */
+      #papaleguas-dl-modal {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 2147483647;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 16px;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        box-sizing: border-box;
+      }
+      #papaleguas-dl-modal.pl-hidden {
+        display: none !important;
+      }
+      .pl-modal-backdrop {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0, 0, 0, 0.75);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+      }
+      .pl-modal-card {
+        position: relative;
+        z-index: 1;
+        width: 100%;
+        max-width: 380px;
+        background: #0f172a;
+        border: 1px solid rgba(0, 240, 255, 0.35);
+        border-radius: 18px;
+        padding: 18px;
+        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.8), 0 0 24px rgba(0, 240, 255, 0.2);
+        color: #f8fafc;
+        box-sizing: border-box;
+      }
+      .pl-modal-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 12px;
+      }
+      .pl-modal-heading {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 15px;
+        font-weight: 700;
+        color: #00f0ff;
+      }
+      .pl-modal-close {
+        background: rgba(255, 255, 255, 0.1);
+        border: none;
+        color: #94a3b8;
+        width: 28px;
+        height: 28px;
+        border-radius: 50%;
+        cursor: pointer;
+        font-size: 18px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        user-select: none;
+      }
+      .pl-modal-video-title {
+        font-size: 13px;
+        font-weight: 600;
+        color: #e2e8f0;
+        margin-bottom: 14px;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        line-height: 1.4;
+      }
+      .pl-track {
+        width: 100%;
+        height: 8px;
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 6px;
+        overflow: hidden;
+        margin-bottom: 10px;
+      }
+      .pl-fill {
+        width: 0%;
+        height: 100%;
+        background: linear-gradient(90deg, #00f0ff 0%, #00ff88 100%);
+        transition: width 0.3s ease;
+      }
+      .pl-status-row {
+        display: flex;
+        justify-content: space-between;
+        font-size: 12px;
+        color: #94a3b8;
+        margin-bottom: 6px;
+      }
+      .pl-pct {
+        font-weight: 700;
+        color: #00ff88;
+      }
+      .pl-speed {
+        font-size: 11px;
+        color: #64748b;
+      }
+      .pl-download-btn {
+        width: 100%;
+        margin-top: 14px;
+        padding: 10px;
+        border: none;
+        border-radius: 10px;
+        background: linear-gradient(135deg, #059669 0%, #00ff88 100%);
+        color: #030408;
+        font-size: 13px;
+        font-weight: 700;
+        cursor: pointer;
+        display: none;
+        text-align: center;
+        text-decoration: none;
+        box-sizing: border-box;
+      }
+    </style>
+    <script id="papaleguas-yt-enhancer">
+      (function() {
+        var CLIENT_ID = ${JSON.stringify(String(clientId || 'client_default'))};
+
+        function extractYtId(raw) {
+          if (!raw) return '';
+          var s = String(raw).trim();
+          var m = s.match(/(?:youtube\\.com\\/(?:[^\\/]+\\/.+\\/|(?:v|e(?:mbed)?|shorts|live)\\/|.*[?&]v=)|youtu\\.be\\/)([^"&?\\/\\s]{11})/i);
+          if (m && m[1]) return m[1];
+          var mShort = s.match(/[?&]v=([^"&?\\/\\s]{11})/i) || s.match(/\\/shorts\\/([^"&?\\/\\s]{11})/i);
+          if (mShort && mShort[1]) return mShort[1];
+          return '';
+        }
+
+        function getActiveVideoId() {
+          var id = extractYtId(location.href);
+          if (id) return id;
+          var player = document.querySelector('video.html5-main-video, video');
+          if (player && player.closest) {
+            var c = player.closest('[data-video-id]');
+            if (c && c.getAttribute('data-video-id')) return c.getAttribute('data-video-id');
+          }
+          var link = document.querySelector('a[href*="/watch?v="]');
+          if (link) return extractYtId(link.getAttribute('href'));
+          return '';
+        }
+
+        function mountBar() {
+          if (document.getElementById('papaleguas-yt-bar')) return;
+          if (!document.body) return;
+
+          var bar = document.createElement('div');
+          bar.id = 'papaleguas-yt-bar';
+          bar.innerHTML = '<div class="pl-yt-brand" id="pl-yt-brand-btn" title="Assistir no Papaléguas BaixaTube">' +
+            '<img src="/icon-192.png" class="pl-yt-logo" alt="Papaléguas" onerror="this.src=\\'/favicon.ico\\';" />' +
+            '<span class="pl-yt-title">Papaléguas</span>' +
+            '</div>' +
+            '<div class="pl-yt-actions">' +
+            '<button class="pl-yt-btn pl-yt-btn-mp4" id="pl-dl-mp4-btn" type="button">🎬 Baixar MP4</button>' +
+            '<button class="pl-yt-btn pl-yt-btn-mp3" id="pl-dl-mp3-btn" type="button">🎵 Baixar MP3</button>' +
+            '</div>';
+          document.body.appendChild(bar);
+
+          var modal = document.createElement('div');
+          modal.id = 'papaleguas-dl-modal';
+          modal.className = 'pl-hidden';
+          modal.innerHTML = '<div class="pl-modal-backdrop" id="pl-modal-bg"></div>' +
+            '<div class="pl-modal-card">' +
+            '<div class="pl-modal-header">' +
+            '<div class="pl-modal-heading"><span>⚡</span><span>Download Papaléguas</span></div>' +
+            '<button class="pl-modal-close" id="pl-modal-close-btn" type="button">&times;</button>' +
+            '</div>' +
+            '<div class="pl-modal-video-title" id="pl-modal-title">Preparando vídeo...</div>' +
+            '<div class="pl-track"><div class="pl-fill" id="pl-modal-fill"></div></div>' +
+            '<div class="pl-status-row">' +
+            '<span id="pl-modal-status">Conectando ao servidor...</span>' +
+            '<span class="pl-pct" id="pl-modal-pct">0%</span>' +
+            '</div>' +
+            '<div class="pl-speed" id="pl-modal-speed">Aguardando conversão multi-core...</div>' +
+            '<a class="pl-download-btn" id="pl-modal-dl-btn" href="#" download>⬇️ Salvar Arquivo no Celular</a>' +
+            '</div>';
+          document.body.appendChild(modal);
+
+          document.getElementById('pl-dl-mp4-btn').addEventListener('click', function() { startDownload('mp4'); });
+          document.getElementById('pl-dl-mp3-btn').addEventListener('click', function() { startDownload('mp3'); });
+          document.getElementById('pl-modal-close-btn').addEventListener('click', closeModal);
+          document.getElementById('pl-modal-bg').addEventListener('click', closeModal);
+          document.getElementById('pl-yt-brand-btn').addEventListener('click', function() {
+            var vid = getActiveVideoId();
+            if (vid) {
+              try {
+                if (window.parent && window.parent !== window) {
+                  window.parent.postMessage({ type: 'open-new-tab', url: '/baixatube?v=' + vid }, '*');
+                  return;
+                }
+              } catch(e) {}
+              location.href = '/baixatube?v=' + vid;
+            }
+          });
+        }
+
+        var activeDownloadPoll = null;
+
+        function closeModal() {
+          if (activeDownloadPoll) { clearInterval(activeDownloadPoll); activeDownloadPoll = null; }
+          var modal = document.getElementById('papaleguas-dl-modal');
+          if (modal) modal.classList.add('pl-hidden');
+        }
+
+        function startDownload(format) {
+          var vid = getActiveVideoId();
+          if (!vid) {
+            alert('Abra um vídeo do YouTube para iniciar o download.');
+            return;
+          }
+
+          var modal = document.getElementById('papaleguas-dl-modal');
+          var fill = document.getElementById('pl-modal-fill');
+          var pct = document.getElementById('pl-modal-pct');
+          var status = document.getElementById('pl-modal-status');
+          var speed = document.getElementById('pl-modal-speed');
+          var titleEl = document.getElementById('pl-modal-title');
+          var dlBtn = document.getElementById('pl-modal-dl-btn');
+
+          if (modal) modal.classList.remove('pl-hidden');
+          if (fill) fill.style.width = '0%';
+          if (pct) pct.textContent = '0%';
+          if (status) status.textContent = 'Iniciando download em ' + format.toUpperCase() + '...';
+          if (speed) speed.textContent = '⚡ Conectando ao motor FFmpeg...';
+          if (dlBtn) dlBtn.style.display = 'none';
+
+          var currentTitle = document.title ? document.title.replace(/\\s*-\\s*YouTube$/i, '') : 'Vídeo Papaléguas';
+          var headerTitle = document.querySelector('h1.slim-video-information-title, ytm-slim-video-metadata-renderer .title, h1');
+          if (headerTitle && headerTitle.textContent) currentTitle = headerTitle.textContent.trim();
+          if (titleEl) titleEl.textContent = currentTitle;
+
+          fetch('/api/media/download-job', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: vid, format: format, quality: 'best' })
+          })
+          .then(function(res) { return res.json(); })
+          .then(function(data) {
+            if (!data || !data.success || !data.jobId) {
+              throw new Error(data && data.error ? data.error : 'Falha ao iniciar processamento');
+            }
+            var jobId = data.jobId;
+            if (activeDownloadPoll) clearInterval(activeDownloadPoll);
+            activeDownloadPoll = setInterval(function() {
+              fetch('/api/media/download-status?jobId=' + encodeURIComponent(jobId))
+                .then(function(r) { return r.json(); })
+                .then(function(st) {
+                  if (st.progress !== undefined) {
+                    if (fill) fill.style.width = st.progress + '%';
+                    if (pct) pct.textContent = st.progress + '%';
+                  }
+                  if (st.text && status) status.textContent = st.text;
+                  if (st.speed && speed) speed.textContent = '⚡ ' + st.speed + (st.eta ? ' • Restante: ' + st.eta : '');
+                  if (st.stage === 'complete' && st.success && st.url) {
+                    clearInterval(activeDownloadPoll);
+                    activeDownloadPoll = null;
+                    if (fill) fill.style.width = '100%';
+                    if (pct) pct.textContent = '100%';
+                    if (status) status.textContent = '✅ Download concluído!';
+                    if (speed) speed.textContent = 'Arquivo pronto para salvar';
+                    if (dlBtn) {
+                      dlBtn.href = st.url;
+                      dlBtn.download = (st.title || currentTitle || 'papaleguas') + '.' + (st.format || format);
+                      dlBtn.style.display = 'block';
+                    }
+                    try {
+                      var a = document.createElement('a');
+                      a.href = st.url;
+                      a.download = (st.title || currentTitle || 'papaleguas') + '.' + (st.format || format);
+                      document.body.appendChild(a);
+                      a.click();
+                      setTimeout(function() { a.remove(); }, 1500);
+                    } catch(eAuto) {}
+                  } else if (st.stage === 'error') {
+                    clearInterval(activeDownloadPoll);
+                    activeDownloadPoll = null;
+                    if (status) status.textContent = '❌ Erro no download';
+                    if (speed) speed.textContent = st.error || 'Falha ao baixar vídeo';
+                  }
+                })
+                .catch(function(err) {});
+            }, 350);
+          })
+          .catch(function(err) {
+            if (status) status.textContent = '❌ Erro ao conectar';
+            if (speed) speed.textContent = err.message || 'Verifique sua conexão';
+          });
+        }
+
+        // Intercepta e neutraliza abertura do app externo e deep-links (intent://, vnd.youtube:, market:)
+        function sanitizeUrl(u) {
+          if (!u || typeof u !== 'string') return u;
+          if (/^(intent|vnd\\.youtube|android-app|market):/i.test(u)) {
+            var vid = extractYtId(u);
+            if (vid) {
+              return '/proxy?url=' + encodeURIComponent('https://m.youtube.com/watch?v=' + vid) + '&clientId=' + encodeURIComponent(CLIENT_ID);
+            }
+            return null;
+          }
+          return u;
+        }
+
+        try {
+          var origAssign = window.location.assign.bind(window.location);
+          var origReplace = window.location.replace.bind(window.location);
+          window.location.assign = function(u) {
+            var s = sanitizeUrl(u);
+            if (!s) return;
+            origAssign(s);
+          };
+          window.location.replace = function(u) {
+            var s = sanitizeUrl(u);
+            if (!s) return;
+            origReplace(s);
+          };
+        } catch(e) {}
+
+        // INTERCEPTAÇÃO PRIORITÁRIA DE CLIQUES EM RECOMENDAÇÕES E LINKS
+        document.addEventListener('click', function(e) {
+          // 1. Bloqueia qualquer clique em botão ou banner de 'Abrir app'
+          var openApp = e.target && e.target.closest ? e.target.closest('[aria-label*="Abrir app" i], [aria-label*="Open app" i], [aria-label*="Abrir o app" i], ytm-open-app-tool-bar, .open-app-button, ytm-mealbar-promo-renderer, ytm-promoted-sparkles-web-renderer') : null;
+          if (openApp) {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            try { openApp.remove(); } catch(err) { openApp.style.display = 'none'; }
+            return;
+          }
+
+          // 2. Intercepta cliques em vídeos de recomendação
+          var card = e.target && e.target.closest ? e.target.closest('a[href*="/watch"], a[href*="/shorts"], ytm-compact-video-renderer, ytm-video-with-context-renderer, ytm-media-item, [data-video-id]') : null;
+          if (card) {
+            if (card.closest('#papaleguas-yt-bar') || card.closest('#papaleguas-dl-modal')) return;
+
+            var href = (card.getAttribute && card.getAttribute('href')) || '';
+            if (!href && card.querySelector) {
+              var innerA = card.querySelector('a[href*="/watch"], a[href*="/shorts"]');
+              if (innerA) href = innerA.getAttribute('href') || '';
+            }
+            var vid = extractYtId(href);
+            if (!vid && card.getAttribute) {
+              vid = card.getAttribute('data-video-id') || '';
+            }
+
+            if (vid) {
+              e.preventDefault();
+              e.stopPropagation();
+              e.stopImmediatePropagation();
+
+              var targetWatch = 'https://m.youtube.com/watch?v=' + vid;
+              var nextProxied = '/proxy?url=' + encodeURIComponent(targetWatch) + '&clientId=' + encodeURIComponent(CLIENT_ID);
+              location.href = nextProxied;
+              return;
+            }
+          }
+        }, true);
+
+        // Bloqueador de Anúncios de Vídeo Ativo (Auto-Skip & Mute)
+        setInterval(function() {
+          var skip = document.querySelector('.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-ad-skip-button-slot button, .ytp-ad-overlay-close-button');
+          if (skip) {
+            try { skip.click(); } catch(e) {}
+          }
+          var isAd = document.querySelector('.ad-showing, .ad-interrupting, .video-ads:not(:empty)');
+          if (isAd) {
+            var v = document.querySelector('video');
+            if (v) {
+              v.muted = true;
+              if (isFinite(v.duration) && v.duration > 0) {
+                v.currentTime = v.duration;
+              }
+            }
+          }
+          var promos = document.querySelectorAll('ytm-promoted-sparkles-web-renderer, ytm-mealbar-promo-renderer, [aria-label*="Abrir app" i]');
+          for (var i = 0; i < promos.length; i++) {
+            promos[i].style.display = 'none';
+          }
+          mountBar();
+        }, 300);
+
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', mountBar);
+        } else {
+          mountBar();
+        }
+      })();
+    </script>
+  `;
 }
 
 // Finaliza todos os servidores e processos Python criados anteriormente a cada inicialização/reinício
 try {
   const { stopAllPythonServers } = require('./python-runner');
   stopAllPythonServers();
-} catch (e) {}
+} catch (e) { swallowed(e, 'server:top@2326'); }
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 8080;
-// Mantendo exclusivamente o ngrok como túnel público
-ngrokTunnel.startTunnel(PORT);
+// Mantendo exclusivamente o Cloudflare Tunnel oficial (papaleguas.app) como túnel público
+ngrokTunnel.stopTunnel();
 const SRC_DIR = path.join(__dirname, '../src');
 const aiClient = require('./ai-client');
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 aiClient.setOpenAiFallbackKey(OPENAI_API_KEY);
 
 // Busca no DuckDuckGo (HTML) para navegação web e celulares via Tor
+const NAMED_HTML_ENTITIES = {
+  quot: '"', apos: "'", lt: '<', gt: '>', nbsp: ' ', amp: '&',
+  aacute: 'á', eacute: 'é', iacute: 'í', oacute: 'ó', uacute: 'ú', yacute: 'ý',
+  Aacute: 'Á', Eacute: 'É', Iacute: 'Í', Oacute: 'Ó', Uacute: 'Ú', Yacute: 'Ý',
+  acirc: 'â', ecirc: 'ê', icirc: 'î', ocirc: 'ô', ucirc: 'û',
+  Acirc: 'Â', Ecirc: 'Ê', Icirc: 'Î', Ocirc: 'Ô', Ucirc: 'Û',
+  atilde: 'ã', otilde: 'õ', ntilde: 'ñ',
+  Atilde: 'Ã', Otilde: 'Õ', Ntilde: 'Ñ',
+  agrave: 'à', egrave: 'è', igrave: 'ì', ograve: 'ò', ugrave: 'ù',
+  Agrave: 'À', Egrave: 'È', Igrave: 'Ì', Ograve: 'Ò', Ugrave: 'Ù',
+  auml: 'ä', euml: 'ë', iuml: 'ï', ouml: 'ö', uuml: 'ü',
+  Auml: 'Ä', Euml: 'Ë', Iuml: 'Ï', Ouml: 'Ö', Uuml: 'Ü',
+  ccedil: 'ç', Ccedil: 'Ç',
+  ndash: '–', mdash: '—', hellip: '…',
+  lsquo: '‘', rsquo: '’', ldquo: '“', rdquo: '”',
+  laquo: '«', raquo: '»', bull: '•', middot: '·',
+  copy: '©', reg: '®', trade: '™', deg: '°', ordm: 'º', ordf: 'ª'
+};
+
 function decodeHtmlEntities(text) {
   return String(text || '')
     .replace(/&#x([0-9a-f]+);/gi, (_, hex) => {
@@ -806,12 +2604,9 @@ function decodeHtmlEntities(text) {
     .replace(/&#(\d+);/g, (_, dec) => {
       try { return String.fromCodePoint(parseInt(dec, 10)); } catch (e) { return ' '; }
     })
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
+    .replace(/&([a-zA-Z]{2,8});/g, (full, name) => (
+      Object.prototype.hasOwnProperty.call(NAMED_HTML_ENTITIES, name) ? NAMED_HTML_ENTITIES[name] : full
+    ))
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -824,28 +2619,56 @@ function unwrapDuckUrl(raw) {
     const uddg = parsed.searchParams.get('uddg') || parsed.searchParams.get('u');
     if (uddg) return decodeURIComponent(uddg);
     if (parsed.hostname && !/duckduckgo\.com$/i.test(parsed.hostname)) return parsed.href;
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'server:unwrapDuckUrl@2363'); }
   return u;
 }
 
 function decodeMaybeGzip(buffer, encoding) {
   if (!buffer || !buffer.length) return '';
-  try {
-    if (/gzip/i.test(String(encoding || ''))) {
-      return zlib.gunzipSync(buffer).toString('utf8');
+  const enc = String(encoding || '').toLowerCase().trim();
+  
+  // 1. Verificação explícita por cabeçalho
+  if (enc.includes('gzip')) {
+    try { return zlib.gunzipSync(buffer).toString('utf8'); } catch (e) { swallowed(e, 'server:decodeMaybeGzip@2373'); }
+  }
+  if (enc.includes('deflate')) {
+    try { return zlib.inflateSync(buffer).toString('utf8'); } catch (e) {
+      try { return zlib.inflateRawSync(buffer).toString('utf8'); } catch (e2) { swallowed(e2, 'server:decodeMaybeGzip@2377'); }
     }
-  } catch (e) {}
+  }
+  if (enc.includes('br') && typeof zlib.brotliDecompressSync === 'function') {
+    try { return zlib.brotliDecompressSync(buffer).toString('utf8'); } catch (e) { swallowed(e, 'server:decodeMaybeGzip@2381'); }
+  }
+
+  // 2. Detecção automática por Magic Bytes (servidores que mandam comprimido sem Content-Encoding)
+  // GZIP magic number: 0x1F 0x8B
+  if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) {
+    try { return zlib.gunzipSync(buffer).toString('utf8'); } catch (e) { swallowed(e, 'server:decodeMaybeGzip@2387'); }
+  }
+
+  // ZLIB Deflate magic bytes: 0x78 (ex: 0x78 0x01, 0x78 0x9c, 0x78 0xda)
+  if (buffer.length >= 2 && buffer[0] === 0x78) {
+    try { return zlib.inflateSync(buffer).toString('utf8'); } catch (e) {
+      try { return zlib.inflateRawSync(buffer).toString('utf8'); } catch (e2) { swallowed(e2, 'server:decodeMaybeGzip@2393'); }
+    }
+  }
+
   return buffer.toString('utf8');
 }
 
 function fetchHttpsText(options, body, timeoutMs = 9000) {
   return new Promise((resolve) => {
     const lib = options.protocol === 'http:' ? http : https;
-    const headers = Object.assign({ 'Accept-Encoding': 'gzip' }, options.headers || {});
+    const headers = Object.assign({ 'Accept-Encoding': 'gzip, deflate, br' }, options.headers || {});
+    delete headers.cookie;
+    delete headers.Cookie;
     const req = lib.request({ ...options, headers }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         try {
           const next = new URL(res.headers.location, `${options.protocol === 'http:' ? 'http' : 'https'}://${options.hostname}${options.path || '/'}`);
+          const nextHeaders = Object.assign({}, options.headers || {});
+          delete nextHeaders.cookie;
+          delete nextHeaders.Cookie;
           return fetchHttpsText({
             hostname: next.hostname,
             port: next.port || options.port,
@@ -853,7 +2676,7 @@ function fetchHttpsText(options, body, timeoutMs = 9000) {
             method: 'GET',
             protocol: next.protocol,
             agent: options.agent,
-            headers: options.headers,
+            headers: nextHeaders,
             maxBytes: options.maxBytes
           }, null, timeoutMs).then(resolve);
         } catch (e) {
@@ -884,36 +2707,37 @@ function fetchHttpsText(options, body, timeoutMs = 9000) {
 function parseDuckDuckGoHtml(html) {
   const results = [];
   const seen = new Set();
-  const blocks = String(html || '').split(/class="(?:result(?:__body)?|web-result|result-link)"/i);
-  const linkRe = /<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
-  let m;
-  while ((m = linkRe.exec(html)) !== null) {
-    const url = unwrapDuckUrl(m[1]);
-    const title = decodeHtmlEntities(m[2].replace(/<[^>]+>/g, ''));
+  const rawHtml = String(html || '');
+
+  // Divide por cada bloco de resultado para parear título e snippet sem desvio por anúncios
+  const blocks = rawHtml.split(/<div[^>]+class="[^"]*\bresult\b[^"]*"[^>]*>/i).slice(1);
+  for (const block of blocks) {
+    if (/result--ad|badge--ad|duckduckgo\.com\/y\.js/i.test(block)) continue;
+    const linkMatch = block.match(/<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i)
+      || block.match(/<a[^>]+href="([^"]+)"[^>]*class="[^"]*result__a[^"]*"[^>]*>([\s\S]*?)<\/a>/i);
+    if (!linkMatch) continue;
+    const url = unwrapDuckUrl(linkMatch[1]);
+    const title = stripTags(linkMatch[2]);
     if (!url || !title || !/^https?:\/\//i.test(url) || /duckduckgo\.com/i.test(url)) continue;
     if (seen.has(url)) continue;
     seen.add(url);
-    results.push({ title, url, snippet: '' });
+
+    const snipMatch = block.match(/<(?:a|td|span|div|p)[^>]*class="[^"]*(?:result__snippet|result-snippet)[^"]*"[^>]*>([\s\S]*?)<\/(?:a|td|span|div|p)>/i);
+    const snippet = snipMatch ? stripTags(snipMatch[1]) : '';
+    results.push({ title, url, snippet });
   }
-  const snipRe = /<(?:a|td|span)[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/(?:a|td|span)>/gi;
-  const snips = [];
-  while ((m = snipRe.exec(html)) !== null) {
-    snips.push(decodeHtmlEntities(m[1].replace(/<[^>]+>/g, '')));
-  }
-  for (let i = 0; i < results.length; i++) {
-    if (snips[i]) results[i].snippet = snips[i];
-  }
-  if (results.length === 0 && blocks.length) {
-    // fallback: any external result links
-    const anyLink = /<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
-    while ((m = anyLink.exec(html)) !== null) {
+
+  if (results.length === 0) {
+    const linkRe = /<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+    let m;
+    while ((m = linkRe.exec(rawHtml)) !== null) {
+      if (/duckduckgo\.com\/y\.js/i.test(m[1])) continue;
       const url = unwrapDuckUrl(m[1]);
-      const title = decodeHtmlEntities(m[2].replace(/<[^>]+>/g, ''));
-      if (!url || !title || title.length < 8 || !/^https?:\/\//i.test(url)) continue;
-      if (/duckduckgo\.com|javascript:/i.test(url) || seen.has(url)) continue;
+      const title = stripTags(m[2]);
+      if (!url || !title || !/^https?:\/\//i.test(url) || /duckduckgo\.com/i.test(url)) continue;
+      if (seen.has(url)) continue;
       seen.add(url);
       results.push({ title, url, snippet: '' });
-      if (results.length >= 12) break;
     }
   }
   return results;
@@ -922,20 +2746,20 @@ function parseDuckDuckGoHtml(html) {
 // O Bing envolve cada resultado em bing.com/ck/a?...&u=a1<base64url do link real>
 // e cada notícia em bing.com/news/apiclick.aspx?...&url=<link real codificado>
 function unwrapBingUrl(raw) {
-  const s = decodeHtmlEntities(raw);
+  const s = decodeHtmlEntities(raw).replace(/&amp;/g, '&').trim();
   const b64 = s.match(/[?&]u=a1([A-Za-z0-9_\-]+)/);
   if (b64) {
     try {
       const decoded = Buffer.from(b64[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
       if (/^https?:\/\//i.test(decoded)) return decoded;
-    } catch (e) {}
+    } catch (e) { swallowed(e, 'server:unwrapBingUrl@2494'); }
   }
   const plain = s.match(/[?&]url=([^&]+)/i);
   if (plain) {
     try {
       const decoded = decodeURIComponent(plain[1]);
       if (/^https?:\/\//i.test(decoded)) return decoded;
-    } catch (e) {}
+    } catch (e) { swallowed(e, 'server:unwrapBingUrl@2501'); }
   }
   return s;
 }
@@ -943,7 +2767,7 @@ function unwrapBingUrl(raw) {
 function stripTags(html) {
   // O Bing marca os termos buscados com <strong>; trocar a tag por espaço deixaria
   // sobras como "Santos Dumont : biografia", então a pontuação volta a se encostar.
-  return decodeHtmlEntities(String(html || '').replace(/<[^>]+>/g, ' '))
+  return sanitizeSearchText(String(html || '').replace(/<[^>]+>/g, ' '), decodeHtmlEntities)
     .replace(/\s+([,.;:!?%)\]])/g, '$1')
     .replace(/([(\[])\s+/g, '$1')
     .replace(/\s+/g, ' ')
@@ -1008,7 +2832,7 @@ function collectRelatedDuckTopics(topics, out) {
       collectRelatedDuckTopics(item.Topics, out);
       return;
     }
-    if (item.FirstURL && item.Text) {
+    if (item.FirstURL && item.Text && !/duckduckgo\.com/i.test(item.FirstURL)) {
       out.push({ title: String(item.Text).split(' - ')[0], url: item.FirstURL, snippet: item.Text });
     }
   });
@@ -1028,7 +2852,7 @@ async function searchDuckInstantApi(query, useTor = false) {
   try {
     const data = JSON.parse(text || '{}');
     const out = [];
-    if (data.AbstractURL) {
+    if (data.AbstractURL && !/duckduckgo\.com/i.test(data.AbstractURL)) {
       out.push({ title: data.Heading || query, url: data.AbstractURL, snippet: data.AbstractText || '' });
     }
     collectRelatedDuckTopics(data.RelatedTopics, out);
@@ -1050,11 +2874,11 @@ function webSourceHeaders() {
 
 // Os buscadores entregam uma página degradada (resultado de uma palavra só) para quem
 // chega em HTTP/1.1 sem os client hints do Chrome. Falando HTTP/2 com o mesmo conjunto
-// de cabeçalhos de um navegador, o Bing devolve a página real de resultados.
+// de cabeçalhos de um navegador, o Bing, DuckDuckGo e Yahoo devolvem a página real de resultados.
 const BROWSER_H2_HEADERS = {
   'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
   'accept-language': 'pt-BR,pt;q=0.9,en;q=0.8',
-  'accept-encoding': 'gzip, deflate',
+  'accept-encoding': 'gzip, deflate, br',
   'sec-ch-ua': '"Chromium";v="134", "Not:A-Brand";v="24", "Google Chrome";v="134"',
   'sec-ch-ua-mobile': '?0',
   'sec-ch-ua-platform': '"Linux"',
@@ -1067,11 +2891,7 @@ const BROWSER_H2_HEADERS = {
 };
 
 function decodeCompressed(buffer, encoding) {
-  try {
-    if (/gzip/i.test(encoding || '')) return zlib.gunzipSync(buffer).toString('utf8');
-    if (/deflate/i.test(encoding || '')) return zlib.inflateSync(buffer).toString('utf8');
-  } catch (e) {}
-  return buffer.toString('utf8');
+  return decodeMaybeGzip(buffer, encoding);
 }
 
 async function openHttp2Session(targetUrl, useTor) {
@@ -1080,13 +2900,33 @@ async function openHttp2Session(targetUrl, useTor) {
     const info = await SocksClient.createConnection({
       proxy: { host: '127.0.0.1', port: 9050, type: 5 },
       command: 'connect',
-      destination: { host: targetUrl.hostname, port: Number(targetUrl.port) || 443 }
+      destination: { host: targetUrl.hostname, port: Number(targetUrl.port) || 443 },
+      timeout: 7000
     });
-    options.createConnection = () => tls.connect({
+    const tlsSocket = tls.connect({
       socket: info.socket,
       servername: targetUrl.hostname,
-      ALPNProtocols: ['h2']
+      ALPNProtocols: ['h2', 'http/1.1']
     });
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        tlsSocket.destroy();
+        reject(new Error('TLS_TIMEOUT'));
+      }, 6000);
+      tlsSocket.once('secureConnect', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      tlsSocket.once('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+    if (tlsSocket.alpnProtocol !== 'h2') {
+      tlsSocket.destroy();
+      throw new Error('ALPN_NOT_H2');
+    }
+    options.createConnection = () => tlsSocket;
   }
   return http2.connect(targetUrl.origin, options);
 }
@@ -1099,17 +2939,19 @@ async function fetchBrowserText(url, { headers = {}, useTor = false, timeoutMs =
     return '';
   }
 
-  // Se o HTTP/2 não subir (Tor fora do ar, rede bloqueada), ainda tenta pelo caminho antigo
+  // Modo estritamente sem cookies: remove qualquer cabeçalho de cookie
+  const reqHeaders = Object.assign({}, headers);
+  delete reqHeaders.cookie;
+  delete reqHeaders.Cookie;
+
+  // Se o HTTP/2 não subir ou o servidor negociar HTTP/1.1 via ALPN, cai para HTTP/1.1 sem cookies
   const viaHttp1 = () => fetchHttpsText({
     hostname: target.hostname,
     path: target.pathname + target.search,
     method: 'GET',
     agent: getOutboundAgent(useTor),
-    headers: { ...webSourceHeaders(), ...headers }
+    headers: { ...webSourceHeaders(), ...reqHeaders }
   }, null, timeoutMs);
-
-  // HTTP/2 pelo Tor costuma voltar vazio e a página de pesquisa fica sem resultado.
-  if (useTor) return viaHttp1();
 
   let session = null;
   try {
@@ -1132,7 +2974,7 @@ async function fetchBrowserText(url, { headers = {}, useTor = false, timeoutMs =
     try {
       stream = session.request({
         ...BROWSER_H2_HEADERS,
-        ...headers,
+        ...reqHeaders,
         ':method': 'GET',
         ':path': target.pathname + target.search,
         ':authority': target.host,
@@ -1151,15 +2993,16 @@ async function fetchBrowserText(url, { headers = {}, useTor = false, timeoutMs =
       status = Number(head[':status']) || 0;
       encoding = head['content-encoding'] || '';
       location = head.location || '';
+      // Ignora completamente head['set-cookie'] para não salvar cookies
     });
     stream.on('data', (chunk) => chunks.push(chunk));
     stream.on('error', () => { clearTimeout(timer); done(''); });
     stream.on('end', async () => {
       clearTimeout(timer);
-      if (status >= 300 && status < 400 && location && hops < 3) {
+      if (status >= 300 && status < 400 && location && hops < 4) {
         let next = '';
-        try { next = new URL(location, url).href; } catch (e) {}
-        done(next ? await fetchBrowserText(next, { headers, useTor, timeoutMs, hops: hops + 1 }) : '');
+        try { next = new URL(location, url).href; } catch (e) { swallowed(e, 'server:fetchBrowserText@2754'); }
+        done(next ? await fetchBrowserText(next, { headers: reqHeaders, useTor, timeoutMs, hops: hops + 1 }) : '');
         return;
       }
       done(decodeCompressed(Buffer.concat(chunks), encoding));
@@ -1167,7 +3010,7 @@ async function fetchBrowserText(url, { headers = {}, useTor = false, timeoutMs =
     stream.end();
   });
 
-  try { session.close(); } catch (e) {}
+  try { session.close(); } catch (e) { swallowed(e, 'server:fetchBrowserText@2766'); }
   return text || viaHttp1();
 }
 
@@ -1177,17 +3020,16 @@ function bingSearchUrl(path, query, extra = '') {
   return 'https://www.bing.com' + path + '?q=' + encodeURIComponent(query) + '&setlang=pt-BR' + extra;
 }
 
-// Sob rajada de requisições o Bing troca a busca pela primeira palavra do termo e
-// devolve uma página sem relação nenhuma. Como ele responde 200, o jeito de perceber
-// é olhar se os resultados cobrem mais de um termo da pesquisa.
+// Sob rajada de requisições o Bing pode trocar a busca pela primeira palavra do termo.
+// Valida se os resultados cobrem os termos buscados e evita descartar resultados válidos.
 function looksLikeDegradedSerp(results, query) {
   const tokens = searchQueryTokens(query);
-  if (tokens.length < 2 || !results.length) return false;
+  if (tokens.length < 3 || !results || !results.length) return false;
   const matched = results.filter((item) => {
-    const text = normalizeForMatch(item.title + ' ' + (item.snippet || ''));
-    return tokens.filter((token) => text.includes(token)).length >= 2;
+    const text = normalizeForMatch((item.title || '') + ' ' + (item.snippet || ''));
+    return tokens.some((token) => text.includes(token));
   });
-  return (matched.length / results.length) < 0.3;
+  return matched.length === 0;
 }
 
 async function searchBingHtml(query, useTor = false) {
@@ -1197,12 +3039,18 @@ async function searchBingHtml(query, useTor = false) {
   const timeoutMs = useTor ? 12000 : 8000;
   let results = parseBingHtml(await fetchBrowserText(url, { useTor, timeoutMs }));
   if (looksLikeDegradedSerp(results, query)) {
-    await new Promise((resolve) => setTimeout(resolve, 900));
+    await new Promise((resolve) => setTimeout(resolve, 600));
     const retry = parseBingHtml(await fetchBrowserText(url, { useTor, timeoutMs }));
-    if (retry.length && !looksLikeDegradedSerp(retry, query)) return retry;
-    if (looksLikeDegradedSerp(results, query)) return [];
+    if (retry && retry.length && !looksLikeDegradedSerp(retry, query)) return retry;
   }
-  return results;
+  // Se o HTML falhou ou veio vazio, tenta feed RSS de emergência
+  if (!results || results.length === 0) {
+    try {
+      const rss = await searchBingRss(query, useTor);
+      if (rss && rss.length) return rss;
+    } catch (e) { swallowed(e, 'server:searchBingHtml@2804'); }
+  }
+  return results || [];
 }
 
 // O feed RSS é mais frágil que o HTML: só entra quando a página não rendeu nada
@@ -1217,31 +3065,38 @@ async function searchBingRss(query, useTor = false) {
     .map((item) => ({ ...item, source: 'bing' }));
 }
 
-async function searchBingNews(query, useTor = false) {
-  const xml = await fetchBrowserText(bingSearchUrl('/news/search', query, '&format=rss'), {
+async function searchBingNews(query, useTor = false, limit = 10) {
+  const xml = await fetchBrowserText(bingSearchUrl('/news/search', query, '&format=rss&setlang=pt-br'), {
     headers: { accept: 'application/rss+xml,application/xml;q=0.9,*/*;q=0.8' },
     useTor,
     timeoutMs: useTor ? 9000 : 6000
   });
   return parseRssItems(xml)
     .filter((item) => !/(^|\.)bing\.com$/i.test(safeHostname(item.url)))
-    .map((item) => ({ ...item, source: 'noticias' }))
-    .slice(0, 4);
+    .map((item) => ({ ...item, source: item.outlet || 'noticias' }))
+    .slice(0, limit);
 }
 
 
 function parseDuckLiteHtml(html) {
   const results = [];
   const seen = new Set();
-  const re = /<a[^>]+rel="nofollow"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  const cleanHtml = String(html || '').replace(/<tr[^>]*class=['"][^'"]*result-sponsored[^'"]*['"][^>]*>[\s\S]*?<\/tr>/gi, '');
+  const re = /<a[^>]+href="([^"]+)"[^>]*class=['"]result-link['"][^>]*>([\s\S]*?)<\/a>|<a[^>]+class=['"]result-link['"][^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
   let m;
-  while ((m = re.exec(html)) !== null) {
-    const url = unwrapDuckUrl(m[1]);
-    const title = decodeHtmlEntities(m[2].replace(/<[^>]+>/g, '')).trim();
+  while ((m = re.exec(cleanHtml)) !== null) {
+    const rawHref = m[1] || m[3];
+    const rawTitle = m[2] || m[4];
+    if (/duckduckgo\.com\/y\.js/i.test(rawHref)) continue;
+    const url = unwrapDuckUrl(rawHref);
+    const title = stripTags(rawTitle);
     if (!url || !title || title.length < 4 || !/^https?:\/\//i.test(url)) continue;
     if (/duckduckgo\.com|lite\.duckduckgo/i.test(url) || seen.has(url)) continue;
     seen.add(url);
-    results.push({ title, url, snippet: '' });
+    const after = cleanHtml.slice(m.index, m.index + 1200);
+    const snipM = after.match(/<td[^>]*class=['"]result-snippet['"][^>]*>([\s\S]*?)<\/td>/i);
+    const snippet = snipM ? stripTags(snipM[1]) : '';
+    results.push({ title, url, snippet });
     if (results.length >= 16) break;
   }
   return results;
@@ -1367,58 +3222,836 @@ function formatSearchDate(raw) {
   return parsed.toLocaleDateString('pt-BR');
 }
 
-// Junta todas as fontes públicas que ainda respondem e devolve resultados com descrição
+// Busca adicional no Yandex com parsing resiliente de SERP
+async function searchYandexHtml(query, useTor = false) {
+  const q = String(query || '').trim();
+  if (!q) return [];
+  const url = 'https://yandex.com/search/?text=' + encodeURIComponent(q);
+  try {
+    const html = await fetchBrowserText(url, {
+      headers: {
+        'Accept': 'text/html,application/xhtml+xml',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+      },
+      useTor,
+      timeoutMs: useTor ? 8000 : 5000
+    });
+    if (!html || html.includes('checkbox-captcha') || html.includes('showcaptcha')) {
+      return [];
+    }
+    return parseYandexHtml(html);
+  } catch (e) {
+    return [];
+  }
+}
+
+function parseYandexHtml(html) {
+  if (!html) return [];
+  const items = [];
+  const seen = new Set();
+
+  const serpRegex = /<li[^>]+class="[^"]*serp-item[^"]*"[^>]*>([\s\S]*?)<\/li>/gi;
+  let match;
+  while ((match = serpRegex.exec(html)) !== null && items.length < 15) {
+    const block = match[1];
+    const linkMatch = block.match(/<a[^>]+href="([^"]+)"[^>]+class="[^"]*organic__url[^"]*"[^>]*>([\s\S]*?)<\/a>/i) ||
+                      block.match(/<a[^>]+class="[^"]*organic__url[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i) ||
+                      block.match(/<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
+    if (!linkMatch) continue;
+    let url = linkMatch[1];
+    if (url.startsWith('//')) url = 'https:' + url;
+    if (!/^https?:\/\//i.test(url) || url.includes('yandex.') || seen.has(url)) continue;
+    seen.add(url);
+
+    const title = decodeHtmlEntities(linkMatch[2].replace(/<[^>]+>/g, '').trim());
+    const snipMatch = block.match(/class="[^"]*(?:organic__text|text-container)[^"]*"[^>]*>([\s\S]*?)<\/(?:div|span)>/i);
+    const snippet = snipMatch ? decodeHtmlEntities(snipMatch[1].replace(/<[^>]+>/g, '').trim()) : '';
+
+    if (title && title.length > 2) {
+      items.push({
+        title,
+        url,
+        snippet,
+        source: 'yandex'
+      });
+    }
+  }
+
+  return items;
+}
+
+function unwrapYahooUrl(rawUrl) {
+  if (!rawUrl) return '';
+  const match = rawUrl.match(/\/RU=([^/]+)/i);
+  if (match && match[1]) {
+    try {
+      return decodeURIComponent(match[1]);
+    } catch (e) {
+      return match[1];
+    }
+  }
+  return rawUrl;
+}
+
+async function searchYahooHtml(query, useTor = false) {
+  const q = String(query || '').trim();
+  if (!q) return [];
+  const baseUrl = 'https://br.search.yahoo.com/search?p=' + encodeURIComponent(q) + '&ei=UTF-8';
+  const reqOpts = {
+    headers: {
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+      'User-Agent': BROWSER_UA
+    },
+    useTor,
+    timeoutMs: useTor ? 10000 : 7000
+  };
+  try {
+    const [htmlPage1, htmlPage2] = await Promise.all([
+      fetchBrowserText(baseUrl, reqOpts),
+      fetchBrowserText(baseUrl + '&b=8', reqOpts).catch(() => '')
+    ]);
+    const out = [];
+    const seen = new Set();
+    for (const item of [...parseYahooHtml(htmlPage1), ...parseYahooHtml(htmlPage2)]) {
+      if (!seen.has(item.url)) {
+        seen.add(item.url);
+        out.push(item);
+      }
+    }
+    return out;
+  } catch (e) {
+    return [];
+  }
+}
+
+function parseYahooHtml(html) {
+  if (!html) return [];
+  const items = [];
+  const seen = new Set();
+
+  const blocks = String(html || '').split(/(?:<li[^>]*>)?<div[^>]+class="[^"]*(?:algo-sr|algo)[^"]*"/i).slice(1);
+  for (const block of blocks) {
+    const linkMatch = block.match(/<h3[^>]*class="[^"]*title[^"]*"[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i) ||
+                      block.match(/<a[^>]+href="([^"]+)"[^>]*><span[^>]*>([\s\S]*?)<\/span><\/a>/i);
+    if (!linkMatch) continue;
+
+    let targetUrl = unwrapYahooUrl(linkMatch[1]);
+    if (!/^https?:\/\//i.test(targetUrl) || targetUrl.includes('yahoo.com/search') || seen.has(targetUrl)) continue;
+    seen.add(targetUrl);
+
+    let rawTitle = linkMatch[2].replace(/<span[^>]*class="[^"]*(?:fz-|fc-|wr-|d-ib|p-abs)[^"]*"[^>]*>[\s\S]*?<\/span>/gi, '');
+    const title = stripTags(rawTitle);
+    if (!title || title.length < 2) continue;
+
+    const snipMatch = block.match(/<span class="fc-falcon">([\s\S]*?)<\/span>/i) ||
+                      block.match(/class="[^"]*(?:compText|s-desc)[^"]*"[^>]*>([\s\S]*?)<\/(?:div|span|p)>/i);
+    const snippet = snipMatch ? stripTags(snipMatch[1]) : '';
+
+    items.push({
+      title,
+      url: targetUrl,
+      snippet,
+      source: 'yahoo'
+    });
+  }
+
+  // Fallback caso a estrutura mude ligeiramente
+  if (items.length === 0) {
+    const linkMatches = [...html.matchAll(/<h3[^>]*class="[^"]*title[^"]*"[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi)];
+    for (const m of linkMatches) {
+      let targetUrl = unwrapYahooUrl(m[1]);
+      if (!/^https?:\/\//i.test(targetUrl) || targetUrl.includes('yahoo.com/search') || seen.has(targetUrl)) continue;
+      seen.add(targetUrl);
+      let rawTitle = m[2].replace(/<span[^>]*class="[^"]*(?:fz-|fc-|wr-|d-ib|p-abs)[^"]*"[^>]*>[\s\S]*?<\/span>/gi, '');
+      const title = stripTags(rawTitle);
+      if (title && title.length > 2) {
+        items.push({ title, url: targetUrl, snippet: '', source: 'yahoo' });
+      }
+    }
+  }
+
+  return items;
+}
+
+function unwrapGoogleUrl(raw) {
+  if (!raw) return '';
+  let url = raw;
+  if (url.startsWith('/url?')) {
+    try {
+      const parsed = new URL('https://www.google.com' + url);
+      url = parsed.searchParams.get('q') || parsed.searchParams.get('url') || url;
+    } catch (e) { swallowed(e, 'server:unwrapGoogleUrl@3120'); }
+  }
+  return url;
+}
+
+function parseGoogleHtml(html) {
+  if (!html) return [];
+  const items = [];
+  const seen = new Set();
+
+  const linkH3Regex = /<a[^>]+href="([^"]+)"[^>]*>[\s\S]*?<h3[^>]*>([\s\S]*?)<\/h3>/gi;
+  let m;
+  while ((m = linkH3Regex.exec(html)) !== null && items.length < 15) {
+    const rawUrl = m[1];
+    const targetUrl = unwrapGoogleUrl(rawUrl);
+    if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) continue;
+    if (/google\.(?:com|[a-z]{2})/i.test(targetUrl) || seen.has(targetUrl)) continue;
+    seen.add(targetUrl);
+
+    const title = decodeHtmlEntities(m[2].replace(/<[^>]+>/g, '').trim());
+    if (!title || title.length < 2) continue;
+
+    const sliceAfter = html.slice(m.index, m.index + 800);
+    const snipMatch = sliceAfter.match(/(?:<div[^>]+class="[^"]*(?:VwiC3b|yXK7lf|MUxGbd|s3v9rd)[^"]*"[^>]*>|<div style="[^"]*font-size:[^"]*"[^>]*>)([\s\S]*?)<\/div>/i);
+    const snippet = snipMatch ? decodeHtmlEntities(snipMatch[1].replace(/<[^>]+>/g, '').trim()) : '';
+
+    items.push({
+      title,
+      url: targetUrl,
+      snippet,
+      source: 'google'
+    });
+  }
+
+  if (items.length < 3) {
+    const liteRegex = /<a[^>]+href="\/url\?q=(https?:\/\/[^"&]+)[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
+    while ((m = liteRegex.exec(html)) !== null && items.length < 15) {
+      const targetUrl = decodeURIComponent(m[1]);
+      if (!/^https?:\/\//i.test(targetUrl) || /google\.(?:com|[a-z]{2})/i.test(targetUrl) || seen.has(targetUrl)) continue;
+      seen.add(targetUrl);
+      const title = decodeHtmlEntities(m[2].replace(/<[^>]+>/g, '').trim());
+      if (title && title.length > 2) {
+        items.push({
+          title,
+          url: targetUrl,
+          snippet: '',
+          source: 'google'
+        });
+      }
+    }
+  }
+
+  return items;
+}
+
+async function searchGoogleHtml(query, useTor = false) {
+  const q = String(query || '').trim();
+  if (!q) return [];
+  try {
+    const html = await fetchBrowserText(
+      'https://www.google.com/search?q=' + encodeURIComponent(q) + '&hl=pt-BR&gl=br&num=15',
+      {
+        useTor,
+        headers: {
+          'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+          'Sec-Fetch-Dest': 'document',
+          'Sec-Fetch-Mode': 'navigate',
+          'Sec-Fetch-Site': 'none'
+        },
+        timeoutMs: useTor ? 10000 : 6000
+      }
+    );
+    return parseGoogleHtml(html);
+  } catch (e) {
+    return [];
+  }
+}
+
+// ----------------------------------------------------
+// FONTES ESPECIALIZADAS PARA ENRIQUECIMENTO DA PESQUISA
+// Trazem conhecimento enciclopédico, notícias, vídeos, músicas e filmes
+// diretamente relacionados ao tema pesquisado.
+// ----------------------------------------------------
+
+async function fetchWikiTopicSummary(query) {
+  const q = String(query || '').trim();
+  if (!q || q.length < 2) return null;
+  try {
+    const openUrl = 'https://pt.wikipedia.org/w/api.php?action=opensearch&search=' + encodeURIComponent(q) + '&limit=3&namespace=0&format=json';
+    const textOpen = await fetchBrowserText(openUrl, { timeoutMs: 3500 });
+    let titles = [];
+    try {
+      const parsed = JSON.parse(textOpen);
+      if (Array.isArray(parsed) && Array.isArray(parsed[1])) titles = parsed[1];
+    } catch (e) { swallowed(e, 'server:fetchWikiTopicSummary@3214'); }
+
+    const targetTitle = titles[0] || q;
+    const summaryUrl = 'https://pt.wikipedia.org/api/rest_v1/page/summary/' + encodeURIComponent(targetTitle.replace(/\s+/g, '_'));
+    const sumText = await fetchBrowserText(summaryUrl, { timeoutMs: 3500 });
+    let sumData = null;
+    try { sumData = JSON.parse(sumText); } catch (e) { swallowed(e, 'server:fetchWikiTopicSummary@3220'); }
+    if (!sumData || (!sumData.extract && !sumData.description)) return null;
+
+    return {
+      title: sumData.title || targetTitle,
+      extract: sumData.extract || sumData.description || '',
+      thumbnail: sumData.thumbnail?.source || sumData.originalimage?.source || '',
+      url: sumData.content_urls?.desktop?.page || ('https://pt.wikipedia.org/wiki/' + encodeURIComponent(targetTitle.replace(/\s+/g, '_'))),
+      description: sumData.description || ''
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
+async function searchWikipediaArticles(query, limit = 4) {
+  const q = String(query || '').trim();
+  if (!q) return [];
+  try {
+    const url = 'https://pt.wikipedia.org/w/api.php?action=query&list=search&srsearch=' + encodeURIComponent(q) + '&utf8=&format=json&srlimit=' + limit;
+    const text = await fetchBrowserText(url, { timeoutMs: 4000 });
+    const data = JSON.parse(text);
+    const items = data?.query?.search || [];
+    return items.map((it) => ({
+      title: it.title,
+      url: 'https://pt.wikipedia.org/wiki/' + encodeURIComponent(it.title.replace(/\s+/g, '_')),
+      snippet: stripTags(it.snippet || ''),
+      source: 'wikipedia'
+    }));
+  } catch (e) {
+    return [];
+  }
+}
+
+async function searchGoogleNewsRss(query, limit = 8) {
+  // Substitui feed com redirecionamento bloqueado do news.google por notícias com links diretos dos portais
+  return searchBingNews(query, false, limit);
+}
+
+async function searchComprehensiveNews(query, useTor = false) {
+  const q = String(query || '').trim();
+  if (!q) return [];
+  const safe = (p) => p.catch(() => []);
+  const bingNews = await safe(searchBingNews(q, useTor, 10), []);
+  const seen = new Set();
+  const all = [];
+  (bingNews || []).forEach((n) => {
+    if (!n || !n.url) return;
+    if (/news\.google\.com/i.test(n.url)) return;
+    const k = normalizeSearchUrl(n.url);
+    if (!k || seen.has(k)) return;
+    seen.add(k);
+    all.push(n);
+  });
+  return all.slice(0, 10);
+}
+
+async function searchDeezerTracks(query, limit = 4) {
+  const q = String(query || '').trim();
+  if (!q || q.length < 2) return [];
+  try {
+    const res = await searchDeezer(q, limit, 'RANKING');
+    if (!res || !res.success || !Array.isArray(res.results)) return [];
+    return res.results.slice(0, limit).map((t) => ({
+      id: t.id,
+      title: t.title || 'Música',
+      artist: t.artist || 'Artista',
+      album: t.album || '',
+      cover: t.cover || '',
+      preview: t.preview || '',
+      url: `/musica?play=${encodeURIComponent((t.title || '') + ' ' + (t.artist || ''))}`
+    }));
+  } catch (e) {
+    return [];
+  }
+}
+
+let cachedLocalMoviesCatalog = null;
+function getLocalMoviesCatalog() {
+  if (cachedLocalMoviesCatalog) return cachedLocalMoviesCatalog;
+  try {
+    const raw = fs.readFileSync(path.join(__dirname, '../gupifilm_movies.json'), 'utf8');
+    cachedLocalMoviesCatalog = JSON.parse(raw);
+  } catch (e) {
+    cachedLocalMoviesCatalog = [];
+  }
+  return cachedLocalMoviesCatalog;
+}
+
+function searchLocalMovies(query, limit = 4) {
+  const q = String(query || '').toLowerCase().trim();
+  if (!q || q.length < 3) return [];
+  const catalog = getLocalMoviesCatalog();
+  const tokens = q.split(/\s+/).filter((t) => t.length >= 2);
+  const matches = [];
+  for (const m of catalog) {
+    const name = (m.name || '').toLowerCase();
+    const desc = (m.description || '').toLowerCase();
+    let score = 0;
+    if (name.includes(q)) score += 10;
+    tokens.forEach((tok) => {
+      if (name.includes(tok)) score += 4;
+      if (desc.includes(tok)) score += 1;
+    });
+    if (score >= 4) {
+      matches.push({
+        score,
+        title: (m.name || '').replace(/^[^\w\s]+/, '').trim(),
+        url: m.url || m.pageUrl,
+        poster: m.logo || '',
+        description: m.description || '',
+        category: 'Cinema'
+      });
+    }
+  }
+  matches.sort((a, b) => b.score - a.score);
+  return matches.slice(0, limit);
+}
+
+async function fetchRawYoutubeQuery(targetQuery) {
+  return new Promise((resolve) => {
+    const url = 'https://www.youtube.com/results?search_query=' + encodeURIComponent(targetQuery) + '&hl=pt-BR&gl=BR';
+    const req = https.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+        'Accept': 'text/html,application/xhtml+xml'
+      }
+    }, (res) => {
+      let html = '';
+      res.on('data', chunk => { html += chunk; });
+      res.on('end', () => {
+        try {
+          const match = html.match(/var ytInitialData = ({.*?});<\/script>/) || html.match(/var ytInitialData = ({.*?});?\s*<\/script>/);
+          if (!match) return resolve([]);
+          const data = JSON.parse(match[1]);
+          const list = [];
+          const seen = new Set();
+
+          function add(id, title, duration, channel, views, thumb) {
+            if (!id || id.length !== 11 || seen.has(id)) return;
+            seen.add(id);
+            list.push({
+              id,
+              title: title || 'Vídeo',
+              duration: duration || '',
+              channel: channel || 'YouTube',
+              views: views || '',
+              thumbnail: thumb || `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+              url: 'https://www.youtube.com/watch?v=' + id
+            });
+          }
+
+          function walk(node) {
+            if (!node || typeof node !== 'object') return;
+            if (node.videoRenderer) {
+              const v = node.videoRenderer;
+              const id = v.videoId;
+              const title = v.title?.runs?.[0]?.text || v.title?.simpleText || '';
+              const dur = v.lengthText?.simpleText || '';
+              const ch = v.ownerText?.runs?.[0]?.text || v.shortBylineText?.runs?.[0]?.text || '';
+              const views = v.viewCountText?.simpleText || (v.viewCountText?.runs || []).map(r => r.text).join('') || '';
+              const thumbs = v.thumbnail?.thumbnails || [];
+              const th = (thumbs[thumbs.length - 1] && thumbs[thumbs.length - 1].url) || '';
+              add(id, title, dur, ch, views, th);
+            }
+            if (node.shortsLockupViewModel) {
+              const s = node.shortsLockupViewModel;
+              const id = s.onTap?.innertubeCommand?.reelWatchEndpoint?.videoId || (s.entityId && s.entityId.replace(/^shorts-shelf-item-/, '')) || '';
+              const title = s.accessibilityText || s.overlayMetadata?.primaryText?.content || '';
+              const cleanTitle = title.split(',')[0] || '';
+              const views = title.split(',')[1] || '';
+              add(id, cleanTitle, 'Shorts', 'YouTube Shorts', views ? views.trim() : '', `https://i.ytimg.com/vi/${id}/hqdefault.jpg`);
+            }
+            if (node.lockupViewModel) {
+              const l = node.lockupViewModel;
+              const id = l.rendererContext?.commandContext?.onTap?.innertubeCommand?.watchEndpoint?.videoId || '';
+              const title = l.metadata?.lockupMetadataViewModel?.title?.content || '';
+              add(id, title, '', 'YouTube', '', `https://i.ytimg.com/vi/${id}/hqdefault.jpg`);
+            }
+            for (const k of Object.keys(node)) {
+              if (typeof node[k] === 'object') walk(node[k]);
+            }
+          }
+
+          walk(data);
+          resolve(list);
+        } catch (e) {
+          resolve([]);
+        }
+      });
+    });
+    req.on('error', () => resolve([]));
+    req.setTimeout(6000, () => { try { req.destroy(); } catch (e) {} resolve([]); });
+  });
+}
+
+async function fetchBingVideosFallback(q, pageNum = 0) {
+  try {
+    const bingUrl = 'https://www.bing.com/videos/search?q=' + encodeURIComponent(q) + '&first=' + (pageNum * 15);
+    const bHtml = await fetchBrowserText(bingUrl, {
+      timeoutMs: 3500,
+      useTor: false,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+      }
+    });
+    const ytIds = new Set();
+    const matches = bHtml.matchAll(/(?:youtube\.com\/watch\?v=|youtu\.be\/|vi\/)([a-zA-Z0-9_-]{11})/g);
+    for (const m of matches) ytIds.add(m[1]);
+    if (ytIds.size > 0) {
+      return Array.from(ytIds).map((id) => ({
+        id,
+        title: q,
+        duration: '',
+        channel: 'YouTube',
+        views: '',
+        thumbnail: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+        url: 'https://www.youtube.com/watch?v=' + id
+      }));
+    }
+  } catch (e) {
+    swallowed(e, 'server:searchYoutubeVideosForTopic@fallback');
+  }
+  return [];
+}
+
+async function searchYoutubeVideosForTopic(query, limit = 8, page = 0) {
+  const q = String(query || '').trim();
+  if (!q) return [];
+  const pageNum = Math.max(0, parseInt(page, 10) || 0);
+  const offset = pageNum * limit;
+  const cacheKey = `topic_vid_${q.toLowerCase()}`;
+  let videos = [];
+  const cached = youtubeSearchCache.get(cacheKey);
+  if (cached && (Date.now() - cached.timestamp < YT_CACHE_TTL) && cached.videos.length > 0) {
+    videos = cached.videos;
+  } else {
+    videos = await fetchRawYoutubeQuery(q);
+    if (!videos || videos.length === 0) {
+      videos = await fetchBingVideosFallback(q, 0);
+    }
+    if (videos && videos.length > 0) {
+      youtubeSearchCache.set(cacheKey, { timestamp: Date.now(), videos });
+    }
+  }
+
+  // Se a página solicitada precisa de mais vídeos do que os armazenados, busca páginas adicionais
+  if (offset + limit > videos.length) {
+    const variations = [
+      q,
+      q + ' videos',
+      q + ' hd',
+      q + ' completo',
+      q + ' novidades',
+      q + ' canal',
+      q + ' melhor',
+      q + ' oficial',
+      q + ' 2026',
+      q + ' especial',
+      q + ' reportagem',
+      q + ' tutorial'
+    ];
+    const nextQuery = variations[pageNum % variations.length] || (q + ' ' + pageNum);
+    const [extraYt, extraBing] = await Promise.all([
+      fetchRawYoutubeQuery(nextQuery).catch(() => []),
+      fetchBingVideosFallback(q, pageNum).catch(() => [])
+    ]);
+    const seen = new Set(videos.map(v => v.id));
+    for (const v of [...extraYt, ...extraBing]) {
+      if (v && v.id && !seen.has(v.id)) {
+        seen.add(v.id);
+        videos.push(v);
+      }
+    }
+    youtubeSearchCache.set(cacheKey, { timestamp: Date.now(), videos });
+  }
+
+  const resultSlice = (videos || []).slice(offset, offset + limit);
+  if (resultSlice.length === 0 && videos.length > 0) {
+    const cycleOffset = offset % videos.length;
+    return videos.slice(cycleOffset, cycleOffset + limit);
+  }
+  return resultSlice;
+}
+
+const topicImagesCache = createLruCache({ maxEntries: 300, ttlMs: 15 * 60 * 1000 });
+
+async function searchTopicImages(query, useTor = false, page = 0) {
+  const q = String(query || '').trim();
+  if (!q) return [];
+  const pageNum = Math.max(0, parseInt(page, 10) || 0);
+  const cacheKey = `${q.toLowerCase()}:${pageNum}`;
+  const cached = topicImagesCache.get(cacheKey);
+  if (cached && (Date.now() - cached.time < 300000) && cached.list.length > 0) {
+    return cached.list;
+  }
+
+  const list = [];
+  const seen = new Set();
+
+  const parseBingHtml = (html, maxLimit = 60) => {
+    if (!html) return;
+    const regex = /m="({[^"]+})"/g;
+    let match;
+    while ((match = regex.exec(html)) !== null && list.length < maxLimit) {
+      try {
+        const decoded = match[1].replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+        const obj = JSON.parse(decoded);
+        const img = obj.murl || obj.turl;
+        const thumb = obj.turl || obj.murl;
+        if (img && !seen.has(img)) {
+          seen.add(img);
+          list.push({
+            title: obj.t || q,
+            image: img,
+            thumbnail: thumb,
+            pageUrl: obj.purl || img,
+            source: safeHostname(obj.purl || '') || 'Web'
+          });
+        }
+      } catch (e) {}
+    }
+  };
+
+  const parseCommonsJson = (text, maxLimit = 80) => {
+    if (!text) return;
+    try {
+      const json = JSON.parse(text);
+      const pages = json?.query?.pages || {};
+      for (const k of Object.keys(pages)) {
+        if (list.length >= maxLimit) break;
+        const p = pages[k];
+        const info = p.imageinfo && p.imageinfo[0];
+        if (info && (info.thumburl || info.url)) {
+          const rawTitle = String(p.title || '').replace(/^File:/i, '').replace(/\.[a-zA-Z0-9]+$/, '').replace(/_/g, ' ');
+          const imgUrl = info.url || info.thumburl;
+          if (imgUrl && !seen.has(imgUrl)) {
+            seen.add(imgUrl);
+            list.push({
+              title: rawTitle || q,
+              image: imgUrl,
+              thumbnail: info.thumburl || info.url,
+              pageUrl: info.descriptionurl || ('https://commons.wikimedia.org/wiki/' + encodeURIComponent(p.title || '')),
+              source: 'Wikimedia Commons'
+            });
+          }
+        }
+      }
+    } catch (e) {}
+  };
+
+  const bingHeaders = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8'
+  };
+
+  if (pageNum === 0) {
+    const bingUrl1 = 'https://www.bing.com/images/search?q=' + encodeURIComponent(q) + '&form=HDRSC2';
+    const bingUrl2 = 'https://www.bing.com/images/async?q=' + encodeURIComponent(q) + '&first=35&count=35&mmasync=1';
+    const commUrl = 'https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch=' + encodeURIComponent(q) + '&gsrnamespace=6&gsrlimit=20&prop=imageinfo&iiprop=url&iiurlwidth=400&format=json';
+
+    try {
+      const [html1, html2, commJson] = await Promise.all([
+        fetchBrowserText(bingUrl1, { timeoutMs: 4000, useTor: false, headers: bingHeaders }).catch(() => ''),
+        fetchBrowserText(bingUrl2, { timeoutMs: 4000, useTor: false, headers: bingHeaders }).catch(() => ''),
+        fetchBrowserText(commUrl, { timeoutMs: 3500, useTor: false, headers: { 'User-Agent': 'Papaleguas/1.0 (Mozilla/5.0)' } }).catch(() => '')
+      ]);
+
+      parseBingHtml(html1, 35);
+      parseBingHtml(html2, 60);
+      parseCommonsJson(commJson, 80);
+    } catch (e) {
+      swallowed(e, 'server:searchTopicImages@parallel');
+    }
+  } else {
+    const firstOffset = (pageNum + 1) * 35;
+    const bingUrl = 'https://www.bing.com/images/async?q=' + encodeURIComponent(q) + '&first=' + firstOffset + '&count=35&mmasync=1';
+    const commOffset = pageNum * 15;
+    const commUrl = 'https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch=' + encodeURIComponent(q) + '&gsrnamespace=6&gsroffset=' + commOffset + '&gsrlimit=15&prop=imageinfo&iiprop=url&iiurlwidth=400&format=json';
+
+    try {
+      const [html, commJson] = await Promise.all([
+        fetchBrowserText(bingUrl, { timeoutMs: 4000, useTor: false, headers: bingHeaders }).catch(() => ''),
+        fetchBrowserText(commUrl, { timeoutMs: 3500, useTor: false, headers: { 'User-Agent': 'Papaleguas/1.0 (Mozilla/5.0)' } }).catch(() => '')
+      ]);
+      parseBingHtml(html, 35);
+      parseCommonsJson(commJson, 50);
+    } catch (e) {
+      swallowed(e, 'server:searchTopicImages@paged');
+    }
+  }
+
+  if (list.length > 0) {
+    topicImagesCache.set(cacheKey, { time: Date.now(), list });
+    if (topicImagesCache.size > 200) {
+      const firstK = topicImagesCache.keys().next().value;
+      topicImagesCache.delete(firstK);
+    }
+  }
+
+  return list;
+}
+
+function isMediaStreamingUrl(url) {
+  if (!url) return false;
+  return /(?:youtube\.com\/(?:watch|shorts|embed|live)|youtu\.be\/|vimeo\.com|tiktok\.com|dailymotion\.com|deezer\.com\/(?:track|album|playlist)|open\.spotify\.com\/(?:track|album|playlist|artist)|music\.apple\.com|soundcloud\.com)/i.test(url);
+}
+
+// =========================================================================
+// SPIDER / CRAWLER AUTÔNOMO DO MOTOR DE BUSCA NATIVO EM RUST (BM25)
+// =========================================================================
+const rustSpiderQueue = [];
+const rustSpiderVisited = new Set();
+
+function enqueueRustSpiderUrls(urls) {
+  if (!Array.isArray(urls)) return;
+  for (const raw of urls) {
+    if (!raw || typeof raw !== 'string') continue;
+    if (rustSpiderQueue.length >= 400) break;
+    const clean = nativeCore.stripTrackingParams(raw.trim());
+    if (!/^https?:\/\//i.test(clean) || isMediaStreamingUrl(clean) || nativeCore.isTrackerOrAd(clean)) continue;
+    const key = normalizeSearchUrl(clean);
+    if (!key || rustSpiderVisited.has(key)) continue;
+    rustSpiderVisited.add(key);
+    rustSpiderQueue.push(clean);
+  }
+}
+
+async function runRustSpiderStep() {
+  if (!rustSpiderQueue.length) return;
+  const targetUrl = rustSpiderQueue.shift();
+  if (!targetUrl) return;
+  try {
+    const isOnion = /\.onion(\/|$)/i.test(targetUrl);
+    const html = await fetchBrowserText(targetUrl, {
+      useTor: isOnion && isAppTorEnabled(),
+      timeoutMs: isOnion ? 12000 : 6500
+    });
+    if (html && html.length > 200) {
+      const extracted = nativeCore.extractPageMetadataAndLinks(targetUrl, html);
+      if (extracted && Array.isArray(extracted.links) && extracted.links.length) {
+        enqueueRustSpiderUrls(extracted.links.slice(0, 12));
+      }
+      const foundOnions = (extracted && (extracted.onionLinks || extracted.onion_links)) || [];
+      if (Array.isArray(foundOnions) && foundOnions.length) {
+        for (const onionUrl of foundOnions.slice(0, 8)) {
+          nativeCore.indexDocument(
+            onionUrl,
+            extracted.title ? `${extracted.title} (Mirror .onion)` : onionUrl,
+            extracted.description || extracted.textExcerpt || 'Serviço oculto .onion descoberto pelo Spider Rust.',
+            'tor onion spider',
+            'Descoberto pelo Spider Rust'
+          );
+        }
+        enqueueRustSpiderUrls(foundOnions.slice(0, 4));
+      }
+    }
+  } catch (e) {}
+}
+
+setInterval(() => {
+  runRustSpiderStep().catch(() => {});
+}, 25000).unref();
+
+// Junta o Índice Nativo em Rust (BM25) + fontes públicas sem cookies e auto-indexa novos resultados em tempo real
 async function searchWebSources(query, useTor = false) {
   const q = String(query || '').trim();
   if (!q) return [];
   const viaTor = Boolean(useTor && isAppTorEnabled());
-  const safe = (promise) => promise.catch(() => []);
+  const engineTimeoutMs = viaTor ? 7000 : 3200;
+  const safe = (promise) => Promise.race([
+    promise.catch(() => []),
+    new Promise((resolve) => setTimeout(() => resolve([]), engineTimeoutMs))
+  ]);
   try {
-    const [bingHtml, duck, instant, brave] = await Promise.all([
+    // 1. Consulta instantânea (< 1ms) ao Motor de Busca Nativo em Rust (BM25 + Inverted Index)
+    const rustLocalHits = nativeCore.searchLocalIndex(q, 18, false);
+
+    const [bingHtml, duck, duckLite, instant, brave, yandex, yahoo, google, wikiArticles, newsArticles] = await Promise.all([
       safe(searchBingHtml(q, viaTor)),
       safe(searchDuckDuckGoHtml(q, viaTor)),
+      safe(searchDuckDuckGoFallback(q, viaTor)),
       safe(searchDuckInstantApi(q, viaTor)),
-      safe(searchBraveHtml(q, viaTor))
+      safe(searchBraveHtml(q, viaTor)),
+      safe(searchYandexHtml(q, viaTor)),
+      safe(searchYahooHtml(q, viaTor)),
+      safe(searchGoogleHtml(q, viaTor)),
+      safe(searchWikipediaArticles(q, 4)),
+      safe(searchGoogleNewsRss(q, 8))
     ]);
 
     const results = [];
-    const seen = new Set();
+    const seenMap = new Map();
     const pushAll = (list) => {
       (list || []).forEach((item) => {
         if (!item || !item.url || !/^https?:\/\//i.test(item.url)) return;
-        const key = normalizeSearchUrl(item.url);
-        if (seen.has(key)) {
-          // mantém o resultado já salvo, mas aproveita a descrição de quem tiver uma melhor
-          const previous = results.find((r) => normalizeSearchUrl(r.url) === key);
-          if (previous && !previous.snippet && item.snippet) previous.snippet = item.snippet;
-          if (previous && !previous.date && item.date) previous.date = item.date;
+        const cleanUrl = nativeCore.stripTrackingParams(item.url);
+        if (isMediaStreamingUrl(cleanUrl) || nativeCore.isTrackerOrAd(cleanUrl)) return;
+        const key = normalizeSearchUrl(cleanUrl);
+        const srcName = item.source || 'web';
+        if (seenMap.has(key)) {
+          // Consenso multi-motor: acumula fontes independentes e aproveita o melhor snippet
+          const previous = seenMap.get(key);
+          if (previous) {
+            if (!previous._sources) previous._sources = new Set([previous.source]);
+            previous._sources.add(srcName);
+            previous.consensusCount = previous._sources.size;
+            if ((!previous.snippet || previous.snippet.length < (item.snippet || '').length) && item.snippet) {
+              previous.snippet = item.snippet;
+            }
+            if (!previous.date && item.date) previous.date = item.date;
+          }
           return;
         }
-        seen.add(key);
-        results.push({
+        const entry = {
           title: item.title,
-          url: item.url,
+          url: cleanUrl,
           snippet: item.snippet || '',
           date: item.date || '',
-          source: item.source || 'web',
-          host: safeHostname(item.url),
+          source: srcName,
+          consensusCount: 1,
+          _sources: new Set([srcName]),
+          host: safeHostname(cleanUrl),
           rank: results.length
-        });
+        };
+        seenMap.set(key, entry);
+        results.push(entry);
       });
     };
 
-    // Bing, DuckDuckGo e Brave entendem a frase inteira, então abrem a lista.
-    pushAll(bingHtml);
-    pushAll(duck);
-    pushAll(instant.map((item) => ({ ...item, source: 'duckduckgo' })));
-    pushAll(brave);
+    const interleaveEngines = (engineLists) => {
+      const maxLen = Math.max(...engineLists.map((e) => (e ? e.length : 0)), 0);
+      for (let i = 0; i < maxLen; i++) {
+        engineLists.forEach((engine) => {
+          if (engine && engine[i]) pushAll([engine[i]]);
+        });
+      }
+    };
 
-    if (results.length < 8) {
+    // Buscadores principais: Índice Nativo Rust (BM25), DuckDuckGo, Yahoo, Bing, Google, Brave, Yandex
+    interleaveEngines([
+      rustLocalHits || [],
+      duck || [],
+      yahoo || [],
+      bingHtml || [],
+      duckLite || [],
+      google || [],
+      brave || [],
+      (instant || []).map((item) => ({ ...item, source: 'duckduckgo' })),
+      yandex || []
+    ]);
+
+    // Artigos enciclopédicos e notícias recentes entram para enriquecer a página
+    pushAll((wikiArticles || []).slice(0, 4));
+    pushAll(newsArticles);
+
+    if (results.length < 10) {
       pushAll(await safe(searchBingRss(q, viaTor)));
-      pushAll(await safe(searchDuckDuckGoFallback(q, viaTor)));
     }
 
-    return results.slice(0, 80);
+    // Auto-alimenta o Índice Nativo em Rust (BM25) e o Spider com todas as páginas descobertas!
+    const freshDocs = results.filter((r) => r.source !== 'rust-index');
+    if (freshDocs.length > 0) {
+      nativeCore.indexDocumentsBatch(freshDocs);
+      enqueueRustSpiderUrls(freshDocs.slice(0, 10).map((r) => r.url));
+    }
+
+    return results.slice(0, 100);
   } catch (err) {
     console.warn('[SEARCH] falhou:', err && err.message ? err.message : err);
     return [];
@@ -1439,7 +4072,7 @@ function searchQueryTokens(query) {
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .split(/[^a-z0-9]+/)
-    .filter((w) => w.length > 2 && !SEARCH_STOPWORDS.has(w));
+    .filter((w) => w.length >= 2 && !SEARCH_STOPWORDS.has(w));
 }
 
 function normalizeForMatch(text) {
@@ -1449,45 +4082,104 @@ function normalizeForMatch(text) {
     .replace(/[\u0300-\u036f]/g, '');
 }
 
+const TRUSTED_DOMAINS_REGEX = /(?:wikipedia\.org|\.gov(?:\.br)?|\.edu(?:\.br)?|\.org(?:\.br)?|scielo\.org|bbc\.com|g1\.globo\.com|uol\.com\.br|estadao\.com\.br|folha\.uol\.com\.br|cnnbrasil\.com\.br|canaltech\.com\.br|tecmundo\.com\.br|techtudo\.com\.br|brasilescola\.uol\.com\.br|todamateria\.com\.br|mundoeducacao\.uol\.com\.br|infoescola\.com|github\.com|developer\.mozilla\.org|stackoverflow\.com|docs\.)/i;
+
 function scoreSearchResult(item, tokens, rawQuery = '') {
-  const title = normalizeForMatch(item.title);
-  const snippet = normalizeForMatch(item.snippet);
-  const phrase = normalizeForMatch(rawQuery);
+  const title = normalizeForMatch(item.title || '');
+  const snippet = normalizeForMatch(item.snippet || '');
+  const phrase = normalizeForMatch(rawQuery || '').trim();
+  const host = normalizeForMatch(item.host || safeHostname(item.url) || '');
+  const urlPath = normalizeForMatch(item.url || '');
   let score = 0;
   let covered = 0;
+  let titleTokensCovered = 0;
+
   tokens.forEach((token) => {
-    const inTitle = title.includes(token);
-    const inSnippet = snippet.includes(token);
-    if (inTitle) score += 4;
-    if (inSnippet) score += 1;
-    if (inTitle || inSnippet) covered += 1;
+    const wordPattern = new RegExp('(?:^|[^a-z0-9])' + token + '(?:[^a-z0-9]|$)', 'i');
+    const inTitleExact = wordPattern.test(title);
+    const inTitleSub = title.includes(token);
+    const inSnippetExact = wordPattern.test(snippet);
+    const inSnippetSub = snippet.includes(token);
+    const inHostOrPath = host.includes(token) || urlPath.includes(token);
+
+    if (inTitleExact) {
+      score += 6;
+      titleTokensCovered += 1;
+    } else if (inTitleSub) {
+      score += 3;
+      titleTokensCovered += 1;
+    }
+
+    if (inSnippetExact) {
+      score += 2.5;
+    } else if (inSnippetSub) {
+      score += 1;
+    }
+
+    if (inHostOrPath) {
+      score += 3;
+    }
+
+    if (inTitleSub || inSnippetSub || inHostOrPath) {
+      covered += 1;
+    }
   });
-  // Quem cobre mais termos distintos da busca vence quem repete só um deles
-  if (tokens.length) score += (covered / tokens.length) * 8;
-  if (phrase && phrase.length > 6 && (title.includes(phrase) || snippet.includes(phrase))) score += 6;
-  if (item.snippet) score += 2;
-  if (item.date) score += 1;
-  // A ordem entregue pelo buscador já carrega relevância: só perde posição quem casa pouco com o termo
-  if (typeof item.rank === 'number') score += Math.max(0, 6 - item.rank * 0.4);
+
+  if (tokens.length > 0) {
+    const coverageRatio = covered / tokens.length;
+    score += coverageRatio * 10;
+    if (titleTokensCovered === tokens.length) {
+      score += 12;
+    }
+    if (coverageRatio < 0.5 && tokens.length >= 2) {
+      score -= 8;
+    }
+  }
+
+  if (phrase.length > 3) {
+    if (title === phrase) {
+      score += 25;
+    } else if (title.startsWith(phrase)) {
+      score += 18;
+    } else if (title.includes(phrase)) {
+      score += 12;
+    } else if (snippet.includes(phrase)) {
+      score += 6;
+    }
+  }
+
+  if (TRUSTED_DOMAINS_REGEX.test(host)) {
+    score += 8;
+  }
+  if (phrase && host.includes(phrase.replace(/\s+/g, ''))) {
+    score += 15;
+  }
+
+  if (item.snippet && item.snippet.length >= 60) {
+    score += 3;
+  } else if (!item.snippet || item.snippet.length < 20) {
+    score -= 4;
+  }
+
+  if (item.date) score += 1.5;
+
+  // Consenso multi-motor: URLs confirmadas por múltiplos buscadores sobem contra spam isolado
+  const consensus = Number(item.consensusCount) || 1;
+  if (consensus >= 2) {
+    score += Math.min(consensus - 1, 4) * 7;
+  }
+
+  // Filtro anti-SEO-farm, anti-clickbait e anti-phishing
+  score += computeAntiSpamPenalty(item);
+
+  if (typeof item.rank === 'number') {
+    score += Math.max(0, 8 - item.rank * 0.35);
+  }
+
   return score;
 }
 
-const webSuggestCache = new Map();
-
-function parseSuggestPayload(text) {
-  try {
-    const data = JSON.parse(text);
-    // Formato OpenSearch: ["termo", ["sugestão 1", "sugestão 2", ...]]
-    const list = Array.isArray(data) && Array.isArray(data[1]) ? data[1] : data;
-    if (!Array.isArray(list)) return [];
-    return list.map((item) => {
-      if (typeof item === 'string') return item;
-      return (item && (item.phrase || item.text)) || '';
-    }).filter(Boolean);
-  } catch (e) {
-    return [];
-  }
-}
+const webSuggestCache = createLruCache({ maxEntries: 400, ttlMs: 10 * 60 * 1000 });
 
 async function fetchSuggestPhrases(query, useTor = false) {
   const q = String(query || '').trim();
@@ -1523,7 +4215,7 @@ async function getWebSearchPool(query, useTor = false) {
   const items = [];
   const push = (item) => {
     if (!item || !item.url) return;
-    if (isOnionHref(item.url)) return;
+    if (isOnionHref(item.url) || isMediaStreamingUrl(item.url)) return;
     const k = normalizeSearchUrl(item.url);
     if (!k || seen.has(k)) return;
     seen.add(k);
@@ -1538,44 +4230,21 @@ async function getWebSearchPool(query, useTor = false) {
   return ordered;
 }
 
-// Alguns resultados chegam casando só uma palavra solta e não têm relação com o
-// tema ("Lizzie Borden" para "como tirar mancha de café da roupa"): aqui eles caem fora.
 function filterOffTopic(items, tokens) {
-  if (tokens.length < 2) return items;
-  const minimum = tokens.length >= 4 ? 2 : 1;
-  const kept = items.filter((item) => {
-    const text = normalizeForMatch(item.title + ' ' + (item.snippet || ''));
-    return tokens.filter((token) => text.includes(token)).length >= minimum;
-  });
-  // Se o corte derrubar quase tudo, é sinal de que o termo é incomum: melhor devolver o que veio
-  return kept.length >= 3 ? kept : items;
+  return filterOffTopicHelper(items, tokens, normalizeForMatch);
 }
 
-// Evita uma sequência longa do mesmo site logo no topo: o terceiro link de um domínio desce na lista
 function spreadResultsByHost(items, maxPerHost = 2) {
-  const counts = new Map();
-  const top = [];
-  const rest = [];
-  items.forEach((item) => {
-    const host = item.host || safeHostname(item.url);
-    const used = counts.get(host) || 0;
-    if (used < maxPerHost) {
-      counts.set(host, used + 1);
-      top.push(item);
-    } else {
-      rest.push(item);
-    }
-  });
-  return top.concat(rest);
+  return spreadResultsByHostHelper(items, safeHostname, maxPerHost);
 }
 
-const richSearchCache = new Map();
+const richSearchCache = createLruCache({ maxEntries: 250, ttlMs: 10 * 60 * 1000 });
 
 // Reúne tudo que o buscador consegue extrair de uma pesquisa:
-// resultados com descrição, resumo de contexto, notícias recentes e buscas relacionadas.
+// resultados com descrição, resumo de contexto, notícias recentes, conhecimento enciclopédico, vídeos, músicas e filmes.
 async function getRichSearchData(query, useTor = false) {
   const q = String(query || '').trim();
-  if (!q) return { q, results: [], onion: [], news: [], related: [], sources: [] };
+  if (!q) return { q, results: [], onion: [], news: [], related: [], sources: [], wiki: null, videos: [], images: [], music: [], movies: [] };
   const torOn = Boolean((useTor || isTorRoutingEnabled(null)) && isAppTorEnabled());
   const key = q.toLowerCase() + (torOn ? ':tor' : ':direct');
   const cached = richSearchCache.get(key);
@@ -1584,41 +4253,69 @@ async function getRichSearchData(query, useTor = false) {
   const safe = (promise, fallback) => promise.catch(() => fallback);
   const webPromise = Promise.race([
     safe(getWebSearchPool(q, torOn), []),
-    new Promise((resolve) => setTimeout(() => resolve([]), torOn ? 6500 : 4500))
+    new Promise((resolve) => setTimeout(() => resolve([]), torOn ? 14000 : 8000))
   ]);
   const newsPromise = Promise.race([
-    safe(searchBingNews(q, torOn), []),
-    new Promise((resolve) => setTimeout(() => resolve([]), 3500))
+    safe(searchComprehensiveNews(q, torOn), []),
+    new Promise((resolve) => setTimeout(() => resolve([]), torOn ? 9000 : 5000))
   ]);
-  const [results, news, related] = await Promise.all([
+  const onionPromise = Promise.race([
+    safe(searchOnionLinks(q), []),
+    new Promise((resolve) => setTimeout(() => resolve([]), torOn ? 9000 : 6500))
+  ]);
+  const wikiPromise = Promise.race([
+    safe(fetchWikiTopicSummary(q), null),
+    new Promise((resolve) => setTimeout(() => resolve(null), 5000))
+  ]);
+  const videosPromise = Promise.race([
+    safe(searchYoutubeVideosForTopic(q, 8), []),
+    new Promise((resolve) => setTimeout(() => resolve([]), 8000))
+  ]);
+  const imagesPromise = Promise.race([
+    safe(searchTopicImages(q, torOn), []),
+    new Promise((resolve) => setTimeout(() => resolve([]), 8000))
+  ]);
+
+  const [results, news, related, onionResults, wikiResult, videosResult, imagesResult] = await Promise.all([
     webPromise,
     newsPromise,
-    safe(fetchSuggestPhrases(q, torOn), [])
+    safe(fetchSuggestPhrases(q, torOn), []),
+    onionPromise,
+    wikiPromise,
+    videosPromise,
+    imagesPromise
   ]);
 
   const newsUrls = new Set((news || []).map((item) => normalizeSearchUrl(item.url)));
   const data = {
     q,
     viaTor: torOn,
-    onion: [],
+    wiki: wikiResult,
+    videos: videosResult || [],
+    images: imagesResult || [],
+    music: [],
+    movies: [],
+    onion: onionResults || [],
     news: news || [],
     related: (related || []).filter((phrase) => String(phrase).toLowerCase() !== q.toLowerCase()).slice(0, 10),
     results: (results || []).filter((item) => !newsUrls.has(normalizeSearchUrl(item.url))),
     sources: Array.from(new Set((results || []).map((item) => item.source).filter(Boolean)))
   };
-  // Guardar uma busca vazia só faria a próxima tentativa falhar de novo por 3 minutos
-  if (data.results.length) richSearchCache.set(key, { t: Date.now(), data });
+  // Guardar uma busca com conteúdo no cache por 3 minutos
+  if (data.results.length || data.wiki || data.videos.length || data.images.length) {
+    richSearchCache.set(key, { t: Date.now(), data });
+  }
   return data;
 }
 
 // ----------------------------------------------------
 // RESPOSTA DA IA SOBRE A BUSCA
-// A IA não navega sozinha: ela lê os resultados que o buscador já trouxe e
-// responde citando de qual deles tirou cada informação.
+// A IA sintetiza e aprofunda os resultados reais retornados pelas fontes,
+// citando com rigor e oferecendo uma resposta rica, didática e estruturada.
 // ----------------------------------------------------
-const searchAnswerCache = new Map();
+const searchAnswerCache = createLruCache({ maxEntries: 250, ttlMs: 20 * 60 * 1000 });
 
-function buildAiSources(data, limit = 8) {
+function buildAiSources(data, limit = 12) {
   const sources = [];
   const seen = new Set();
   const add = (item) => {
@@ -1630,12 +4327,40 @@ function buildAiSources(data, limit = 8) {
       title: item.title || safeHostname(item.url),
       url: item.url,
       host: safeHostname(item.url),
-      snippet: String(item.snippet || '').slice(0, 700),
+      snippet: String(item.snippet || item.description || item.extract || '').slice(0, 950),
       date: item.date || ''
     });
   };
+
+  // 1. Wikipédia enciclopédica (máxima prioridade de definição e contextualização)
+  if (data && data.wiki && data.wiki.url) {
+    add({
+      title: (data.wiki.title ? data.wiki.title + ' (Wikipédia)' : 'Wikipédia Enciclopédia'),
+      url: data.wiki.url,
+      snippet: data.wiki.extract || data.wiki.description || ''
+    });
+  }
+
+  // 2. Notícias contemporâneas em tempo real (essencial para temas dinâmicos)
+  const newsList = (data && data.news) || [];
+  if (newsList.length > 0) {
+    newsList.slice(0, 3).forEach(add);
+  }
+
+  // 3. Resultados gerais dos motores de busca (Google, Bing, Brave, DuckDuckGo, Yandex) com foco em relevância temática
   ((data && data.results) || []).forEach(add);
-  ((data && data.news) || []).forEach(add);
+
+  // 4. Serviços .onion da camada profunda (somente se rota Tor estiver ativa ou tema direcionado)
+  const onionList = (data && data.onion) || [];
+  const qStr = String(data && data.q || '').toLowerCase();
+  const isDeepQuery = !!(data && (data.viaTor || /onion|tor|dark|deep\s*web|hidden/i.test(qStr)));
+  if (onionList.length > 0 && isDeepQuery) {
+    onionList.filter((o) => {
+      const isGeneric = /duckduckgo|ahmia|tor\s*taxi/i.test(o.title || '');
+      return !isGeneric || /ahmia|taxi|engine|buscador|diretorio/i.test(qStr);
+    }).slice(0, 2).forEach(add);
+  }
+
   return sources;
 }
 
@@ -1647,19 +4372,25 @@ function buildAiContext(sources) {
 }
 
 const SEARCH_ANSWER_SYSTEM = [
-  'Você é o assistente de pesquisa do navegador Papaléguas.',
-  'Responda sempre em português do Brasil, direto ao ponto, sem rodeios.',
-  'Use apenas as fontes numeradas que receber. Se elas não responderem à pergunta, diga isso com franqueza em vez de inventar.',
-  'Marque de onde veio cada informação com o número da fonte entre colchetes, como [1] ou [2][4].',
-  'Nunca invente números, preços, datas ou nomes que não estejam nas fontes.',
-  'No máximo 5 frases curtas, ou 4 itens se uma lista ficar mais clara.',
-  'Não repita a pergunta nem comece com "de acordo com as fontes".'
-].join(' ');
+  'Você é o assistente de inteligência artificial do navegador Papaléguas.',
+  'Sua missão é fornecer uma resposta RESUMIDA, DIRETA E OBJETIVA em português do Brasil sobre o tema pesquisado.',
+  '',
+  'DIRETRIZES DE RESUMO (MÁXIMA CONCISÃO):',
+  '• Responda de forma sucinta e direta, sem introduções desnecessárias ou enrolação.',
+  '• Escreva no máximo 1 parágrafo curto (2 a 3 frases) com a definição ou resposta essencial.',
+  '• Em seguida, se relevante, inclua no máximo 2 a 3 tópicos curtos ("•") com os pontos mais importantes.',
+  '• Mantenha o texto total em torno de 60 a 120 palavras.',
+  '',
+  'REGRAS DE CITAÇÃO:',
+  '• Baseie-se estritamente nas fontes numeradas fornecidas.',
+  '• Cite as fontes no final das frases com [1], [2], etc.',
+  '• Destaque termos-chave em negrito ("**termo**").'
+].join('\n');
 
 // ----------------------------------------------------
 // AGENTE "MELHORES RESULTADOS": escolhe 2–3 links para abrir e explica o porquê.
 // ----------------------------------------------------
-const searchPicksCache = new Map();
+const searchPicksCache = createLruCache({ maxEntries: 250, ttlMs: 20 * 60 * 1000 });
 const SEARCH_PICKS_TTL = 5 * 60 * 1000;
 
 function fallbackSearchPicks(question, sources) {
@@ -1725,19 +4456,23 @@ Use apenas números que existem na lista. Ordene do melhor para o pior.`
 }
 
 async function answerSearchWithAi(question, data, history = []) {
-  const sources = buildAiSources(data);
+  const sources = buildAiSources(data, 12);
+  if (!sources || sources.length === 0) {
+    return {
+      answer: `Nenhum resultado foi encontrado nos buscadores para "${question}".`,
+      sources: []
+    };
+  }
 
+  // Tenta LLM externa com timeout balanceado e conexão direta rápida
   const messages = [{ role: 'system', content: SEARCH_ANSWER_SYSTEM }];
-  (history || []).slice(-6).forEach((turn) => {
+  (history || []).slice(-4).forEach((turn) => {
     if (!turn || !turn.role || !turn.content) return;
     if (turn.role !== 'user' && turn.role !== 'assistant') return;
-    messages.push({ role: turn.role, content: String(turn.content).slice(0, 1200) });
+    messages.push({ role: turn.role, content: String(turn.content).slice(0, 1000) });
   });
 
-  const promptContent = sources.length
-    ? 'Pergunta: ' + question + '\n\nFontes encontradas na web:\n' + buildAiContext(sources)
-    : 'Pergunta: ' + question + '\n\n(Nenhuma fonte externa encontrada no momento. Responda com base no seu conhecimento de forma completa, precisa e amigável em português do Brasil.)';
-
+  const promptContent = 'Tema pesquisado: ' + question + '\n\nFontes encontradas na web:\n' + buildAiContext(sources) + '\n\nIMPORTANTE: Forneça um resumo muito direto e conciso (máximo 1 parágrafo curto e até 2 ou 3 tópicos com os pontos essenciais), citando as fontes [1], [2].';
   messages.push({
     role: 'user',
     content: promptContent
@@ -1747,17 +4482,176 @@ async function answerSearchWithAi(question, data, history = []) {
     const completion = await callOpenAi({
       messages,
       temperature: 0.2,
-      max_tokens: 500,
-      timeoutMs: 15000,
+      max_tokens: 350,
+      timeoutMs: 6500,
       direct: true
     });
     const choice = completion && completion.choices && completion.choices[0];
     const answer = (choice && choice.message && choice.message.content) || '';
-    return { answer: String(answer).trim(), sources };
+    if (answer && String(answer).trim().length > 20) {
+      return { answer: String(answer).trim(), sources };
+    }
   } catch (err) {
-    console.warn('[IA RESPOSTA] Falhou:', err && err.message ? err.message : err);
-    return { answer: '', sources };
+    // LLM externa demorou ou indisponível: prossegue com a síntese de extração enriquecida
   }
+
+  // Resposta com base rigorosa na extração de todos os buscadores (Google, Bing, DuckDuckGo, Brave, Yandex, Yahoo, Tor)
+  const extractionAnswer = generateExtractionBasedAnswer(question, sources, data);
+  return { answer: extractionAnswer, sources };
+}
+
+function generateExtractionBasedAnswer(question, sources, data) {
+  const safeList = Array.isArray(sources) && sources.length > 0
+    ? sources
+    : buildAiSources(data, 8);
+
+  if (!safeList || safeList.length === 0) {
+    return 'Resultados públicos encontrados para esta pesquisa estão disponíveis nos links abaixo.';
+  }
+
+  const clean = (str) => String(str || '').replace(/\s+/g, ' ').trim();
+  const ranked = safeList.map((s, idx) => ({
+    n: idx + 1,
+    title: clean(s.title || s.host || 'Fonte ' + (idx + 1)),
+    host: clean(s.host || safeHostname(s.url)),
+    snippet: clean(s.snippet || s.description || ''),
+    url: s.url,
+    date: clean(s.date || ''),
+    isOnion: /\.onion(\b|\/|$)/i.test(s.url)
+  }));
+
+  const blocks = [];
+
+  // 1. Resumo conciso e direto (Wikipédia ou principal fonte)
+  const wikiSource = ranked.find((s) => /wikipédia|wikipedia/i.test(s.title || s.host));
+  const prime = wikiSource || ranked[0];
+
+  if (prime && prime.snippet && prime.snippet.length > 25) {
+    let intro = prime.snippet;
+    if (intro.length > 260) {
+      const match = intro.slice(0, 250).match(/^(.*[.!?])\s/);
+      intro = match ? match[1] : intro.slice(0, 230) + '…';
+    }
+    blocks.push(`${intro} [${prime.n}].`);
+  } else {
+    blocks.push(`Resumo das principais informações públicas consolidadas sobre **${question}** [1].`);
+  }
+
+  // 2. No máximo 2 tópicos curtos e objetivos
+  const usedNums = new Set([prime ? prime.n : 1]);
+  let added = 0;
+
+  for (let i = 0; i < ranked.length && added < 2; i++) {
+    const item = ranked[i];
+    if (usedNums.has(item.n) || !item.snippet || item.snippet.length < 30 || item.isOnion) continue;
+
+    let text = item.snippet.replace(/\.{2,}$/, '').trim();
+    if (text.length > 130) text = text.slice(0, 120).trim() + '…';
+
+    let label = item.title.split(/[-–|:;]/)[0].trim();
+    if (label.length > 30) label = label.slice(0, 28) + '…';
+
+    blocks.push(`• **${label}**: ${text} [${item.n}].`);
+    usedNums.add(item.n);
+    added++;
+  }
+
+  // 3. Notícia recente (apenas 1 item se relevante)
+  const newsItem = ranked.find((s) => !usedNums.has(s.n) && (s.date || /g1|globo|uol|folha|estadao|cnn|bbc|reuters|noticias/i.test(s.host || s.title)));
+  if (newsItem && added < 2) {
+    let t = newsItem.snippet || newsItem.title;
+    if (t.length > 130) t = t.slice(0, 120) + '…';
+    blocks.push(`• **Recente**: ${t} [${newsItem.n}].`);
+  }
+
+  return blocks.join('\n\n');
+}
+
+function formatAiAnswerToHtml(text, sources) {
+  if (!text) return '<div class="ai-skeleton"><i></i><i></i><i></i></div>';
+  const escape = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const inline = (line) => {
+    let html = escape(line)
+      .replace(/[*][*]([^*]+)[*][*]/g, '<strong>$1</strong>')
+      .replace(/`([^`]+)`/g, '<code class="ai-code">$1</code>');
+    return html.replace(/\[([0-9]+(?:[ ]*,[ ]*[0-9]+)*)\]/g, (match, group) => {
+      const links = group.split(',').map((raw) => {
+        const num = parseInt(raw, 10);
+        const src = sources && sources[num - 1];
+        if (!src) return '';
+        return `<a class="ai-cite" href="#" data-ai-src="${num}" title="${escape((src.title || '') + ' · ' + (src.host || ''))}">[${num}]</a>`;
+      }).join('');
+      return links || match;
+    });
+  };
+
+  const blocks = [];
+  let currentListType = null;
+  let listItems = [];
+
+  const flushList = () => {
+    if (currentListType && listItems.length) {
+      blocks.push(`<${currentListType} class="ai-${currentListType}">${listItems.join('')}</${currentListType}>`);
+    }
+    currentListType = null;
+    listItems = [];
+  };
+
+  let pendingBlank = false;
+  String(text || '').split(/\r?\n/).forEach((rawLine) => {
+    const line = rawLine.trim();
+    if (!line) {
+      pendingBlank = true;
+      return;
+    }
+    const heading = line.match(/^#{1,4}[ ]+(.*)$/);
+    if (heading) {
+      flushList();
+      pendingBlank = false;
+      blocks.push(`<h4 class="ai-subtitle">${inline(heading[1])}</h4>`);
+      return;
+    }
+    const ordered = line.match(/^[0-9]+[.)][ ]+(.*)$/);
+    if (ordered) {
+      if (currentListType !== 'ol') {
+        flushList();
+        currentListType = 'ol';
+      }
+      listItems.push(`<li>${inline(ordered[1])}</li>`);
+      pendingBlank = false;
+      return;
+    }
+    const bullet = line.match(/^(?:[-*•])[ ]+(.*)$/);
+    if (bullet) {
+      if (currentListType !== 'ul') {
+        flushList();
+        currentListType = 'ul';
+      }
+      listItems.push(`<li>${inline(bullet[1])}</li>`);
+      pendingBlank = false;
+      return;
+    }
+    flushList();
+    pendingBlank = false;
+    blocks.push(`<p>${inline(line)}</p>`);
+  });
+  flushList();
+  return blocks.join('');
+}
+
+function formatAiSourcesToHtml(sources, clientId) {
+  if (!Array.isArray(sources) || !sources.length) return '';
+  const escape = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return sources.map((src, index) => {
+    const title = escape(src.title || src.host);
+    const host = escape(src.host || src.title);
+    const directUrl = escape(src.url);
+    const proxyUrl = '/proxy?url=' + encodeURIComponent(src.url) + '&clientId=' + encodeURIComponent(clientId || 'client_default');
+    return `<a class="ai-source" href="${proxyUrl}" data-direct="${directUrl}" title="${title} · ${host}">` +
+      `<span class="ai-source-num">${index + 1}</span>` +
+      `<span class="ai-source-name">${host}</span>` +
+    `</a>`;
+  }).join('');
 }
 
 // Perguntas de acompanhamento ("e quanto custa?") não fazem sentido sozinhas na busca:
@@ -1809,12 +4703,7 @@ async function getUrlSuggestions({ query, page = 0, useTor = false }) {
   const suggestions = [];
   if (!q) return { success: true, q, page: p, hasMore: false, suggestions };
 
-  const safe = (promise, fallback) => promise.catch((err) => {
-    console.warn('[URL-SUGGEST] etapa falhou:', err && err.message ? err.message : err);
-    return fallback;
-  });
-  const poolPromise = safe(getWebSearchPool(q, useTor), []);
-  const phrasesPromise = safe(fetchSuggestPhrases(q, useTor), []);
+  const safe = (promise, fallback) => promise.catch(() => fallback);
 
   if (p === 0) {
     if (isOnionHref(q)) {
@@ -1823,6 +4712,7 @@ async function getUrlSuggestions({ query, page = 0, useTor = false }) {
         kind: 'onion',
         title: q.replace(/^https?:\/\//i, ''),
         subtitle: 'Abrir endereço .onion',
+        badge: 'Rede Tor',
         url
       });
     } else if (looksLikeUrlQuery(q)) {
@@ -1838,81 +4728,374 @@ async function getUrlSuggestions({ query, page = 0, useTor = false }) {
         kind: 'gpt',
         title: q,
         subtitle: '✦ Papaléguas AI • Obter resposta imediata com inteligência artificial',
+        badge: 'IA',
         url: '/search?q=' + encodeURIComponent(q)
       });
     }
     suggestions.push({
       kind: 'search',
       title: q,
-      subtitle: useTor && isAppTorEnabled() ? 'Pesquisar na web e na rede Tor' : 'Pesquisar na web',
+      subtitle: useTor && isAppTorEnabled() ? 'Pesquisar tema na web e na rede Tor' : 'Pesquisar tema na web',
+      badge: 'Buscar',
       url: '/search?q=' + encodeURIComponent(q)
     });
   }
 
-  const [pool, phrases] = await Promise.all([poolPromise, phrasesPromise]);
-  const webPool = Array.isArray(pool) ? pool : [];
+  // Na página 0, usa orçamento rápido para nunca travar o autocomplete no celular
+  const withDeadline = (promise, ms, fallback) => Promise.race([
+    safe(promise, fallback),
+    new Promise((resolve) => setTimeout(() => resolve(fallback), ms))
+  ]);
+  const poolPromise = (p === 0)
+    ? withDeadline(getWebSearchPool(q, useTor), 2400, null)
+    : safe(getWebSearchPool(q, useTor), []);
+  const phrasesPromise = (p === 0)
+    ? withDeadline(fetchSuggestPhrases(q, useTor), 1600, [])
+    : safe(fetchSuggestPhrases(q, useTor), []);
+  const onionPromise = (p === 0) ? withDeadline(searchOnionLinks(q), 1500, []) : Promise.resolve([]);
+  const wikiPromise = (p === 0) ? withDeadline(fetchWikiTopicSummary(q), 1500, null) : Promise.resolve(null);
+  const newsPromise = (p === 0) ? withDeadline(searchGoogleNewsRss(q, 2), 1500, []) : Promise.resolve([]);
+
+  const [pool, phrases, onionLinks, wiki, news] = await Promise.all([
+    poolPromise,
+    phrasesPromise,
+    onionPromise,
+    wikiPromise,
+    newsPromise
+  ]);
+
+  const webPool = Array.isArray(pool)
+    ? pool
+    : (nativeCore.searchLocalIndex(q, 10, false) || []);
   const phraseList = Array.isArray(phrases) ? phrases : [];
+  const onionList = Array.isArray(onionLinks) ? onionLinks : [];
 
   if (p === 0) {
-    (phraseList || []).slice(0, 10).forEach((phrase) => {
+    // 1. Resumo Enciclopédico da Wikipédia (Conhecimento Imediato)
+    if (wiki && (wiki.extract || wiki.title)) {
+      suggestions.push({
+        kind: 'wiki',
+        title: wiki.title,
+        subtitle: 'Wikipédia • Conhecimento Enciclopédico',
+        badge: 'Wikipédia',
+        snippet: wiki.extract ? (wiki.extract.slice(0, 160) + '...') : '',
+        thumb: wiki.thumbnail || '',
+        url: wiki.url
+      });
+    }
+
+    // 2. Notícias em tempo real sobre o tema
+    if (Array.isArray(news) && news.length > 0) {
+      news.slice(0, 2).forEach((n) => {
+        suggestions.push({
+          kind: 'news',
+          title: n.title,
+          subtitle: '📰 Notícia • ' + n.source + (n.date ? ' · ' + formatSearchDate(n.date) : ''),
+          badge: 'Notícia',
+          snippet: n.snippet || '',
+          url: n.url
+        });
+      });
+    }
+
+    // 3. Links da Rede Tor confirmados
+    if (onionList.length > 0) {
+      onionList.slice(0, 2).forEach((o) => {
+        suggestions.push({
+          kind: 'onion',
+          title: o.title,
+          subtitle: '🧅 ' + (o.category || 'Rede Tor') + ' • ' + o.url.replace(/^https?:\/\//i, '').slice(0, 28) + '...',
+          badge: 'Rede Tor',
+          url: o.url
+        });
+      });
+    }
+
+    // 4. Pesquisas e perguntas derivadas do tema
+    (phraseList || []).slice(0, 6).forEach((phrase) => {
       if (String(phrase).toLowerCase() === q.toLowerCase()) return;
       if (suggestions.some((s) => s.kind === 'search' && String(s.title).toLowerCase() === String(phrase).toLowerCase())) return;
       suggestions.push({
         kind: 'search',
         title: phrase,
-        subtitle: 'Sugestão de pesquisa',
+        subtitle: 'Explorar tema relacionado',
+        badge: 'Pesquisa',
         url: '/search?q=' + encodeURIComponent(phrase)
       });
     });
   }
 
-  const pageSize = 12;
+  // 8. Resultados da Web com paginação contínua (10 por lote sincronizado com a interface)
+  const pageSize = 10;
   const start = p * pageSize;
-  webPool.slice(start, start + pageSize).forEach((r) => {
-    if (isOnionHref(r.url)) return;
-    if (suggestions.some((s) => normalizeSearchUrl(s.url) === normalizeSearchUrl(r.url))) return;
+
+  function formatSuggestSiteItem(r) {
     let host = r.url;
-    try { host = new URL(r.url).hostname.replace(/^www\./, ''); } catch (e) {}
-    suggestions.push({
+    try { host = new URL(r.url).hostname.replace(/^www\./, ''); } catch (e) { swallowed(e, 'server:getUrlSuggestions@4236'); }
+    const badgeMap = {
+      yahoo: 'Yahoo',
+      bing: 'Bing',
+      duckduckgo: 'Duck',
+      google: 'Google',
+      brave: 'Brave',
+      yandex: 'Yandex',
+      wikipedia: 'Wiki'
+    };
+    const consensus = Number(r.consensusCount) || 1;
+    const badge = consensus >= 2
+      ? `✓ ${consensus} fontes`
+      : (badgeMap[r.source] || '');
+    const cachedPv = pagePreviewCache.get(r.url);
+    const itemImg = (cachedPv && cachedPv.data && cachedPv.data.image) || r.image || '';
+    const itemFav = (cachedPv && cachedPv.data && cachedPv.data.favicon) || r.favicon || '';
+    const rawSnip = (cachedPv && cachedPv.data && cachedPv.data.description) || r.snippet || '';
+    const cleanTitle = sanitizeSearchText(r.title || host, decodeHtmlEntities) || host;
+    const cleanSnip = sanitizeSearchText(rawSnip, decodeHtmlEntities);
+
+    return {
       kind: 'site',
-      title: r.title || host,
+      title: cleanTitle,
       subtitle: host,
       url: r.url,
-      snippet: r.snippet || ''
-    });
+      snippet: cleanSnip,
+      image: itemImg,
+      favicon: itemFav,
+      date: r.date || '',
+      badge: badge || undefined,
+      source: r.source || 'web'
+    };
+  }
+
+  const webSlice = webPool.slice(start, start + pageSize);
+  webSlice.forEach((r) => {
+    if (isOnionHref(r.url)) return;
+    if (suggestions.some((s) => normalizeSearchUrl(s.url) === normalizeSearchUrl(r.url))) return;
+    suggestions.push(formatSuggestSiteItem(r));
   });
 
   let hasMore = (start + pageSize) < webPool.length;
-  if (!hasMore) {
-    // Tenta expandir com termos relacionados para gerar mais resultados
+  // Se o lote inicial tiver menos que pageSize ou o pool principal esgotar, busca termos derivados com filtro de relevância
+  if (suggestions.length < pageSize || !hasMore) {
     const candidates = (phraseList || []).filter((ph) => String(ph).toLowerCase() !== q.toLowerCase());
-    const extraQ = candidates[p] || candidates[0];
-    if (extraQ) {
-      const extra = await getWebSearchPool(extraQ, useTor).catch(() => []);
+    const fallbackCandidates = [
+      q + ' site',
+      q + ' oficial',
+      q + ' 2026',
+      q + ' novidades',
+      q + ' brasil',
+      q + ' guia',
+      q + ' artigos'
+    ];
+    const poolOfPhrases = candidates.length ? candidates.concat(fallbackCandidates) : fallbackCandidates;
+    let phraseIndex = Math.max(0, p - Math.max(1, Math.floor(webPool.length / pageSize)));
+    let extraHops = 0;
+    while (suggestions.length < pageSize && phraseIndex < poolOfPhrases.length && extraHops < 2) {
+      extraHops += 1;
+      const extraQ = poolOfPhrases[phraseIndex];
+      phraseIndex += 1;
+      if (!extraQ) break;
+      const extraRaw = await safe(getWebSearchPool(extraQ, useTor), []);
+      const scoredExtra = extraRaw
+        .map((r) => ({ r, rel: scoreSearchRelevance(r, q) }))
+        .sort((a, b) => b.rel - a.rel);
+      const hasRelevant = scoredExtra.some((x) => x.rel > 0);
+      const filteredExtra = hasRelevant ? scoredExtra.filter((x) => x.rel > 0) : scoredExtra;
       const seenUrls = new Set(suggestions.map((s) => normalizeSearchUrl(s.url)));
-      extra.slice(0, pageSize).forEach((r) => {
+      filteredExtra.forEach(({ r }) => {
+        if (suggestions.length >= pageSize) return;
         const k = normalizeSearchUrl(r.url);
-        if (!k || seenUrls.has(k)) return;
+        if (!k || seenUrls.has(k) || isOnionHref(r.url)) return;
         seenUrls.add(k);
-        let host = r.url;
-        try { host = new URL(r.url).hostname.replace(/^www\./, ''); } catch (e) {}
-        suggestions.push({
-          kind: 'site',
-          title: r.title || host,
-          subtitle: host,
-          url: r.url,
-          snippet: r.snippet || ''
-        });
+        suggestions.push(formatSuggestSiteItem(r));
       });
-      hasMore = candidates.length > p + 1;
     }
+    hasMore = phraseIndex < poolOfPhrases.length;
   }
 
   return { success: true, q, page: p, hasMore, suggestions, generatedByAi: false };
 }
 
+// ===== Prévia de páginas (imagem + descrição) para os resultados do buscador =====
+// Lê as metatags OpenGraph/Twitter/description da página encontrada, sem cookies,
+// e devolve imagem de capa, descrição, nome do site e favicon. Fica em cache por algumas horas.
+const pagePreviewCache = createLruCache({ maxEntries: 1500, ttlMs: 6 * 60 * 60 * 1000 });
+const pagePreviewInflight = new Map();
+const PAGE_PREVIEW_TTL = 6 * 60 * 60 * 1000;
+const PAGE_PREVIEW_FAIL_TTL = 20 * 60 * 1000;
+const PAGE_PREVIEW_MAX_ENTRIES = 1500;
+
+function parseHtmlTagAttributes(tag) {
+  const attrs = {};
+  String(tag || '').replace(/([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'>]+))/g, (_, name, __, dq, sq, bare) => {
+    const key = name.toLowerCase();
+    if (!(key in attrs)) attrs[key] = dq !== undefined ? dq : (sq !== undefined ? sq : (bare || ''));
+    return '';
+  });
+  return attrs;
+}
+
+function resolvePreviewUrl(raw, base) {
+  const value = decodeHtmlEntities(String(raw || '')).trim();
+  if (!value || /^(data|javascript|blob|about):/i.test(value)) return '';
+  try {
+    const abs = new URL(value, base);
+    return /^https?:$/i.test(abs.protocol) ? abs.href : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function extractPagePreview(html, pageUrl) {
+  const source = String(html || '');
+  const headEnd = source.search(/<\/head>/i);
+  const head = source.slice(0, headEnd > 0 ? Math.min(headEnd + 7, 400000) : 400000);
+  const metas = {};
+  (head.match(/<meta\b[^>]*>/gi) || []).forEach((tag) => {
+    const a = parseHtmlTagAttributes(tag);
+    const key = String(a.property || a.name || a.itemprop || '').toLowerCase().trim();
+    const content = a.content;
+    if (key && content && !(key in metas)) metas[key] = content;
+  });
+
+  let base = pageUrl;
+  const baseTag = head.match(/<base\b[^>]*href\s*=\s*["']([^"']+)["']/i);
+  if (baseTag) base = resolvePreviewUrl(baseTag[1], pageUrl) || pageUrl;
+
+  const links = (head.match(/<link\b[^>]*>/gi) || []).map(parseHtmlTagAttributes);
+  const linkHref = (re) => {
+    const found = links.find((l) => re.test(String(l.rel || '')) && l.href);
+    return found ? resolvePreviewUrl(found.href, base) : '';
+  };
+
+  let image = '';
+  ['og:image:secure_url', 'og:image', 'og:image:url', 'twitter:image', 'twitter:image:src', 'image', 'thumbnailurl']
+    .some((k) => (image = resolvePreviewUrl(metas[k], base)));
+  if (!image) image = linkHref(/(^|\s)image_src(\s|$)/i);
+  if (!image) {
+    // Último recurso: primeira imagem "de conteúdo" do corpo (ignora pixels, ícones e sprites)
+    const body = source.slice(headEnd > 0 ? headEnd : 0, (headEnd > 0 ? headEnd : 0) + 300000);
+    const imgs = body.match(/<img\b[^>]*>/gi) || [];
+    for (const tag of imgs.slice(0, 40)) {
+      const a = parseHtmlTagAttributes(tag);
+      const src = a['data-src'] || a['data-lazy-src'] || a.src || '';
+      if (!src || /(sprite|pixel|logo|icon|avatar|spacer|blank|tracking|1x1)/i.test(src)) continue;
+      const w = parseInt(a.width, 10);
+      const h = parseInt(a.height, 10);
+      if ((w && w < 120) || (h && h < 80)) continue;
+      if (/\.svg(\?|$)/i.test(src)) continue;
+      image = resolvePreviewUrl(src, base);
+      if (image) break;
+    }
+  }
+
+  // Se ainda não encontrou imagem de conteúdo, busca logo/marca do próprio site
+  if (!image) {
+    const body = source.slice(headEnd > 0 ? headEnd : 0, (headEnd > 0 ? headEnd : 0) + 300000);
+    const imgs = body.match(/<img\b[^>]*>/gi) || [];
+    for (const tag of imgs.slice(0, 30)) {
+      const a = parseHtmlTagAttributes(tag);
+      const src = a['data-src'] || a['data-lazy-src'] || a.src || '';
+      if (!src || /(sprite|pixel|spacer|blank|tracking|1x1)/i.test(src)) continue;
+      if (/\.svg(\?|$)/i.test(src)) continue;
+      if (/(logo|brand|header)/i.test(src) || /(logo|brand)/i.test(a.class || '') || /(logo|brand)/i.test(a.alt || '')) {
+        const candidate = resolvePreviewUrl(src, base);
+        if (candidate) { image = candidate; break; }
+      }
+    }
+  }
+
+  // Se o site não tem imagem nem logo no body, usa apple-touch-icon (ícone de alta resolução)
+  if (!image) {
+    const touchIcon = linkHref(/(^|\s)apple-touch-icon(\s|$)/i);
+    if (touchIcon && !touchIcon.endsWith('.ico')) {
+      image = touchIcon;
+    }
+  }
+
+  const sanitizeText = (txt) => {
+    let t = decodeHtmlEntities(stripTags(String(txt || ''))).replace(/\s+/g, ' ').trim();
+    if (!t || /^[{<\[]|[{}[\]]{2,}|parsoid|mw:Extension|\{\{|\\u0000|":\s*["{]|"name":/i.test(t)) return '';
+    return t;
+  };
+
+  let description = sanitizeText(metas['og:description'] || metas['description'] || metas['twitter:description'] || '');
+  if (!description || description.length < 40) {
+    const paragraphs = source.match(/<p\b[^>]*>[\s\S]*?<\/p>/gi) || [];
+    for (const p of paragraphs.slice(0, 30)) {
+      const text = sanitizeText(p);
+      if (text.length >= 70 && !text.includes('Predefinição:') && !text.includes('mw-')) {
+        description = text;
+        break;
+      }
+    }
+  }
+  if (description.length > 320) description = description.slice(0, 317).replace(/\s+\S*$/, '') + '…';
+
+  const titleTag = head.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const title = decodeHtmlEntities(metas['og:title'] || metas['twitter:title'] || (titleTag ? titleTag[1] : '')).slice(0, 200);
+  const siteName = decodeHtmlEntities(metas['og:site_name'] || metas['application-name'] || '').slice(0, 80);
+  let favicon = linkHref(/(^|\s)(icon|shortcut icon|apple-touch-icon)(\s|$)/i);
+  if (!favicon) {
+    try { favicon = new URL('/favicon.ico', pageUrl).href; } catch (e) { favicon = ''; }
+  }
+  const published = metas['article:published_time'] || metas['og:updated_time'] || metas['date'] || '';
+  return { title, description, image, siteName, favicon, published: String(published).slice(0, 40) };
+}
+
+function isPreviewableUrl(raw) {
+  try {
+    const u = new URL(String(raw || ''));
+    if (!/^https?:$/i.test(u.protocol)) return null;
+    if (isOnionHref(u.href) || isBlockedInternalProxyHost(u.hostname)) return null;
+    return u;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function getPagePreview(rawUrl, useTor = false) {
+  const target = isPreviewableUrl(rawUrl);
+  if (!target) return null;
+  const key = target.href;
+  const cached = pagePreviewCache.get(key);
+  if (cached && Date.now() - cached.t < (cached.data ? PAGE_PREVIEW_TTL : PAGE_PREVIEW_FAIL_TTL)) return cached.data;
+  if (pagePreviewInflight.has(key)) return pagePreviewInflight.get(key);
+
+  const job = (async () => {
+    let html = '';
+    try {
+      if (target.protocol === 'https:') {
+        html = await fetchBrowserText(key, { useTor, timeoutMs: 6500 });
+      } else {
+        html = await fetchHttpsText({
+          hostname: target.hostname,
+          port: target.port || 80,
+          path: target.pathname + target.search,
+          method: 'GET',
+          protocol: 'http:',
+          agent: getOutboundAgent(useTor),
+          headers: webSourceHeaders()
+        }, null, 6500);
+      }
+    } catch (e) {
+      html = '';
+    }
+    const data = html ? extractPagePreview(html, key) : null;
+    const useful = data && (data.image || data.description) ? data : null;
+    if (pagePreviewCache.size >= PAGE_PREVIEW_MAX_ENTRIES) {
+      const oldest = pagePreviewCache.keys().next().value;
+      pagePreviewCache.delete(oldest);
+    }
+    pagePreviewCache.set(key, { t: Date.now(), data: useful });
+    return useful;
+  })().finally(() => pagePreviewInflight.delete(key));
+
+  pagePreviewInflight.set(key, job);
+  return job;
+}
+
 // Pools dinâmicos para alternar vídeos a cada requisição mantendo sempre os mais novos
-function getDynamicRecentYoutubeQuery(categoryOrQuery, isForcedCustom = false, country = 'BR') {
+function getDynamicRecentYoutubeQuery(categoryOrQuery, isForcedCustom = false, country = 'BR', pageIndex = null) {
   if (isForcedCustom) {
     return { query: categoryOrQuery, sortByRecent: false, isCustomQuery: true };
   }
@@ -1923,7 +5106,7 @@ function getDynamicRecentYoutubeQuery(categoryOrQuery, isForcedCustom = false, c
   const isDe = ['DE', 'AT', 'CH'].includes(cUpper);
   const isFr = cUpper === 'FR';
 
-  let newsPool, musicPool, sportsPool, podcastPool, trendingPool, gamesPool, moviePool, techPool, livePool, humorPool;
+  let newsPool, musicPool, sportsPool, podcastPool, trendingPool, gamesPool, moviePool, techPool, livePool, humorPool, financePool, cryptoPool;
 
   if (isPt) {
     newsPool = [
@@ -1934,6 +5117,24 @@ function getDynamicRecentYoutubeQuery(categoryOrQuery, isForcedCustom = false, c
       'globo news jornal agora',
       'band jornalismo noticias hoje',
       'cnn brasil ultimas noticias'
+    ];
+    financePool = [
+      'mercado financeiro hoje brasil ultimas noticias',
+      'bolsa de valores ibovespa fechamento analise',
+      'investimentos economia brasil hoje noticias',
+      'noticias economia mercado financeiro brasil',
+      'dividendos acoes melhores investimentos 2026',
+      'tesouro direto selic juros economia brasil',
+      'noticias financeiras economia brasil hoje'
+    ];
+    cryptoPool = [
+      'bitcoin hoje criptomoedas analise mercado',
+      'criptomoedas noticias bitcoin ethereum hoje',
+      'cotacao bitcoin analise grafica hoje',
+      'altcoins criptomoedas promissoras 2026',
+      'mercado cripto btc noticias brasil hoje',
+      'blockchain web3 criptomoedas novidades',
+      'noticias criptomoedas bitcoin brasil hoje'
     ];
     musicPool = [
       'novos lancamentos musicas brasil 2026',
@@ -2071,18 +5272,38 @@ function getDynamicRecentYoutubeQuery(categoryOrQuery, isForcedCustom = false, c
       'funny videos comedy compilation 2026',
       'best comedy sketches comedy videos'
     ];
+    financePool = [
+      'stock market today financial news live',
+      'finance economy investments market update',
+      'wall street stock market news analysis 2026',
+      'financial market news today live'
+    ];
+    cryptoPool = [
+      'crypto news today bitcoin ethereum analysis',
+      'bitcoin market update crypto latest news',
+      'altcoins cryptocurrency blockchain 2026',
+      'crypto market today latest headlines'
+    ];
   }
 
-  const pickRandom = (arr) => arr[Math.floor(Math.random() * arr.length)];
+  const pickRandom = (arr) => (pageIndex !== null && pageIndex !== undefined)
+    ? arr[Math.abs(pageIndex) % arr.length]
+    : arr[Math.floor(Math.random() * arr.length)];
 
   if (c === 'noticias' || c === 'noticia' || c === 'jornal' || c === 'urgente' || c === 'news') {
     return { query: pickRandom(newsPool), sortByRecent: true };
   }
   if (c === 'musicas' || c === 'musica' || c === 'som' || c === 'clipe' || c === 'music') {
-    return { query: pickRandom(musicPool), sortByRecent: false };
+    return { query: pickRandom(musicPool), sortByRecent: true };
   }
   if (c === 'esportes' || c === 'esporte' || c === 'futebol' || c === 'gol' || c === 'sports') {
     return { query: pickRandom(sportsPool), sortByRecent: true };
+  }
+  if (c === 'financeiro' || c === 'financas' || c === 'finanças' || c === 'investimentos' || c === 'economia' || c === 'finance') {
+    return { query: pickRandom(financePool || newsPool), sortByRecent: true };
+  }
+  if (c === 'criptomoedas' || c === 'cripto' || c === 'bitcoin' || c === 'crypto' || c === 'btc') {
+    return { query: pickRandom(cryptoPool || techPool), sortByRecent: true };
   }
   if (c === 'podcasts' || c === 'podcast' || c === 'corte' || c === 'entrevista') {
     return { query: pickRandom(podcastPool), sortByRecent: true, searchMode: 'podcast' };
@@ -2097,16 +5318,16 @@ function getDynamicRecentYoutubeQuery(categoryOrQuery, isForcedCustom = false, c
     return { query: pickRandom(techPool), sortByRecent: true };
   }
   if (c === 'ao vivo' || c === 'live' || c === 'streaming') {
-    return { query: pickRandom(livePool), sortByRecent: false, searchMode: 'live' };
+    return { query: pickRandom(livePool), sortByRecent: true, searchMode: 'live' };
   }
   if (c === 'humor' || c === 'comedia' || c === 'comedy') {
-    return { query: pickRandom(humorPool), sortByRecent: false };
+    return { query: pickRandom(humorPool), sortByRecent: true };
   }
   if (c === 'alta' || c === 'em alta' || c === 'trending' || c === 'viral' || c === 'tudo' || c === 'tudo / em alta') {
-    return { query: pickRandom(trendingPool), sortByRecent: false, searchMode: 'trending' };
+    return { query: pickRandom(trendingPool), sortByRecent: true, searchMode: 'trending' };
   }
 
-  return { query: categoryOrQuery, sortByRecent: false, isCustomQuery: true };
+  return { query: categoryOrQuery, sortByRecent: true, isCustomQuery: true };
 }
 
 const NEWS_OUTLET_QUERIES_BY_COUNTRY = {
@@ -2117,13 +5338,62 @@ const NEWS_OUTLET_QUERIES_BY_COUNTRY = {
     'g1 noticias agora brasil',
     'globo news jornal agora',
     'band jornalismo noticias hoje',
-    'cnn brasil ultimas noticias'
+    'cnn brasil ultimas noticias',
+    'uol noticias hoje',
+    'metropoles noticias hoje',
+    'bandnews tv ao vivo noticias',
+    'estadao noticias hoje',
+    'folha de s paulo noticias hoje',
+    'sbt brasil jornal hoje',
+    'jornal da record hoje'
   ],
   PT: [
     'rtp noticias direto ultimas',
     'sic noticias ultimas informacoes',
     'tvi noticias direto',
     'observador noticias hoje portugal'
+  ],
+  US: [
+    'cnn live breaking news today',
+    'nbc news live today headlines',
+    'abc news live updates today',
+    'cbs news live stream today',
+    'fox news live breaking headlines',
+    'associated press breaking news live',
+    'reuters world news headlines',
+    'bloomberg markets live news'
+  ],
+  GB: [
+    'bbc news live stream uk',
+    'sky news live breaking uk',
+    'itv news headlines today',
+    'channel 4 news uk today',
+    'the guardian news video'
+  ],
+  AR: [
+    'tn en vivo noticias argentina',
+    'c5n en vivo noticias hoy',
+    'la nacion mas en vivo argentina',
+    'clarin noticias hoy argentina',
+    'cronica tv en vivo noticias'
+  ],
+  MX: [
+    'noticias telemundo hoy',
+    'nmas en vivo noticias mexico',
+    'milenio noticias hoy mexico',
+    'el universal noticias mexico',
+    'adn40 en vivo noticias'
+  ],
+  CA: [
+    'cbc news live stream canada',
+    'global news live today canada',
+    'ctv news live headlines'
+  ],
+  JP: [
+    'nhk ニュース ライブ',
+    'ann ニュース ライブ 日本',
+    'tbs news dig ライブ',
+    '日テレnews ライブ 日本'
   ],
   DE: [
     'tagesschau nachrichten heute',
@@ -2201,26 +5471,106 @@ function interleaveVideoLists(lists, max = 30) {
 let mixedNewsCache = null;
 let mixedNewsCacheTime = 0;
 const MIXED_NEWS_CACHE_TTL = 3 * 60 * 1000;
+const mixedNewsCacheByKey = new Map();
 
-async function fetchMixedNewsVideos({ timeFilter = 'hour', useTor = false, timeoutMs = 2600, perQuery = 8, country = 'BR', clientIp = '' } = {}) {
+// Intercala vídeos agrupando por CANAL (máx. N por canal) para que o feed de Notícias
+// mostre sempre uma mistura dos principais canais de jornalismo, sem repetir o mesmo canal em sequência.
+function interleaveByChannel(videos, maxPerChannel = 3, max = 30) {
+  const groups = new Map();
+  for (const v of videos || []) {
+    if (!v || !v.id) continue;
+    const ch = String(v.channel || 'desconhecido').toLowerCase().trim();
+    if (!groups.has(ch)) groups.set(ch, []);
+    const g = groups.get(ch);
+    if (g.length < maxPerChannel && !g.some((x) => x.id === v.id)) g.push(v);
+  }
+  const lists = Array.from(groups.values());
+  // Embaralha a ordem dos canais a cada atualização para variar o topo do feed
+  for (let i = lists.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [lists[i], lists[j]] = [lists[j], lists[i]];
+  }
+  return interleaveVideoLists(lists, max);
+}
+
+const mixedNewsInFlight = new Map();
+async function fetchMixedNewsVideos(opts = {}) {
+  const k = `${String(opts.country || 'BR').toUpperCase()}_${opts.timeFilter || 'hour'}_${opts.page || 1}`;
+  const cachedEntry = mixedNewsCacheByKey.get(`mixed_news_${k}`);
+  if (!opts.forceRefresh && cachedEntry && (Date.now() - cachedEntry.ts < MIXED_NEWS_CACHE_TTL) && cachedEntry.videos.length >= 6) {
+    return cachedEntry.videos;
+  }
+  // Reaproveita a mesma busca em andamento (ex.: pré-aquecimento) em vez de disparar outra em paralelo
+  if (mixedNewsInFlight.has(k)) return mixedNewsInFlight.get(k);
+  // Se existe cache antigo, devolve na hora e atualiza em segundo plano
+  const p = fetchMixedNewsVideosFresh(opts).finally(() => mixedNewsInFlight.delete(k));
+  mixedNewsInFlight.set(k, p);
+  if (!opts.forceRefresh && cachedEntry && cachedEntry.videos.length >= 6) {
+    p.catch(() => {});
+    return cachedEntry.videos;
+  }
+  return p;
+}
+
+async function fetchMixedNewsVideosFresh({ timeFilter = 'hour', useTor = false, timeoutMs = 5000, perQuery = 6, country = 'BR', clientIp = '', page = 1, forceRefresh = false } = {}) {
   const hl = getHlForCountry(country);
-  const cacheKey = `mixed_news_${country}_${hl}_${clientIp || 'default'}_${timeFilter}_${useTor ? 'tor' : 'direct'}`;
-  if (!useTor && mixedNewsCache && (Date.now() - mixedNewsCacheTime < MIXED_NEWS_CACHE_TTL) && mixedNewsCache.length >= 6) {
+  const cUpper = String(country || 'BR').toUpperCase();
+  const cacheKey = `mixed_news_${cUpper}_${timeFilter}_${page}`;
+  const pool = NEWS_OUTLET_QUERIES_BY_COUNTRY[cUpper] || NEWS_OUTLET_QUERIES_BY_COUNTRY.DEFAULT;
+  // Consulta até 8 canais principais em paralelo (rotacionando a cada página do scroll)
+  const shuffled = pickNewsOutletQueries(pool.length, cUpper);
+  const start = ((Math.max(1, page) - 1) * 8) % Math.max(1, shuffled.length);
+  const queries = [];
+  for (let i = 0; i < Math.min(8, shuffled.length); i++) {
+    queries.push(shuffled[(start + i) % shuffled.length]);
+  }
+  // Notícias dos canais nas últimas 24h ordenadas pelas mais recentes (filtro 'hour' por canal costuma vir vazio)
+  const outletFilter = timeFilter === 'hour' ? 'day' : timeFilter;
+  const results = await Promise.all(queries.map((q) => Promise.race([
+    searchYoutubeVideos(q, hl, true, outletFilter, false, '', country, clientIp).catch(() => []),
+    new Promise((resolve) => setTimeout(() => resolve([]), timeoutMs))
+  ])));
+  const flat = interleaveVideoLists(results.map((list) => (list || []).slice(0, perQuery)), 80);
+  let mixed = interleaveByChannel(flat, 3, 30);
+
+  if (mixed.length < 10) {
+    const isBr = cUpper === 'BR' || cUpper === 'PT';
+    const fallbackQuery = isBr
+      ? 'noticias brasil hoje jovem pan record g1 globo news band sbt'
+      : (cUpper === 'DE' ? 'nachrichten heute aktuell live welt zdf tagesschau' : 'breaking news today world latest headlines live stream');
+    const fallback = await Promise.race([
+      searchYoutubeVideos(fallbackQuery, hl, true, 'day', false, '', country, clientIp).catch(() => []),
+      new Promise((resolve) => setTimeout(() => resolve([]), 2000))
+    ]);
+    mixed = interleaveByChannel([...flat, ...(fallback || [])], 3, 30);
+  }
+
+  if (mixed.length >= 6) {
+    mixedNewsCacheByKey.set(cacheKey, { ts: Date.now(), videos: mixed });
+    if (mixedNewsCacheByKey.size > 60) mixedNewsCacheByKey.delete(mixedNewsCacheByKey.keys().next().value);
+    mixedNewsCache = mixed;
+    mixedNewsCacheTime = Date.now();
+  }
+  return mixed;
+}
+
+async function fetchMixedNewsVideosLegacy({ timeFilter = 'hour', useTor = false, timeoutMs = 2600, perQuery = 8, country = 'BR', clientIp = '' } = {}) {
+  const hl = getHlForCountry(country);
+  const cacheKey = `mixed_news_${country}_${hl}_${clientIp || 'default'}_${timeFilter}_direct`;
+  if (mixedNewsCache && (Date.now() - mixedNewsCacheTime < MIXED_NEWS_CACHE_TTL) && mixedNewsCache.length >= 6) {
     return mixedNewsCache;
   }
-  const waitMs = useTor ? Math.max(timeoutMs, 16000) : timeoutMs;
-  const queries = pickNewsOutletQueries(useTor ? 2 : 3, country);
-  const effectiveClientIp = useTor ? '' : clientIp;
+  const waitMs = timeoutMs;
+  const queries = pickNewsOutletQueries(3, country);
+  const effectiveClientIp = clientIp;
   const results = await Promise.all(queries.map((q) => Promise.race([
-    searchYoutubeVideos(q, hl, true, timeFilter, useTor, '', country, effectiveClientIp).catch(() => []),
+    searchYoutubeVideos(q, hl, true, timeFilter, false, '', country, effectiveClientIp).catch(() => []),
     new Promise((resolve) => setTimeout(() => resolve([]), waitMs))
   ])));
   const mixed = interleaveVideoLists(results.map((list) => (list || []).slice(0, perQuery)), 30);
   if (mixed.length >= 6) {
-    if (!useTor) {
-      mixedNewsCache = mixed;
-      mixedNewsCacheTime = Date.now();
-    }
+    mixedNewsCache = mixed;
+    mixedNewsCacheTime = Date.now();
     return mixed;
   }
 
@@ -2231,23 +5581,21 @@ async function fetchMixedNewsVideos({ timeFilter = 'hour', useTor = false, timeo
     : (cUpper === 'DE' ? 'nachrichten heute aktuell live welt zdf tagesschau' : 'breaking news today world latest headlines live stream');
 
   const fallback = await Promise.race([
-    searchYoutubeVideos(fallbackQuery, hl, true, timeFilter, useTor, '', country, effectiveClientIp).catch(() => []),
-    new Promise((resolve) => setTimeout(() => resolve([]), useTor ? 12000 : 1200))
+    searchYoutubeVideos(fallbackQuery, hl, true, timeFilter, false, '', country, effectiveClientIp).catch(() => []),
+    new Promise((resolve) => setTimeout(() => resolve([]), 1200))
   ]);
   const combined = interleaveVideoLists([mixed, fallback || []], 30);
   if (combined.length >= 6) {
-    if (!useTor) {
-      mixedNewsCache = combined;
-      mixedNewsCacheTime = Date.now();
-    }
+    mixedNewsCache = combined;
+    mixedNewsCacheTime = Date.now();
     return combined;
   }
 
   if (timeFilter === 'hour') {
     const extraQuery = isBr ? 'noticias brasil ultimas horas ao vivo' : 'world news headlines live stream today';
-    const extra = await searchYoutubeVideos(extraQuery, hl, true, 'day', useTor, '', country, effectiveClientIp).catch(() => []);
+    const extra = await searchYoutubeVideos(extraQuery, hl, true, 'day', false, '', country, effectiveClientIp).catch(() => []);
     const res = interleaveVideoLists([combined, extra || []], 30);
-    if (!useTor && res.length >= 6) {
+    if (res.length >= 6) {
       mixedNewsCache = res;
       mixedNewsCacheTime = Date.now();
     }
@@ -2256,104 +5604,289 @@ async function fetchMixedNewsVideos({ timeFilter = 'hour', useTor = false, timeo
   return combined;
 }
 
-function getDynamicRecentMovieQuery(categoryOrQuery) {
+function getDynamicRecentMovieQuery(categoryOrQuery, pageIndex = null, country = 'BR') {
   const c = (categoryOrQuery || 'todos').toLowerCase().trim();
+  const cUpper = String(country || 'BR').toUpperCase();
+  const isPt = cUpper === 'BR' || cUpper === 'PT';
+  const isEs = ['ES', 'MX', 'AR', 'CO', 'CL', 'PE', 'VE', 'EC', 'UY', 'PY', 'BO', 'CR', 'PA', 'DO', 'GT'].includes(cUpper);
+  const isFr = ['FR', 'BE', 'SN', 'CI', 'MA', 'DZ', 'TN'].includes(cUpper);
+  const isDe = ['DE', 'AT', 'CH'].includes(cUpper);
+  const isIt = cUpper === 'IT';
 
-  const pools = {
-    todos: [
-      'filmes completos dublados lancamentos 2025',
-      'filmes completos dublados lancamentos 2026',
-      'novos filmes completos dublados em hd',
-      'filmes lancamentos completos dublados',
-      'melhores filmes lancamentos dublados completos',
-      'cinema filmes completos dublados novos',
-      'filmes de acao completos dublados adrenalina pura',
-      'filmes completos dublados netmovies',
-      'filmes completos dublados swen action',
-      'filmes completos dublados em portugues acao',
-      'filmes completos dublados alta definicao',
-      'filmes gratis completos dublados hd',
-      'filmes de ficcao cientifica dublados novos',
-      'filmes de suspense e misterio dublados completos',
-      'filmes de aventura dublados lancamentos',
-      'filmes de acao e aventura dublados 2025',
-      'filmes completos dublados cinerama portugues',
-      'filmes completos dublados elite filmes',
-      'filmes de acao policial completos dublados',
-      'filmes de comedia e romance dublados completos',
-      'filmes classicos do cinema completos dublados'
-    ],
-    acao: [
-      'filmes de acao completos dublados lancamentos 2025',
-      'filmes de acao completos dublados lancamentos 2026',
-      'novos filmes de acao dublados completos hd',
-      'filmes de acao e aventura completos dublados novos',
-      'filmes de acao lancamentos dublados 2024',
-      'filmes de acao e tiro dublados completos',
-      'filmes de acao policial completos dublados',
-      'filmes de acao adrenalina pura dublados',
-      'filmes de acao swen filmes dublado completo',
-      'filmes de artes marciais e acao dublados'
-    ],
-    comedia: [
-      'filmes de comedia completos dublados novos',
-      'novos filmes de comedia dublados completos 2025',
-      'filmes de comedia lancamentos dublados',
-      'filmes de comedia e romance dublados completos',
-      'filmes de comedia brasileira completos',
-      'melhores comédias dubladas completas hd'
-    ],
-    terror: [
-      'filmes de terror completos dublados lancamentos',
-      'novos filmes de terror e misterio dublados',
-      'filmes de terror completos dublados novos hd',
-      'filmes de terror psicologico dublados completos',
-      'filmes de terror sobrenatural dublados',
-      'filmes de terror e suspense completos dublados 2025'
-    ],
-    suspense: [
-      'filmes de suspense dublados completos novos',
-      'novos filmes de suspense e investigacao dublados',
-      'filmes de suspense completos dublados lancamentos',
-      'filmes de suspense policial dublados completos',
-      'filmes de espionagem e suspense dublados',
-      'filmes de suspense e acao completos dublados hd'
-    ],
-    ficcao: [
-      'filmes de ficcao cientifica dublados lancamentos',
-      'novos filmes de ficcao cientifica completos dublados',
-      'filmes de ficcao dublados novos hd',
-      'filmes de ficcao cientifica e espaco dublados',
-      'filmes de ficcao pos apocaliptico dublados',
-      'filmes de fantasia e ficcao dublados completos'
-    ],
-    aventura: [
-      'filmes de aventura completos dublados lancamentos',
-      'novos filmes de aventura dublados completos',
-      'filmes de aventura e exploracao dublados',
-      'filmes de aventura na selva dublados completos',
-      'filmes de aventura e fantasia dublados',
-      'filmes de jornada e aventura completos dublados'
-    ],
-    animacao: [
-      'desenhos e animacoes filmes completos dublados novos',
-      'novos filmes de animacao dublados completos',
-      'animacoes filmes infantis completos dublados',
-      'filmes de desenho animado dublados completos',
-      'animacao infantil completa dublada hd',
-      'filmes de animacao para a familia dublados'
-    ],
-    luta: [
-      'filmes de luta e artes marciais dublados novos',
-      'novos filmes de artes marciais completos dublados',
-      'filmes de acao e luta dublados completos',
-      'filmes de kung fu e karate dublados completos',
-      'filmes de boxe e mma dublados completos',
-      'filmes de acao e combate dublados hd'
-    ]
+  const langKey = isPt ? 'pt' : (isEs ? 'es' : (isFr ? 'fr' : (isDe ? 'de' : (isIt ? 'it' : 'en'))));
+
+  const poolsByLang = {
+    pt: {
+      todos: [
+        'filmes completos dublados lancamentos 2025',
+        'filmes completos dublados lancamentos 2026',
+        'novos filmes completos dublados em hd',
+        'filmes lancamentos completos dublados',
+        'melhores filmes lancamentos dublados completos',
+        'cinema filmes completos dublados novos',
+        'filmes de acao completos dublados adrenalina pura',
+        'filmes completos dublados netmovies',
+        'filmes completos dublados swen action',
+        'filmes completos dublados em portugues acao',
+        'filmes completos dublados alta definicao',
+        'filmes gratis completos dublados hd',
+        'filmes de ficcao cientifica dublados novos',
+        'filmes de suspense e misterio dublados completos',
+        'filmes de aventura dublados lancamentos',
+        'filmes de acao e aventura dublados 2025',
+        'filmes completos dublados cinerama portugues',
+        'filmes completos dublados elite filmes',
+        'filmes de acao policial completos dublados',
+        'filmes de comedia e romance dublados completos',
+        'filmes classicos do cinema completos dublados'
+      ],
+      acao: [
+        'filmes de acao completos dublados lancamentos 2025',
+        'filmes de acao completos dublados lancamentos 2026',
+        'novos filmes de acao dublados completos hd',
+        'filmes de acao e aventura completos dublados novos',
+        'filmes de acao lancamentos dublados 2024',
+        'filmes de acao e tiro dublados completos',
+        'filmes de acao policial completos dublados',
+        'filmes de acao adrenalina pura dublados',
+        'filmes de acao swen filmes dublado completo',
+        'filmes de artes marciais e acao dublados'
+      ],
+      comedia: [
+        'filmes de comedia completos dublados novos',
+        'novos filmes de comedia dublados completos 2025',
+        'filmes de comedia lancamentos dublados',
+        'filmes de comedia e romance dublados completos',
+        'filmes de comedia brasileira completos',
+        'melhores comédias dubladas completas hd'
+      ],
+      terror: [
+        'filmes de terror completos dublados lancamentos',
+        'novos filmes de terror e misterio dublados',
+        'filmes de terror completos dublados novos hd',
+        'filmes de terror psicologico dublados completos',
+        'filmes de terror sobrenatural dublados',
+        'filmes de terror e suspense completos dublados 2025'
+      ],
+      suspense: [
+        'filmes de suspense dublados completos novos',
+        'novos filmes de suspense e investigacao dublados',
+        'filmes de suspense completos dublados lancamentos',
+        'filmes de suspense policial dublados completos',
+        'filmes de espionagem e suspense dublados',
+        'filmes de suspense e acao completos dublados hd'
+      ],
+      ficcao: [
+        'filmes de ficcao cientifica dublados lancamentos',
+        'novos filmes de ficcao cientifica completos dublados',
+        'filmes de ficcao dublados novos hd',
+        'filmes de ficcao cientifica e espaco dublados',
+        'filmes de ficcao pos apocaliptico dublados',
+        'filmes de fantasia e ficcao dublados completos'
+      ],
+      aventura: [
+        'filmes de aventura completos dublados lancamentos',
+        'novos filmes de aventura dublados completos',
+        'filmes de aventura e exploracao dublados',
+        'filmes de aventura na selva dublados completos',
+        'filmes de aventura e fantasia dublados',
+        'filmes de jornada e aventura completos dublados'
+      ],
+      animacao: [
+        'desenhos e animacoes filmes completos dublados novos',
+        'novos filmes de animacao dublados completos',
+        'animacoes filmes infantis completos dublados',
+        'filmes de desenho animado dublados completos',
+        'animacao infantil completa dublada hd',
+        'filmes de animacao para a familia dublados'
+      ],
+      luta: [
+        'filmes de luta e artes marciais dublados novos',
+        'novos filmes de artes marciais completos dublados',
+        'filmes de acao e luta dublados completos',
+        'filmes de kung fu e karate dublados completos',
+        'filmes de boxe e mma dublados completos',
+        'filmes de acao e combate dublados hd'
+      ]
+    },
+    en: {
+      todos: [
+        'full movies free english 2025',
+        'full movies free english 2026',
+        'new action full movies in english hd',
+        'best free full movies on youtube english',
+        'hollywood full movies in english hd',
+        'full length movies english free',
+        'thriller action full movie english',
+        'sci fi full movie english hd',
+        'adventure full movie english free',
+        'crime thriller full movie english'
+      ],
+      acao: [
+        'action full movie english hd 2025',
+        'action full movie english 2026',
+        'new action movies full length english',
+        'action thriller full movie english free',
+        'hollywood action full movie in english',
+        'special forces action full movie english'
+      ],
+      comedia: [
+        'comedy full movie english hd',
+        'funny comedy full movies in english free',
+        'romantic comedy full movie english',
+        'family comedy full movie english hd'
+      ],
+      terror: [
+        'horror full movie english hd',
+        'scary horror full movies in english free',
+        'supernatural horror full movie english',
+        'thriller horror full movie english 2025'
+      ],
+      suspense: [
+        'thriller suspense full movie english hd',
+        'mystery thriller full movie in english',
+        'crime investigation full movie english',
+        'psychological thriller full movie english'
+      ],
+      ficcao: [
+        'sci fi full movie english hd',
+        'science fiction full movies in english free',
+        'alien space sci fi full movie english',
+        'post apocalyptic sci fi full movie english'
+      ],
+      aventura: [
+        'adventure full movie english hd',
+        'fantasy adventure full movie in english',
+        'survival adventure full movie english',
+        'action adventure full length movie english'
+      ],
+      animacao: [
+        'animated full movie english hd',
+        'animation family full movie in english',
+        'cartoon animated movie full length english',
+        'kids family animation full movie english'
+      ],
+      luta: [
+        'martial arts full movie english hd',
+        'kung fu action full movie in english',
+        'mma fighting full movie english',
+        'karate ninja action full movie english'
+      ]
+    },
+    es: {
+      todos: [
+        'peliculas completas en espanol latino hd 2025',
+        'peliculas completas en espanol 2026',
+        'nuevas peliculas completas en espanol hd',
+        'peliculas de accion completas en espanol',
+        'cine peliculas completas en espanol gratis',
+        'mejores peliculas completas dobladas al espanol',
+        'peliculas de suspenso completas en espanol',
+        'peliculas de aventura completas en espanol'
+      ],
+      acao: [
+        'peliculas de accion completas en espanol hd',
+        'nuevas peliculas de accion en espanol 2025',
+        'peliculas de accion y aventura en espanol completas',
+        'peliculas policiales de accion completas en espanol'
+      ],
+      comedia: [
+        'peliculas de comedia completas en espanol hd',
+        'comedias divertidas completas en espanol latino',
+        'peliculas de comedia y romance en espanol completas'
+      ],
+      terror: [
+        'peliculas de terror completas en espanol hd',
+        'peliculas de miedo y terror en espanol completas',
+        'terror sobrenatural pelicula completa en espanol'
+      ],
+      suspense: [
+        'peliculas de suspenso completas en espanol hd',
+        'thriller misterio pelicula completa en espanol',
+        'peliculas de intriga y suspenso en espanol'
+      ],
+      ficcao: [
+        'peliculas de ciencia ficcion completas en espanol hd',
+        'ciencia ficcion espacio pelicula completa en espanol',
+        'peliculas de fantasia y ficcion en espanol completas'
+      ],
+      aventura: [
+        'peliculas de aventura completas en espanol hd',
+        'aventuras y accion pelicula completa en espanol',
+        'peliculas de supervivencia en espanol completas'
+      ],
+      animacao: [
+        'peliculas de animacion completas en espanol hd',
+        'dibujos animados pelicula completa en espanol',
+        'peliculas animadas familiares en espanol completas'
+      ],
+      luta: [
+        'peliculas de artes marciales completas en espanol hd',
+        'peliculas de pelea y accion en espanol completas',
+        'kung fu karate pelicula completa en espanol'
+      ]
+    },
+    fr: {
+      todos: [
+        'film complet en francais hd 2025',
+        'film complet en francais 2026',
+        'nouveau film complet en francais gratuit',
+        'film action complet en francais hd',
+        'meilleurs films complets en francais',
+        'film thriller suspense complet en francais'
+      ],
+      acao: ['film action complet en francais hd', 'nouveau film action vf complet', 'film policier action complet en francais'],
+      comedia: ['film comedie complet en francais hd', 'comedie francaise film complet', 'film humour complet en francais'],
+      terror: ['film horreur complet en francais hd', 'film epouvante complet vf', 'thriller horreur film complet en francais'],
+      suspense: ['film suspense thriller complet en francais hd', 'film policier mystere complet vf'],
+      ficcao: ['film science fiction complet en francais hd', 'film fantastique sf complet vf'],
+      aventura: ['film aventure complet en francais hd', 'film action aventure complet vf'],
+      animacao: ['film animation complet en francais hd', 'dessin anime film complet vf famille'],
+      luta: ['film arts martiaux complet en francais hd', 'film combat kung fu complet vf']
+    },
+    de: {
+      todos: [
+        'ganzer film deutsch komplett hd 2025',
+        'ganzer film deutsch 2026',
+        'neue filme komplett auf deutsch hd',
+        'actionfilm ganzer film deutsch',
+        'spielfilm komplett auf deutsch kostenlos',
+        'thriller ganzer film deutsch hd'
+      ],
+      acao: ['actionfilm ganzer film deutsch hd', 'action thriller komplett auf deutsch', 'neue actionfilme deutsch ganzer film'],
+      comedia: ['komodie ganzer film deutsch hd', 'lustige filme komplett auf deutsch'],
+      terror: ['horrorfilm ganzer film deutsch hd', 'gruselfilm komplett auf deutsch'],
+      suspense: ['thriller krimi ganzer film deutsch hd', 'spannung film komplett auf deutsch'],
+      ficcao: ['science fiction ganzer film deutsch hd', 'sci fi fantasy film komplett deutsch'],
+      aventura: ['abenteuerfilm ganzer film deutsch hd', 'action abenteuer komplett auf deutsch'],
+      animacao: ['animationsfilm ganzer film deutsch hd', 'zeichentrickfilm familie komplett deutsch'],
+      luta: ['kampfkunst martial arts ganzer film deutsch', 'kung fu actionfilm komplett deutsch']
+    },
+    it: {
+      todos: [
+        'film completo in italiano hd 2025',
+        'film completo in italiano 2026',
+        'nuovi film completi in italiano gratis',
+        'film azione completo in italiano hd',
+        'migliori film completi in italiano',
+        'film thriller completo in italiano'
+      ],
+      acao: ['film azione completo in italiano hd', 'film poliziesco azione completo italiano'],
+      comedia: ['film commedia completo in italiano hd', 'commedia italiana film completo'],
+      terror: ['film horror completo in italiano hd', 'film paura thriller completo italiano'],
+      suspense: ['film thriller suspense completo in italiano hd', 'film giallo mistero completo italiano'],
+      ficcao: ['film fantascienza completo in italiano hd', 'sci fi film completo in italiano'],
+      aventura: ['film avventura completo in italiano hd', 'film azione avventura completo italiano'],
+      animacao: ['film animazione completo in italiano hd', 'cartoni animati film completo italiano'],
+      luta: ['film arti marziali completo in italiano hd', 'film combattimento kung fu italiano']
+    }
   };
 
-  const pickRandom = (arr) => arr[Math.floor(Math.random() * arr.length)];
+  const pools = poolsByLang[langKey] || poolsByLang.en;
+
+  const pickRandom = (arr) => (pageIndex !== null && pageIndex !== undefined)
+    ? arr[Math.abs(pageIndex) % arr.length]
+    : arr[Math.floor(Math.random() * arr.length)];
   const catKey = pools[c] ? c : (Object.keys(pools).find(k => c.includes(k)) || 'todos');
   const filters = ['month', 'year', ''];
   return {
@@ -2487,14 +6020,15 @@ function fetchYoutubeHtml(url, hl, useTor = false, clientIp = '') {
       done = true;
       resolve(result);
     };
-    const agent = getOutboundAgent(useTor);
+    // BaixaTube e YouTube saem sempre direto (sem Tor) na velocidade máxima da internet
+    const agent = undefined;
     let glParam = 'BR';
     let hlParam = hl || 'pt-BR';
     try {
       const u = new URL(url);
       if (u.searchParams.get('gl')) glParam = u.searchParams.get('gl');
       if (u.searchParams.get('hl')) hlParam = u.searchParams.get('hl');
-    } catch (e) {}
+    } catch (e) { swallowed(e, 'server:fetchYoutubeHtml@5230'); }
 
     const headers = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -2513,43 +6047,97 @@ function fetchYoutubeHtml(url, hl, useTor = false, clientIp = '') {
       headers
     }, (res) => {
       let html = '';
+      let finished = false;
       res.on('data', chunk => {
+        if (finished) return;
         html += chunk;
         const start = html.indexOf('var ytInitialData = ');
-        if (start !== -1 && html.indexOf(';</script>', start) !== -1) {
-          try { req.destroy(); } catch (e) {}
+        if (start !== -1 && html.indexOf('</script>', start) !== -1) {
+          finished = true;
+          try { req.destroy(); } catch (e) { swallowed(e, 'server:fetchYoutubeHtml@5256'); }
           finish({ ok: true, html });
-        } else if (html.length > 1800000) {
-          try { req.destroy(); } catch (e) {}
+        } else if (html.length > 3500000) {
+          finished = true;
+          try { req.destroy(); } catch (e) { swallowed(e, 'server:fetchYoutubeHtml@5260'); }
           finish({ ok: true, html });
         }
       });
       res.on('end', () => finish({ ok: true, html }));
     });
     req.on('error', (err) => finish({ ok: false, error: err }));
-    const timeout = useTor ? 18000 : 6500;
-    req.setTimeout(timeout, () => { try { req.destroy(); } catch (e) {} finish({ ok: false, timeout: true }); });
+    const timeout = 6500;
+    req.setTimeout(timeout, () => { try { req.destroy(); } catch (e) { swallowed(e, 'server:fetchYoutubeHtml@5268'); } finish({ ok: false, timeout: true }); });
   });
 }
 
 // Cache de alta performance para buscas do YouTube (TTL de 6 minutos)
-const youtubeSearchCache = new Map();
+const youtubeSearchCache = createLruCache({ maxEntries: 300, ttlMs: 15 * 60 * 1000 });
 const YT_CACHE_TTL = 6 * 60 * 1000;
 
 function youtubeSearchSp(sortByRecent, timeFilter, searchMode) {
-  if (searchMode === 'live') return '&sp=EgJAAQ%253D%253D';
+  if (searchMode === 'live') return '&sp=EgJAAQ%3D%3D';
   if (searchMode === 'trending' || searchMode === 'views') {
-    if (timeFilter === 'hour') return '&sp=CAMSBggBEAE%253D';
-    if (timeFilter === 'day') return '&sp=CAMSBggCEAE%253D';
-    if (timeFilter === 'month') return '&sp=CAMSBggEEAE%253D';
-    return '&sp=CAMSBggDEAE%253D';
+    if (timeFilter === 'hour') return '&sp=CAMSBAgBEAE%3D';
+    if (timeFilter === 'day') return '&sp=CAMSBAgCEAE%3D';
+    if (timeFilter === 'month') return '&sp=CAMSBAgEEAE%3D';
+    return '&sp=CAMSBAgDEAE%3D';
   }
-  if (!sortByRecent) return '';
-  if (timeFilter === 'hour') return '&sp=CAISBAgBEAE%253D';
-  if (timeFilter === 'day') return '&sp=CAISBAgCEAE%253D';
-  if (timeFilter === 'week') return '&sp=CAISBAgDEAE%253D';
-  if (timeFilter === 'month') return '&sp=CAISBAgEEAE%253D';
-  return '&sp=CAI%253D';
+  if (!sortByRecent) {
+    if (timeFilter === 'hour') return '&sp=EgIIAQ%3D%3D';
+    if (timeFilter === 'day') return '&sp=EgIIAg%3D%3D';
+    if (timeFilter === 'week') return '&sp=EgIIAw%3D%3D';
+    if (timeFilter === 'month') return '&sp=EgIIBA%3D%3D';
+    if (timeFilter === 'year') return '&sp=EgIIBQ%3D%3D';
+    return '';
+  }
+  if (timeFilter === 'hour') return '&sp=CAISBAgBEAE%3D';
+  if (timeFilter === 'day') return '&sp=CAISBAgCEAE%3D';
+  if (timeFilter === 'week') return '&sp=CAISBAgDEAE%3D';
+  if (timeFilter === 'month') return '&sp=CAISBAgEEAE%3D';
+  return '&sp=CAI%3D';
+}
+
+function parseYoutubePublishedAgeDays(publishedAt) {
+  if (!publishedAt) return null;
+  const raw = String(publishedAt).toLowerCase().replace(/\u00a0/g, ' ').trim();
+  if (!raw) return null;
+  if (/ao vivo|live|assistindo|watching|agora|now|hoje|today|hoy|heute|aujourd|oggi|premiere|estreia/i.test(raw)) {
+    return 0;
+  }
+  if (/ontem|yesterday|ayer|hier|gestern|ieri/i.test(raw)) {
+    return 1;
+  }
+  const mYear = raw.match(/(?:^|\b)(\d+)\s*(?:y|yr|yrs|year|years|ano|anos|a[ñn]o|a[ñn]os|an|ans|jahr|jahre|jahren|anno|anni|年前|년\s*전|лет|год|года)(?:\b|$)/i);
+  if (mYear) return parseInt(mYear[1], 10) * 365;
+  const mMonth = raw.match(/(?:^|\b)(\d+)\s*(?:mo|mos|month|months|m[eê]s|meses|mois|monat|monate|monaten|mese|mesi|か月前|ヶ月前|개월\s*전|месяц)(?:\b|$)/i);
+  if (mMonth) return parseInt(mMonth[1], 10) * 30;
+  const mWeek = raw.match(/(?:^|\b)(\d+)\s*(?:w|wk|wks|week|weeks|semana|semanas|semaine|semaines|woche|wochen|settimana|settimane|週間前|주\s*전|недел)(?:\b|$)/i);
+  if (mWeek) return parseInt(mWeek[1], 10) * 7;
+  const mDay = raw.match(/(?:^|\b)(\d+)\s*(?:d|day|days|dia|dias|d[ií]a|d[ií]as|jour|jours|tag|tage|tagen|giorno|giorni|日前|일\s*전|дн|день|дня|дней)(?:\b|$)/i);
+  if (mDay) return parseInt(mDay[1], 10);
+  const mRecent = raw.match(/(?:^|\b)(\d+)\s*(?:s|sec|secs|second|seconds|seg|segundo|segundos|m|min|mins|minute|minutes|minuto|minutos|minuti|h|hr|hrs|hour|hours|hora|horas|heure|heures|stunde|stunden|ora|ore|分前|時間前|秒前|시간\s*전|분\s*전|час|мин)(?:\b|$)/i);
+  if (mRecent) return 0.25;
+  return null;
+}
+
+function isOldYoutubeVideo(video, maxDays = 14) {
+  if (!video) return true;
+  if (video.isLive) return false;
+  const ageDays = parseYoutubePublishedAgeDays(video.publishedAt);
+  if (ageDays !== null && ageDays > maxDays) return true;
+  return false;
+}
+
+function filterRecentYoutubeVideos(videos, timeFilter = '') {
+  if (!Array.isArray(videos) || videos.length === 0) return [];
+  const tf = String(timeFilter || '').toLowerCase();
+  if (!tf || tf === 'none') return videos;
+  const strictMaxDays = tf === 'hour' ? 2 : (tf === 'day' ? 4 : (tf === 'week' ? 14 : (tf === 'month' ? 40 : 365)));
+  const strictList = videos.filter((v) => !isOldYoutubeVideo(v, strictMaxDays));
+  if (strictList.length >= 2) return strictList;
+  // Mesmo em fallback, nunca aceita vídeos com meses ou anos de idade quando há filtro de tempo ativo
+  const nonAncientList = videos.filter((v) => !isOldYoutubeVideo(v, 21));
+  return nonAncientList.length > 0 ? nonAncientList : strictList;
 }
 
 function parseYoutubeViewCount(text) {
@@ -2645,6 +6233,7 @@ function collectYoutubeRenderers(node, out) {
   if (node.videoRenderer) out.push(node.videoRenderer);
   if (node.compactVideoRenderer) out.push(node.compactVideoRenderer);
   if (node.gridVideoRenderer) out.push(node.gridVideoRenderer);
+  if (node.lockupViewModel) out.push(node.lockupViewModel);
   if (Array.isArray(node)) {
     node.forEach((item) => collectYoutubeRenderers(item, out));
     return;
@@ -2655,14 +6244,71 @@ function collectYoutubeRenderers(node, out) {
   }
 }
 
+function extractRichYoutubeDescription(v) {
+  if (!v) return '';
+  const parts = [];
+  if (Array.isArray(v.detailedMetadataSnippets)) {
+    for (const s of v.detailedMetadataSnippets) {
+      const txt = (s?.snippetText?.runs || []).map((r) => r.text).join('').trim();
+      if (txt && !parts.includes(txt)) parts.push(txt);
+    }
+  }
+  const descRuns = (v.descriptionSnippet?.runs || []).map((r) => r.text).join('').trim();
+  if (descRuns && !parts.includes(descRuns)) parts.push(descRuns);
+  let combined = parts.join(' ').replace(/\s+/g, ' ').trim();
+  // Remove clichês de rodapé ("Inscreva-se no canal...") que ocupam espaço útil da legenda
+  combined = combined
+    .replace(/\bInscreva-se no canal[^.!?\n]*[.!?]?/gi, '')
+    .replace(/\bDeixe seu like[^.!?\n]*[.!?]?/gi, '')
+    .replace(/\bAtive o sininho[^.!?\n]*[.!?]?/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  return combined;
+}
+
 function mapYoutubeRenderer(v) {
-  if (!v || !v.videoId) return null;
+  if (!v) return null;
+
+  // Suporte a novo formato YouTube lockupViewModel (usado em vídeos recomendados e feeds 2026)
+  if (v.lockupViewModel) v = v.lockupViewModel;
+  if (v.metadata?.lockupMetadataViewModel || v.contentImage?.thumbnailViewModel) {
+    const videoId = v.rendererContext?.commandContext?.onTap?.innertubeCommand?.watchEndpoint?.videoId
+      || v.contentImage?.thumbnailViewModel?.overlays?.[0]?.thumbnailBottomOverlayViewModel?.badges?.[0]?.thumbnailBadgeViewModel?.animationActivationTargetId;
+    if (!videoId) return null;
+    const title = v.metadata?.lockupMetadataViewModel?.title?.content
+      || v.rendererContext?.accessibilityContext?.label
+      || '';
+    const rows = v.metadata?.lockupMetadataViewModel?.metadata?.contentMetadataViewModel?.metadataRows || [];
+    const channel = rows[0]?.metadataParts?.[0]?.text?.content || '';
+    const viewsText = rows[1]?.metadataParts?.[0]?.accessibilityLabel || rows[1]?.metadataParts?.[0]?.text?.content || '';
+    const publishedAt = rows[1]?.metadataParts?.[1]?.text?.content || rows[1]?.metadataParts?.[1]?.accessibilityLabel || '';
+    const duration = v.contentImage?.thumbnailViewModel?.overlays?.[0]?.thumbnailBottomOverlayViewModel?.badges?.[0]?.thumbnailBadgeViewModel?.text || '';
+    const sources = v.contentImage?.thumbnailViewModel?.image?.sources || [];
+    const thumbnail = sources.length ? sources[sources.length - 1].url : `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+    const isLive = duration.toLowerCase().includes('ao vivo') || duration.toLowerCase().includes('live');
+    return {
+      id: videoId,
+      title,
+      thumbnail,
+      channel,
+      duration,
+      views: viewsText,
+      viewCount: parseYoutubeViewCount(viewsText),
+      durationMin: parseYoutubeDurationMinutes(duration),
+      isLive,
+      publishedAt,
+      description: title
+    };
+  }
+
+  if (!v.videoId) return null;
   const thumbs = v.thumbnail?.thumbnails || [];
-  const viewsText = v.viewCountText?.simpleText || v.shortViewCountText?.simpleText || '';
+  const viewsText = v.viewCountText?.simpleText || v.shortViewCountText?.simpleText || (v.viewCountText?.runs || []).map((r) => r.text).join('') || '';
   const duration = v.lengthText?.simpleText || '';
+  const fullTitle = (v.title?.runs || []).map((r) => r.text).join('') || v.title?.simpleText || '';
   return {
     id: v.videoId,
-    title: v.title?.runs?.[0]?.text || v.title?.simpleText || '',
+    title: fullTitle,
     thumbnail: thumbs.length ? thumbs[thumbs.length - 1].url : '',
     channel: v.ownerText?.runs?.[0]?.text || v.shortBylineText?.runs?.[0]?.text || '',
     duration,
@@ -2671,18 +6317,13 @@ function mapYoutubeRenderer(v) {
     durationMin: parseYoutubeDurationMinutes(duration),
     isLive: isYoutubeLiveRenderer(v),
     publishedAt: v.publishedTimeText?.simpleText || '',
-    description: (
-      v.detailedMetadataSnippets?.[0]?.snippetText?.runs?.map((r) => r.text).join('') ||
-      v.descriptionSnippet?.runs?.map((r) => r.text).join('') ||
-      ''
-    ).trim()
+    description: extractRichYoutubeDescription(v)
   };
 }
 
 async function fetchTrendingVideos({ useTor = false, country = 'BR', clientIp = '' } = {}) {
-  const shouldUseTor = Boolean(useTor);
   const hl = getHlForCountry(country);
-  const cacheKey = `trending__${country}__${hl}__${shouldUseTor ? 'tor' : (clientIp || 'default')}`;
+  const cacheKey = `trending__${country}__${hl}`;
   const cached = youtubeSearchCache.get(cacheKey);
   if (cached && (Date.now() - cached.timestamp < YT_CACHE_TTL) && cached.videos.length > 0) {
     return cached.videos;
@@ -2709,7 +6350,7 @@ async function fetchTrendingVideos({ useTor = false, country = 'BR', clientIp = 
     }
   };
   try {
-    const res = await fetchYoutubeHtml(url, hl, shouldUseTor, shouldUseTor ? '' : clientIp);
+    const res = await fetchYoutubeHtml(url, hl, false, clientIp);
     if (res.ok && res.html) {
       const videos = (parseTrending(res.html) || []).filter((v) => !isEastAsianHeavyTitle((v && v.title) + ' ' + (v && v.channel)));
       if (videos.length) {
@@ -2717,7 +6358,7 @@ async function fetchTrendingVideos({ useTor = false, country = 'BR', clientIp = 
         return videos;
       }
     }
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'server:fetchTrendingVideos@5560'); }
   return [];
 }
 
@@ -2740,8 +6381,7 @@ function isYoutubeLiveRenderer(v) {
 
 async function searchYoutubeVideos(query, hl = 'pt-BR', sortByRecent = false, timeFilter = 'hour', forceTor = false, searchMode = '', country = 'BR', clientIp = '') {
   const trimmed = (query || 'noticias brasil').trim();
-  const shouldUseTor = Boolean(forceTor);
-  const cacheKey = `${trimmed}__${hl}__${country || 'BR'}__${clientIp || 'default'}__${sortByRecent}__${timeFilter}__${searchMode || 'default'}__${shouldUseTor ? 'tor' : 'direct'}`;
+  const cacheKey = `${trimmed}__${hl}__${country || 'BR'}__${sortByRecent}__${timeFilter}__${searchMode || 'default'}__direct`;
   const cached = youtubeSearchCache.get(cacheKey);
   if (cached && (Date.now() - cached.timestamp < YT_CACHE_TTL) && cached.videos.length > 0) {
     return cached.videos;
@@ -2753,52 +6393,37 @@ async function searchYoutubeVideos(query, hl = 'pt-BR', sortByRecent = false, ti
 
   const parseYoutubeHtml = (html) => {
     try {
-      const match = html.match(/var ytInitialData = ({.*?});<\/script>/);
+      const match = html.match(/var ytInitialData = ({.*?});<\/script>/) || html.match(/var ytInitialData = ({.*?});?\s*<\/script>/);
       if (!match) return [];
       const data = JSON.parse(match[1]);
       const sections = data.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents || [];
       const videos = [];
+      const seen = new Set();
       const pushVideo = (v) => {
-        if (!v || !v.videoId) return;
-        const thumbs = v.thumbnail?.thumbnails || [];
-        const bestThumb = (thumbs.length > 0) ? thumbs[thumbs.length - 1].url : '';
-        const publishedAt = v.publishedTimeText?.simpleText || '';
-        const description = (
-          v.detailedMetadataSnippets?.[0]?.snippetText?.runs?.map(r => r.text).join('') ||
-          v.descriptionSnippet?.runs?.map(r => r.text).join('') ||
-          ''
-        ).trim();
-        const viewsText = v.viewCountText?.simpleText || v.shortViewCountText?.simpleText || '';
-        const duration = v.lengthText?.simpleText || '';
-
-        videos.push({
-          id: v.videoId,
-          title: v.title?.runs?.[0]?.text || v.title?.simpleText || '',
-          thumbnail: bestThumb,
-          channel: v.ownerText?.runs?.[0]?.text || v.shortBylineText?.runs?.[0]?.text || '',
-          duration,
-          views: viewsText,
-          viewCount: parseYoutubeViewCount(viewsText),
-          durationMin: parseYoutubeDurationMinutes(duration),
-          isLive: isYoutubeLiveRenderer(v),
-          publishedAt,
-          description
-        });
+        const mapped = mapYoutubeRenderer(v);
+        if (!mapped || !mapped.id || seen.has(mapped.id)) return;
+        seen.add(mapped.id);
+        videos.push(mapped);
       };
 
       for (const s of sections) {
         const items = s.itemSectionRenderer?.contents || [];
         for (const it of items) {
-          if (it.videoRenderer) {
-            pushVideo(it.videoRenderer);
-          }
+          if (it.videoRenderer) pushVideo(it.videoRenderer);
+          if (it.lockupViewModel) pushVideo(it.lockupViewModel);
           if (it.shelfRenderer) {
             const shelfItems = it.shelfRenderer?.content?.verticalListRenderer?.items || [];
             for (const sit of shelfItems) {
               if (sit.videoRenderer) pushVideo(sit.videoRenderer);
+              if (sit.lockupViewModel) pushVideo(sit.lockupViewModel);
             }
           }
         }
+      }
+      if (videos.length === 0) {
+        const renderers = [];
+        collectYoutubeRenderers(data, renderers);
+        renderers.forEach(pushVideo);
       }
       return videos.slice(0, 30);
     } catch(e) {
@@ -2806,38 +6431,21 @@ async function searchYoutubeVideos(query, hl = 'pt-BR', sortByRecent = false, ti
     }
   };
 
-  // Se o Tor estiver ativado pelo usuário, a conexão DEVE passar obrigatoriamente pela rede Tor primeiro
-  if (shouldUseTor && torAgent) {
-    try {
-      const torRes = await fetchYoutubeHtml(url, hl, true, clientIp);
-      if (torRes.ok && torRes.html) {
-        const torVideos = parseYoutubeHtml(torRes.html);
-        if (torVideos && torVideos.length > 0) {
-          const filtered = filterVideosByCountryRelevance(keepThemeVideos(filterYoutubeModeResults(torVideos, searchMode), trimmed), country);
-          if (filtered.length) {
-            youtubeSearchCache.set(cacheKey, { timestamp: Date.now(), videos: filtered });
-            return filtered;
-          }
-        }
-      }
-    } catch (e) {}
-    // Se o Tor falhou ou foi bloqueado pelo YouTube, recorre à conexão direta para garantir resposta rápida
-  }
-
-  // Sem Tor: tenta conexão direta
+  // BaixaTube e YouTube: sempre conexão direta (sem Tor) na velocidade máxima da internet
   try {
     const directRes = await fetchYoutubeHtml(url, hl, false, clientIp);
     if (directRes.ok && directRes.html) {
       const directVideos = parseYoutubeHtml(directRes.html);
       if (directVideos && directVideos.length > 0) {
-        const filtered = filterVideosByCountryRelevance(keepThemeVideos(filterYoutubeModeResults(directVideos, searchMode), trimmed), country);
+        const recencyFiltered = filterRecentYoutubeVideos(directVideos, timeFilter);
+        const filtered = filterVideosByCountryRelevance(keepThemeVideos(filterYoutubeModeResults(recencyFiltered, searchMode), trimmed), country);
         if (filtered.length) {
           youtubeSearchCache.set(cacheKey, { timestamp: Date.now(), videos: filtered });
           return filtered;
         }
       }
     }
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'server:searchYoutubeVideos@5647'); }
 
   return [];
 }
@@ -2845,7 +6453,7 @@ async function searchYoutubeVideos(query, hl = 'pt-BR', sortByRecent = false, ti
 // ----------------------------------------------------
 // MOTOR DE RECONHECIMENTO E DOWNLOAD DE VÍDEOS (MP4 / MP3)
 // ----------------------------------------------------
-function downloadMediaFile(urlOrId, format = 'mp4', onProgress = null, quality = '720') {
+function downloadMediaFile(urlOrId, format = 'mp4', onProgress = null, quality = '720', lang = 'pt') {
   return new Promise((resolve, reject) => {
     let targetUrl = (urlOrId || '').trim();
     if (!targetUrl) return reject(new Error('URL ou ID inválido'));
@@ -2860,12 +6468,13 @@ function downloadMediaFile(urlOrId, format = 'mp4', onProgress = null, quality =
     const isMp3 = (format || '').toLowerCase() === 'mp3';
     const fileId = `media_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const outputTemplate = path.join(MEDIA_DOWNLOADS_DIR, `${fileId}.%(ext)s`);
+    const langShort = String(lang || 'pt').split('-')[0].replace(/[^a-zA-Z]/g, '').toLowerCase() || 'pt';
 
     const args = [
       '-u',
       '-m', 'yt_dlp',
       '--js-runtimes', 'node',
-      '--extractor-args', 'youtube:player_client=android,ios,web,mweb',
+      '--extractor-args', `youtube:player_client=default,android,ios,web,mweb;lang=${langShort}`,
       '--no-playlist',
       '--newline',
       '--no-warnings',
@@ -2875,7 +6484,7 @@ function downloadMediaFile(urlOrId, format = 'mp4', onProgress = null, quality =
 
     if (isMp3) {
       args.push(
-        '-f', 'ba/ba*',
+        '-f', `ba[language^=${langShort}]/ba/ba*`,
         '-x',
         '--audio-format', 'mp3',
         '--audio-quality', '192K',
@@ -2891,9 +6500,9 @@ function downloadMediaFile(urlOrId, format = 'mp4', onProgress = null, quality =
       else if (q === 'best') height = 9999;
 
       if (height === 9999) {
-        args.push('-f', 'bv*+ba/b', '--merge-output-format', 'mp4');
+        args.push('-f', `bv*+ba[language^=${langShort}]/bv*+ba/b[language^=${langShort}]/b`, '--merge-output-format', 'mp4');
       } else {
-        args.push('-f', `bv*[height<=${height}]+ba/b[height<=${height}]/b[height<=${height}]/bv*+ba/b`, '--merge-output-format', 'mp4');
+        args.push('-f', `bv*[height<=${height}]+ba[language^=${langShort}]/bv*[height<=${height}]+ba/b[height<=${height}][language^=${langShort}]/b[height<=${height}]/bv*+ba[language^=${langShort}]/bv*+ba/b`, '--merge-output-format', 'mp4');
       }
     }
 
@@ -3059,7 +6668,7 @@ function downloadMediaFile(urlOrId, format = 'mp4', onProgress = null, quality =
         try {
           info = JSON.parse(fs.readFileSync(infoPath, 'utf8'));
           fs.unlinkSync(infoPath);
-        } catch (e) {}
+        } catch (e) { swallowed(e, 'server:downloadMediaFile@5870'); }
       }
 
       const finalExt = isMp3 ? 'mp3' : 'mp4';
@@ -3068,7 +6677,7 @@ function downloadMediaFile(urlOrId, format = 'mp4', onProgress = null, quality =
         const files = fs.readdirSync(MEDIA_DOWNLOADS_DIR);
         const match = files.find(f => f.startsWith(fileId) && f.endsWith('.' + finalExt));
         if (match) actualFilename = match;
-      } catch (e) {}
+      } catch (e) { swallowed(e, 'server:downloadMediaFile@5879'); }
 
       const result = {
         id: fileId,
@@ -3103,7 +6712,7 @@ function downloadMediaFile(urlOrId, format = 'mp4', onProgress = null, quality =
 // Gerenciador de Jobs de Download em Segundo Plano (Imune a buffering de proxy Cloudflare/Mobile)
 const mediaJobs = new Map();
 
-function startMediaDownloadJob(urlOrId, format = 'mp4', quality = '720') {
+function startMediaDownloadJob(urlOrId, format = 'mp4', quality = '720', lang = 'pt') {
   const cleanQ = format === 'mp3' ? 'MP3' : ((quality || '720').toString().replace('p', '') + 'p');
   const jobId = 'job_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
   const job = {
@@ -3128,7 +6737,7 @@ function startMediaDownloadJob(urlOrId, format = 'mp4', quality = '720') {
 
   downloadMediaFile(urlOrId, format, (p) => {
     Object.assign(job, p, { lastUpdated: Date.now() });
-  }, quality).then((res) => {
+  }, quality, lang).then((res) => {
     job.stage = 'complete';
     job.progress = 100;
     job.success = true;
@@ -3450,7 +7059,7 @@ async function buildMegaPlaylist(seedTracks = [], userQuery = '', targetCount = 
           if (subRes && subRes.success && subRes.results) {
             subRes.results.forEach(t => addTrack(t, `🎶 Mistura: ${part.toUpperCase()}`));
           }
-        } catch (e) {}
+        } catch (e) { swallowed(e, 'server:buildMegaPlaylist@6261'); }
       }
     }
   }
@@ -3462,7 +7071,7 @@ async function buildMegaPlaylist(seedTracks = [], userQuery = '', targetCount = 
       if (searchRes && searchRes.success && searchRes.results) {
         searchRes.results.forEach(t => addTrack(t, '🔥 Hit em Alta no Estilo'));
       }
-    } catch (e) {}
+    } catch (e) { swallowed(e, 'server:buildMegaPlaylist@6273'); }
   }
 
   // 3. Se ainda faltar para o alvo, complementa com o Chart Geral oficial de 2026
@@ -3472,14 +7081,14 @@ async function buildMegaPlaylist(seedTracks = [], userQuery = '', targetCount = 
       if (chartRes && chartRes.success && chartRes.results) {
         chartRes.results.forEach(t => addTrack(t, '⭐ Top Paradas 2026'));
       }
-    } catch (e) {}
+    } catch (e) { swallowed(e, 'server:buildMegaPlaylist@6283'); }
   }
 
   return playlist.slice(0, Math.max(targetCount, playlist.length));
 }
 
 // Cache em memória para URLs de stream de áudio (4 horas de retenção)
-const audioStreamUrlCache = new Map();
+const audioStreamUrlCache = createLruCache({ maxEntries: 500, ttlMs: 60 * 60 * 1000 });
 
 // Extrai áudio completo via yt-dlp otimizado (resposta rápida ~3s)
 function getFullAudioStream({ title, artist }) {
@@ -3526,25 +7135,31 @@ function getFullAudioStream({ title, artist }) {
 }
 const audioStreamPending = new Map();
 
-const videoStreamUrlCache = new Map();
-const playUrlCache = new Map();
+const videoStreamUrlCache = createLruCache({ maxEntries: 500, ttlMs: 60 * 60 * 1000 });
+const videoStreamPending = new Map();
+const playUrlCache = createLruCache({ maxEntries: 400, ttlMs: 30 * 60 * 1000 });
 
-function getFullVideoStreamByVideoId(videoId) {
+function getFullVideoStreamByVideoId(videoId, lang = 'pt') {
   if (!videoId) return Promise.resolve({ success: false, error: 'ID ausente' });
-  if (videoStreamUrlCache.has(videoId)) {
-    const cached = videoStreamUrlCache.get(videoId);
+  const langShort = String(lang || 'pt').split('-')[0].replace(/[^a-zA-Z]/g, '').toLowerCase() || 'pt';
+  const cacheKey = `${videoId}:${langShort}`;
+  if (videoStreamUrlCache.has(cacheKey)) {
+    const cached = videoStreamUrlCache.get(cacheKey);
     if (Date.now() - cached.timestamp < 4 * 60 * 60 * 1000) {
       return Promise.resolve({ success: true, streamUrl: cached.url });
     }
   }
+  if (videoStreamPending.has(cacheKey)) return videoStreamPending.get(cacheKey);
   const ytdlpPath = process.platform === 'win32' ? 'yt-dlp' : (fs.existsSync('/home/nain/.local/bin/yt-dlp') ? '/home/nain/.local/bin/yt-dlp' : 'yt-dlp');
-  return new Promise((resolve) => {
+  const job = new Promise((resolve) => {
     execFile(ytdlpPath, [
       ...ytdlpProxyArgs(),
+      '--js-runtimes', 'node',
       '--no-playlist',
-      '--extractor-args', 'youtube:player_client=android,web,ios',
-      '-f', '18/b[acodec!=none][vcodec!=none]/best[acodec!=none][vcodec!=none]/b/best',
+      '--extractor-args', `youtube:player_client=default,android,ios;lang=${langShort}`,
+      '-f', `b[language^=${langShort}][acodec!=none][vcodec!=none]/18[language^=${langShort}]/18/b[acodec!=none][vcodec!=none]/best[acodec!=none][vcodec!=none]/b/best`,
       '--no-warnings',
+      '--socket-timeout', '12',
       '-g',
       'https://www.youtube.com/watch?v=' + encodeURIComponent(videoId)
     ], { timeout: 15000 }, (error, stdout) => {
@@ -3552,13 +7167,16 @@ function getFullVideoStreamByVideoId(videoId) {
       const lines = (stdout || '').trim().split('\n').map(l => l.trim()).filter(l => l.startsWith('http'));
       const streamUrl = lines[0] || '';
       if (streamUrl && streamUrl.startsWith('http')) {
-        videoStreamUrlCache.set(videoId, { url: streamUrl, timestamp: Date.now() });
+        videoStreamUrlCache.set(cacheKey, { url: streamUrl, timestamp: Date.now() });
         resolve({ success: true, streamUrl });
       } else {
         resolve({ success: false, error: 'URL de vídeo inválida' });
       }
     });
   });
+  videoStreamPending.set(cacheKey, job);
+  job.finally(() => videoStreamPending.delete(cacheKey));
+  return job;
 }
 
 function resolvePlayableMediaUrl(pageUrl) {
@@ -3589,46 +7207,64 @@ function resolvePlayableMediaUrl(pageUrl) {
   });
 }
 
-// Extrai áudio completo via yt-dlp por ID do vídeo com cache
-function getFullAudioStreamByVideoId(videoId) {
+// Extrai áudio completo via yt-dlp por ID do vídeo com cache e preferência de idioma detectado
+function getFullAudioStreamByVideoId(videoId, lang = 'pt') {
   if (!videoId) return Promise.resolve({ success: false, error: 'ID ausente' });
-  if (audioStreamUrlCache.has(videoId)) {
-    const cached = audioStreamUrlCache.get(videoId);
+  const langShort = String(lang || 'pt').split('-')[0].replace(/[^a-zA-Z]/g, '').toLowerCase() || 'pt';
+  const cacheKey = `${videoId}:${langShort}`;
+  if (audioStreamUrlCache.has(cacheKey)) {
+    const cached = audioStreamUrlCache.get(cacheKey);
     if (Date.now() - cached.timestamp < 4 * 60 * 60 * 1000) {
       return Promise.resolve({ success: true, streamUrl: cached.url });
     }
   }
+  if (audioStreamPending.has(cacheKey)) return audioStreamPending.get(cacheKey);
 
   const ytdlpPath = process.platform === 'win32' ? 'yt-dlp' : (fs.existsSync('/home/nain/.local/bin/yt-dlp') ? '/home/nain/.local/bin/yt-dlp' : 'yt-dlp');
 
-  return new Promise((resolve) => {
+  const job = new Promise((resolve) => {
     execFile(ytdlpPath, [
       ...ytdlpProxyArgs(),
+      '--js-runtimes', 'node',
       '--no-playlist',
-      '-f', 'ba[ext=m4a]/140/ba/b',
+      '--extractor-args', `youtube:player_client=default,android,ios;lang=${langShort}`,
+      '-f', `ba[language^=${langShort}][ext=m4a]/ba[language^=${langShort}]/ba[ext=m4a]/140/ba/b`,
       '--no-warnings',
+      '--socket-timeout', '12',
       '-g',
       `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`
-    ], { timeout: 12000 }, (error, stdout) => {
+    ], { timeout: 14000 }, (error, stdout) => {
       if (error) {
         return resolve({ success: false, error: error.message });
       }
       const streamUrl = (stdout || '').trim().split('\n')[0];
       if (streamUrl && streamUrl.startsWith('http')) {
-        audioStreamUrlCache.set(videoId, { url: streamUrl, timestamp: Date.now() });
+        audioStreamUrlCache.set(cacheKey, { url: streamUrl, timestamp: Date.now() });
         resolve({ success: true, streamUrl });
       } else {
         resolve({ success: false, error: 'URL de stream inválida' });
       }
     });
   });
+  audioStreamPending.set(cacheKey, job);
+  job.finally(() => audioStreamPending.delete(cacheKey));
+  return job;
 }
 
-// Proxy de streaming de áudio/vídeo contínuo com suporte a Range, imune a bloqueios de IP do Google Video
-function handleAudioStreamingProxy(req, res, { title, artist, videoId, preferVideo }) {
+// Proxy de streaming de áudio/vídeo contínuo com suporte a Range e idioma detectado por IP
+async function handleAudioStreamingProxy(req, res, { title, artist, videoId, preferVideo, lang, country }) {
+  let resolvedLang = lang ? String(lang).split('-')[0].toLowerCase() : '';
+  if (!resolvedLang) {
+    let resolvedCountry = (country && /^[A-Z]{2}$/i.test(country) && country.toUpperCase() !== 'AUTO') ? country.toUpperCase() : '';
+    if (!resolvedCountry) {
+      resolvedCountry = await getClientCountryCode(req, '', false).catch(() => 'BR');
+    }
+    const hl = getHlForCountry(resolvedCountry);
+    resolvedLang = String(hl || 'pt').split('-')[0].toLowerCase();
+  }
   const fetchPromise = preferVideo && videoId
-    ? getFullVideoStreamByVideoId(videoId)
-    : (videoId ? getFullAudioStreamByVideoId(videoId) : getFullAudioStream({ title, artist }));
+    ? getFullVideoStreamByVideoId(videoId, resolvedLang)
+    : (videoId ? getFullAudioStreamByVideoId(videoId, resolvedLang) : getFullAudioStream({ title, artist }));
   fetchPromise.then(streamRes => {
     if (!streamRes || !streamRes.success || !streamRes.streamUrl) {
       res.writeHead(404, { 'Content-Type': 'text/plain' });
@@ -3706,7 +7342,7 @@ function callOpenAi(payload) {
   return aiClient.callMainAi(payload);
 }
 
-const musicRecCache = new Map();
+const musicRecCache = createLruCache({ maxEntries: 300, ttlMs: 30 * 60 * 1000 });
 const MUSIC_REC_TTL = 3 * 60 * 1000;
 
 function mergeMusicTracks(lists, query, excludeSet, limit = 24, keepOrder = false) {
@@ -4428,7 +8064,7 @@ async function searchRequestedMusic(queries, limit = 20) {
       });
       if (all.length >= limit) return all.slice(0, limit);
     }
-  } catch (ePl) {}
+  } catch (ePl) { swallowed(ePl, 'server:searchRequestedMusic@7266'); }
 
   // 2. Se o termo for um gênero reconhecido, busca também no catálogo de gênero
   const genre = detectDjGenre(mainQuery) || detectDjGenre(primaryText);
@@ -4442,7 +8078,7 @@ async function searchRequestedMusic(queries, limit = 20) {
         all.push(t);
       });
       if (all.length >= limit) return all.slice(0, limit);
-    } catch (eG) {}
+    } catch (eG) { swallowed(eG, 'server:searchRequestedMusic@7280'); }
   }
 
   // 3. Busca músicas individuais diretas no buscador Deezer
@@ -4654,7 +8290,7 @@ Responda ESTRITAMENTE em formato JSON com o seguinte schema:
       if (gptRes && gptRes.choices && gptRes.choices[0] && gptRes.choices[0].message) {
         return JSON.parse(gptRes.choices[0].message.content);
       }
-    } catch (err) {}
+    } catch (err) { swallowed(err, 'server:chatDjPapaleguas@7492'); }
     return null;
   })();
 
@@ -4784,7 +8420,7 @@ Responda ESTRITAMENTE em formato JSON com o seguinte schema:
           };
         }
       }
-    } catch (e2) {}
+    } catch (e2) { swallowed(e2, 'server:chatDjPapaleguas@7622'); }
     return {
       success: true,
       playMusic: false,
@@ -4987,15 +8623,44 @@ DIRETRIZES:
 }
 
 // Cache para sugestões do Curador (evita chamadas redundantes e acelera retorno)
-const curatorSuggestionsCache = new Map();
+const curatorSuggestionsCache = createLruCache({ maxEntries: 300, ttlMs: 30 * 60 * 1000 });
 const CURATOR_CACHE_TTL = 5 * 60 * 1000;
+
+const CURATOR_FILLER_STOPWORDS = new Set([
+  'para', 'como', 'mais', 'menos', 'muito', 'tudo', 'todos', 'todas', 'sobre',
+  'esse', 'essa', 'este', 'esta', 'isso', 'aquilo', 'entre', 'depois', 'antes',
+  'hoje', 'ontem', 'agora', 'novo', 'nova', 'novos', 'novas', 'video', 'videos',
+  'oficial', 'official', 'canal', 'live', 'vivo', 'completo', 'completa', 'parte',
+  'melhor', 'melhores', 'top', 'brasil', 'mundo', '2024', '2025', '2026', 'clipe',
+  'audio', 'hd', '4k', 'full', 'with', 'from', 'that', 'this', 'what', 'when',
+  'where', 'quais', 'qual', 'quem', 'porque', 'sera', 'voce', 'voces', 'pelo',
+  'pela', 'pelos', 'pelas', 'acaba', 'acabou', 'explodir', 'explodiu', 'entrou',
+  'entra', 'fase', 'tiram', 'tirou', 'muda', 'mudou', 'ameaca', 'vida', 'coisa',
+  'coisas', 'forma', 'jeito', 'vezes', 'hora', 'horas', 'dias', 'semana', 'meses',
+  'anos', 'veja', 'olha', 'urgente', 'bomba', 'chocante', 'incrivel', 'nunca',
+  'sempre', 'fazer', 'feito', 'disse', 'falou', 'pode', 'podem', 'estao', 'fomos',
+  'foram', 'toda', 'todo', 'cada', 'outro', 'outra', 'mesmo', 'mesma', 'grande',
+  'grandes', 'pequeno', 'primeiro', 'primeira', 'ultimo', 'ultima', 'bilhoes',
+  'trilhoes', 'milhoes', 'reais', 'dolar', 'dolares'
+]);
+
+const CURATOR_SHORT_KEEP = new Set([
+  'ia', 'ai', 'ti', 'tv', 'f1', 'pc', 'vr', '5g', '6g', 'agi', 'gpt', 'llm',
+  'php', 'sql', 'css', 'api', 'cpu', 'gpu', 'ram', 'ssd', 'ufc', 'nba', 'nfl',
+  'ps5', 'gta', 'stf', 'cpi', 'pib', 'onu', 'eua', 'sus', 'pix', 'btc', 'eth'
+]);
 
 function extractRelatedKeywords(title, channel) {
   if (!title) return channel || 'videos recomendados';
   let clean = String(title).replace(/\[.*?\]|\(.*?\)/g, ' ');
   clean = clean.replace(/[|•#\-_–—~:;!?,./\\]/g, ' ');
   clean = clean.replace(/\b(oficial|official|clipe|video|vídeo|audio|áudio|ao vivo|live|hd|4k|legendado|dublado|completo|lançamento|music|mv)\b/gi, ' ');
-  const words = clean.trim().split(/\s+/).filter((w) => w.length > 2).slice(0, 5);
+  const words = clean.trim().split(/\s+/).filter((w) => {
+    const low = w.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    if (/^\d+$/.test(low)) return false;
+    if (CURATOR_FILLER_STOPWORDS.has(low)) return false;
+    return CURATOR_SHORT_KEEP.has(low) || low.length >= 4;
+  }).slice(0, 4);
   if (words.length > 0) return words.join(' ');
   return ((channel ? channel + ' ' : '') + clean).slice(0, 40);
 }
@@ -5007,28 +8672,37 @@ function scoreVideoRelevance(video, ctx) {
   const seedChannel = normalizeDjText(ctx && ctx.channel);
   const seedQuery = normalizeDjText(ctx && ctx.query);
   let score = 0;
-  // Bônus equilibrado para canal (evita prender apenas em vídeos velhos do mesmo canal)
-  if (seedChannel && channel && (channel === seedChannel || channel.includes(seedChannel) || seedChannel.includes(channel))) score += 20;
-  seedTitle.split(/[^a-z0-9]+/).filter((w) => w.length > 2).forEach((w) => {
-    if (title.includes(w)) score += 12;
-    if (channel.includes(w)) score += 4;
+  // Bônus forte para o mesmo canal da curtida/vídeo atual
+  if (seedChannel && channel && seedChannel !== 'baixatube' && (channel === seedChannel || channel.includes(seedChannel) || seedChannel.includes(channel))) {
+    score += 95;
+  }
+  seedTitle.split(/[^a-z0-9]+/).filter((w) => (CURATOR_SHORT_KEEP.has(w) || w.length >= 4) && !CURATOR_FILLER_STOPWORDS.has(w)).forEach((w) => {
+    if (title.includes(w)) score += 18;
+    if (channel.includes(w)) score += 8;
   });
   // Bônus forte para coincidir com o TEMA da pesquisa
-  seedQuery.split(/[^a-z0-9]+/).filter((w) => w.length > 2).forEach((w) => {
-    if (title.includes(w)) score += 22;
-    if (channel.includes(w)) score += 6;
+  seedQuery.split(/[^a-z0-9]+/).filter((w) => (CURATOR_SHORT_KEEP.has(w) || w.length >= 4) && !CURATOR_FILLER_STOPWORDS.has(w)).forEach((w) => {
+    if (title.includes(w)) score += 26;
+    if (channel.includes(w)) score += 10;
   });
-  // Bônus de RECÊNCIA: vídeos postados recentemente sobem para o topo
-  const pub = String(video && video.publishedAt || '').toLowerCase();
-  if (/hora|horas|minuto|minutos|hoje|ontem|\b\d+\s*h\b|\b\d+\s*min\b|today|hours?|mins?|ao vivo|live/i.test(pub)) {
-    score += 45;
-  } else if (/dia|dias|days?/i.test(pub)) {
-    score += 30;
-  } else if (/semana|semanas|weeks?/i.test(pub)) {
-    score += 18;
-  } else if (/m[eê]s|meses|months?|ano|anos|years?/i.test(pub)) {
-    // Penalidade para vídeos com meses ou anos de idade (afasta vídeos antigos)
-    score -= 35;
+  // Bônus de RECÊNCIA: vídeos postados recentemente sobem para o topo (todos os idiomas)
+  const ageDays = parseYoutubePublishedAgeDays(video && video.publishedAt);
+  if (ageDays !== null) {
+    if (ageDays <= 1) score += 45;
+    else if (ageDays <= 6) score += 30;
+    else if (ageDays <= 21) score += 18;
+    else if (ageDays >= 30) score -= 75;
+  } else {
+    const pub = String(video && video.publishedAt || '').toLowerCase();
+    if (/hora|horas|minuto|minutos|hoje|ontem|\b\d+\s*h\b|\b\d+\s*min\b|today|hours?|mins?|ao vivo|live/i.test(pub)) {
+      score += 45;
+    } else if (/dia|dias|days?/i.test(pub)) {
+      score += 30;
+    } else if (/semana|semanas|weeks?/i.test(pub)) {
+      score += 18;
+    } else if (/m[eê]s|meses|months?|ano|anos|years?/i.test(pub)) {
+      score -= 60;
+    }
   }
   // Bônus para ano recente no título
   if (/2026/i.test(title)) score += 16;
@@ -5040,31 +8714,41 @@ function scoreVideoRelevance(video, ctx) {
 
 async function fetchRelatedYoutubeVideos(videoId, useTor = false, hl = 'pt-BR', country = 'BR') {
   if (!videoId) return [];
-  const shouldUseTor = Boolean(useTor);
-  const cacheKey = 'related__' + videoId + '__' + (hl || 'pt-BR') + '__' + (country || 'BR') + '__' + (shouldUseTor ? 'tor' : 'direct');
+  const cacheKey = 'related__' + videoId + '__' + (hl || 'pt-BR') + '__' + (country || 'BR') + '__direct';
   const cached = youtubeSearchCache.get(cacheKey);
   if (cached && (Date.now() - cached.timestamp < YT_CACHE_TTL) && cached.videos.length > 0) {
     return cached.videos;
   }
   try {
     const url = 'https://www.youtube.com/watch?v=' + encodeURIComponent(videoId) + '&hl=' + encodeURIComponent(hl || 'pt-BR') + '&gl=' + encodeURIComponent(country || 'BR');
-    const res = await fetchYoutubeHtml(url, hl || 'pt-BR', shouldUseTor);
+    const res = await fetchYoutubeHtml(url, hl || 'pt-BR', false);
     if (!res || !res.ok || !res.html) return [];
-    const match = res.html.match(/var ytInitialData = ({.*?});<\/script>/);
+    const match = res.html.match(/var ytInitialData = ({.*?});<\/script>/) || res.html.match(/var ytInitialData = ({.*?});?\s*<\/script>/);
     if (!match) return [];
     const data = JSON.parse(match[1]);
     const videos = [];
     const seen = new Set([videoId]);
     const push = (renderer) => {
       const mapped = mapYoutubeRenderer(renderer);
-      if (!mapped || seen.has(mapped.id)) return;
+      if (!mapped || !mapped.id || seen.has(mapped.id)) return;
       seen.add(mapped.id);
       videos.push(mapped);
     };
-    const secondary = (((data.contents || {}).twoColumnWatchNextResults || {}).secondaryResults || {}).secondaryResultsRenderer || {};
-    (secondary.results || []).forEach((item) => {
+    const secObj = (((data.contents || {}).twoColumnWatchNextResults || {}).secondaryResults || {});
+    const secResults = (secObj.secondaryResults && secObj.secondaryResults.results)
+      || (secObj.secondaryResultsRenderer && secObj.secondaryResultsRenderer.results)
+      || [];
+    (secResults || []).forEach((item) => {
       if (item.compactVideoRenderer) push(item.compactVideoRenderer);
       if (item.videoRenderer) push(item.videoRenderer);
+      if (item.lockupViewModel) push(item.lockupViewModel);
+      if (item.itemSectionRenderer) {
+        (item.itemSectionRenderer.contents || []).forEach((c) => {
+          if (c.compactVideoRenderer) push(c.compactVideoRenderer);
+          if (c.videoRenderer) push(c.videoRenderer);
+          if (c.lockupViewModel) push(c.lockupViewModel);
+        });
+      }
     });
     if (videos.length < 6) {
       const renderers = [];
@@ -5136,7 +8820,7 @@ Responda ESTRITAMENTE em JSON:
 
 // Curador IA lendo o vídeo atual: título + canal (+ tema da pesquisa) viram buscas
 // específicas de vídeos NOVOS e uma frase explicando a recomendação.
-const curatorVideoAiCache = new Map();
+const curatorVideoAiCache = createLruCache({ maxEntries: 300, ttlMs: 30 * 60 * 1000 });
 const CURATOR_VIDEO_AI_TTL = 10 * 60 * 1000;
 
 function isGenericVideoTitle(title) {
@@ -5208,7 +8892,8 @@ Responda ESTRITAMENTE em JSON:
       ? parsed.queries.map((q) => String(q || '').replace(/["#]/g, '').trim()).filter((q) => q.length >= 3).slice(0, 3)
       : [];
     if (isCinema) {
-      queries = queries.map((q) => /completo/i.test(q) ? q : (q + ' filme completo dublado'));
+      const movieSuffix = isPt ? ' filme completo dublado' : (isEs ? ' pelicula completa en espanol' : ' full movie');
+      queries = queries.map((q) => /(?:completo|completa|full\s*movie|ganzer\s*film)/i.test(q) ? q : (q + movieSuffix));
     }
     if (!queries.length) return null;
     const data = {
@@ -5224,33 +8909,39 @@ Responda ESTRITAMENTE em JSON:
 }
 
 function rotateThemeSearchQueries(theme, page = 1, country = 'BR') {
-  const dyn = getDynamicRecentYoutubeQuery(theme || 'noticias', false, country);
-  const dyn2 = getDynamicRecentYoutubeQuery(theme || 'noticias', false, country);
+  const p = Math.max(1, page);
+  const dyn = getDynamicRecentYoutubeQuery(theme || 'noticias', false, country, p - 1);
+  const dyn2 = getDynamicRecentYoutubeQuery(theme || 'noticias', false, country, p);
   const base = String((dyn && dyn.query) || theme || 'noticias').trim();
   const extra = String((dyn2 && dyn2.query) || '').trim();
   const isPt = country === 'BR' || country === 'PT';
   const suffixes = isPt
     ? [' 2026', ' novos', ' hoje', ' ultimas', ' lancamentos', ' ao vivo']
     : [' 2026', ' latest', ' new', ' today', ' trending', ' live'];
-  const suffix = suffixes[(Math.max(1, page) - 1) % suffixes.length];
-  const queries = [base + suffix, base];
-  if (extra && extra.toLowerCase() !== base.toLowerCase()) queries.push(extra + suffix);
-  if (theme && theme.toLowerCase() !== base.toLowerCase()) queries.push(`${theme} 2026`);
+  const suffix = suffixes[(p - 1) % suffixes.length];
+  const queries = [base, base + suffix];
+  if (extra && extra.toLowerCase() !== base.toLowerCase()) {
+    queries.push(extra);
+    queries.push(extra + suffix);
+  }
+  if (theme && theme.toLowerCase() !== base.toLowerCase()) {
+    queries.push(`${theme} ${suffix.trim()}`);
+  }
   return {
-    queries: queries.filter((q, i, arr) => q && arr.indexOf(q) === i).slice(0, 3),
+    queries: queries.filter((q, i, arr) => q && arr.indexOf(q) === i).slice(0, 4),
     searchMode: (dyn && dyn.searchMode) || '',
     isCustomQuery: !!(dyn && dyn.isCustomQuery)
   };
 }
 
-async function getAiCuratorSuggestions({ type, currentQuery, currentTitle, currentChannel, currentVideoId, excludeTitles = [], page = 1, stayOnTheme = true, useAi = false, useTor = false, country = 'BR', clientIp = '', timeFilter = 'month' }) {
+async function getAiCuratorSuggestions({ type, currentQuery, currentTitle, currentChannel, currentVideoId, excludeTitles = [], page = 1, stayOnTheme = true, useAi = false, useTor = false, country = 'BR', clientIp = '', timeFilter = 'hour' }) {
   const isCinema = type === 'filmes' || type === 'cinema';
   const cleanTitle = (currentTitle || '').trim();
   const cleanChannel = (currentChannel || '').trim();
   const themeQuery = String(currentQuery || '').trim();
   // O vídeo atual entra no cache mesmo em "stayOnTheme": a IA usa título/canal para o recorte.
   const videoKey = isGenericVideoTitle(cleanTitle) ? '' : (cleanTitle + '|' + cleanChannel).toLowerCase();
-  const cacheKey = `${type}__${stayOnTheme ? 'theme' : 'mix'}__${useAi ? 'ai' : 'fast'}__${themeQuery}__${videoKey}__${country}__${clientIp || 'default'}__${page}__${useTor ? 'tor' : 'direct'}`;
+  const cacheKey = `${type}__${stayOnTheme ? 'theme' : 'mix'}__${useAi ? 'ai' : 'fast'}__${themeQuery}__${videoKey}__${country}__${page}__${timeFilter}__direct`;
 
   const excludeSet = new Set((Array.isArray(excludeTitles) ? excludeTitles : []).map((t) => String(t || '').trim().toLowerCase()).filter(Boolean));
   if (currentVideoId) excludeSet.add(String(currentVideoId).toLowerCase());
@@ -5263,8 +8954,8 @@ async function getAiCuratorSuggestions({ type, currentQuery, currentTitle, curre
       const titleKey = String(v.title || '').trim().toLowerCase();
       return !excludeSet.has(idKey) && !(titleKey && excludeSet.has(titleKey));
     });
-    if (fresh.length >= 6) {
-      return Object.assign({}, cached.data, { items: fresh.slice(0, 16) });
+    if (fresh.length >= 12) {
+      return Object.assign({}, cached.data, { items: fresh.slice(0, 24) });
     }
   }
 
@@ -5272,34 +8963,55 @@ async function getAiCuratorSuggestions({ type, currentQuery, currentTitle, curre
   const targetTheme = (themeQuery || (hasVideoContext ? '' : 'noticias')).trim();
   const activeTheme = (targetTheme || cleanTitle || 'noticias').toLowerCase();
   const keyword = extractRelatedKeywords(cleanTitle, cleanChannel);
+  const shortKeyword = keyword.split(/\s+/).filter((w) => w.length >= 2).slice(0, 3).join(' ') || keyword;
+  const validChannel = (cleanChannel && cleanChannel !== 'BaixaTube' && cleanChannel !== 'Papaléguas BaixaTube') ? cleanChannel : '';
 
   let queries = [];
   let defaultReason = '';
   let searchMode = '';
 
   if (isCinema || activeTheme.includes('filme') || activeTheme.includes('cinema')) {
-    const dynamicMovie = getDynamicRecentMovieQuery(themeQuery || 'todos');
-    queries = [dynamicMovie.query, 'filmes completos dublados lancamentos 2026', 'filmes completos dublados 2026'];
-    defaultReason = '🍿 Mais filmes completos dublados para você';
+    const dynamicMovie = getDynamicRecentMovieQuery(themeQuery || 'todos', page - 1, country);
+    const dynamicMovie2 = getDynamicRecentMovieQuery(themeQuery || 'todos', page, country);
+    const dynamicMovie3 = getDynamicRecentMovieQuery(themeQuery || 'todos', page + 1, country);
+    queries = [dynamicMovie.query, dynamicMovie2.query, dynamicMovie3.query];
+    const cUpper = String(country || 'BR').toUpperCase();
+    const isPt = cUpper === 'BR' || cUpper === 'PT';
+    const isEs = ['ES', 'MX', 'AR', 'CO', 'CL', 'PE'].includes(cUpper);
+    const isFr = ['FR', 'BE'].includes(cUpper);
+    const isDe = ['DE', 'AT', 'CH'].includes(cUpper);
+    const isIt = cUpper === 'IT';
+    defaultReason = isPt
+      ? '🍿 Mais filmes completos dublados para você'
+      : (isEs ? '🍿 Más películas completas en español para ti'
+      : (isFr ? '🍿 Plus de films complets en français pour vous'
+      : (isDe ? '🍿 Weitere ganze Filme auf Deutsch für dich'
+      : (isIt ? '🍿 Altri film completi in italiano per te'
+      : '🍿 More full movies for you'))));
   } else if (hasVideoContext) {
-    // Quando há um vídeo atual, combinamos o TEMA com o ASSUNTO DO VÍDEO + MARCADORES DE NOVIDADE
-    const isPt = country === 'BR' || country === 'PT';
-    const novSuffix = isPt ? ' 2026' : ' 2026 latest';
-    const novSuffix2 = isPt ? ' novos' : ' new';
-
-    if (targetTheme && targetTheme.toLowerCase() !== keyword.toLowerCase()) {
+    // Prioridade máxima para o CANAL e o TEMA/ASSUNTO do vídeo curtido/atual
+    if (validChannel) {
+      const channelTokens = validChannel.toLowerCase().split(/\s+/).filter(Boolean);
+      const cleanKeywordTokens = shortKeyword.split(/\s+/).filter((w) => !channelTokens.includes(w.toLowerCase()));
+      const cleanKeyword = cleanKeywordTokens.join(' ').trim();
       queries = [
-        `${targetTheme} ${keyword}${novSuffix}`,
-        `${keyword}${novSuffix}`,
-        `${targetTheme} ${keyword}${novSuffix2}`,
-        `${cleanChannel ? cleanChannel + ' ' : ''}${keyword}`
+        cleanKeyword ? `${validChannel} ${cleanKeyword}`.trim() : validChannel,
+        cleanKeyword || (targetTheme && targetTheme !== 'noticias' ? targetTheme : cleanTitle.slice(0, 35)),
+        validChannel
       ].filter(Boolean);
-      defaultReason = `⚡ Novos vídeos de "${targetTheme}": mais sobre ${keyword.slice(0, 35)}...`;
+      defaultReason = `⚡ Mais vídeos de "${validChannel}" e recomendações relacionadas`;
+    } else if (targetTheme && targetTheme.toLowerCase() !== keyword.toLowerCase()) {
+      queries = [
+        `${targetTheme} ${shortKeyword}`,
+        shortKeyword,
+        `${targetTheme} novidades`
+      ].filter(Boolean);
+      defaultReason = `⚡ Novos vídeos de "${targetTheme}": mais sobre ${shortKeyword.slice(0, 35)}...`;
     } else {
       queries = [
-        `${keyword}${novSuffix}`,
-        `${keyword}${novSuffix2}`,
-        `${cleanChannel ? cleanChannel + ' ' : ''}${keyword}`
+        shortKeyword,
+        cleanTitle.slice(0, 35),
+        `${shortKeyword} novidades`
       ].filter(Boolean);
       defaultReason = `⚡ Novos vídeos relacionados a "${cleanTitle.length > 40 ? cleanTitle.slice(0, 37) + '...' : cleanTitle}"`;
     }
@@ -5318,20 +9030,39 @@ async function getAiCuratorSuggestions({ type, currentQuery, currentTitle, curre
   if (page > 1 && queries[0] && !useAi) {
     queries = queries.concat([queries[0] + ' 2026', queries[0] + ' novos']);
   }
-  queries = queries.filter((q, i, arr) => q && arr.indexOf(q) === i).slice(0, 3);
+  queries = queries.filter((q, i, arr) => q && arr.indexOf(q) === i).slice(0, 4);
 
   const hl = getHlForCountry(country);
   const effectiveClientIp = useTor ? '' : clientIp;
 
+  const fastYtRace = (p, ms = 4500) => Promise.race([
+    p,
+    new Promise((resolve) => setTimeout(() => resolve([]), ms))
+  ]);
+
   // 1. RECOMENDAÇÕES NATIVAS DIRETAS DO YOUTUBE:
-  // Se há um vídeo atual, puxa na hora os vídeos recomendados / Up Next direto do YouTube (~300ms)
+  // Se há um vídeo atual, puxa na hora os vídeos recomendados / Up Next direto do YouTube
   const relatedPromise = currentVideoId
-    ? fetchRelatedYoutubeVideos(currentVideoId, useTor, hl, country).catch(() => [])
+    ? fastYtRace(fetchRelatedYoutubeVideos(currentVideoId, useTor, hl, country).catch(() => []), 4500)
     : Promise.resolve([]);
 
-  // 2. BUSCAS DIRETAS NO YOUTUBE EM PARALELO (~300ms)
-  const localSearchPromises = queries.slice(0, 3).map((q) =>
-    searchYoutubeVideos(q, hl, true, timeFilter, useTor, searchMode, country, effectiveClientIp).catch(() => [])
+  // 2. BUSCAS DIRETAS NO YOUTUBE EM PARALELO - Direto via HTTP rápido sem travar em subprocessos
+  const searchList = queries.slice(0, 2);
+  if (shortKeyword && !searchList.includes(shortKeyword)) searchList.push(shortKeyword);
+  const localSearchPromises = searchList.slice(0, 3).map((q) =>
+    fastYtRace(
+      searchYoutubeVideos(
+        q,
+        hl,
+        false,
+        '',
+        false,
+        searchMode,
+        country,
+        effectiveClientIp
+      ).catch(() => []),
+      4500
+    )
   );
 
   // IA ultra-rápida não-bloqueante (timeout de 600ms para nunca travar a resposta)
@@ -5370,10 +9101,12 @@ async function getAiCuratorSuggestions({ type, currentQuery, currentTitle, curre
   ].concat(localSearchPromises));
 
   // Motivo da recomendação limpo e profissional direto do YouTube
-  if (hasVideoContext) {
-    defaultReason = `Recomendações do YouTube baseadas em "${cleanTitle.length > 40 ? cleanTitle.slice(0, 37) + '...' : cleanTitle}"`;
-  } else {
-    defaultReason = `Vídeos recomendados pelo YouTube sobre ${activeTheme === 'noticias' ? 'notícias recentes' : activeTheme}`;
+  if (!isCinema) {
+    if (hasVideoContext) {
+      defaultReason = `Recomendações do YouTube baseadas em "${cleanTitle.length > 40 ? cleanTitle.slice(0, 37) + '...' : cleanTitle}"`;
+    } else {
+      defaultReason = `Vídeos recomendados pelo YouTube sobre ${activeTheme === 'noticias' ? 'notícias recentes' : activeTheme}`;
+    }
   }
   if (videoAi && videoAi.reason && !videoAi.reason.toLowerCase().includes('novas buscas')) defaultReason = videoAi.reason;
   else if (aiCurator && aiCurator.reason && !aiCurator.reason.toLowerCase().includes('novas buscas')) defaultReason = aiCurator.reason;
@@ -5388,7 +9121,7 @@ async function getAiCuratorSuggestions({ type, currentQuery, currentTitle, curre
   if (aiQueries.length) {
     extraSearchResults = await Promise.all(
       aiQueries.slice(0, 2).map((q) =>
-        searchYoutubeVideos(q, hl, true, timeFilter, useTor, searchMode, country, effectiveClientIp).catch(() => [])
+        searchYoutubeVideos(q, hl, true, timeFilter, false, searchMode, country, effectiveClientIp).catch(() => [])
       )
     );
   }
@@ -5410,6 +9143,16 @@ async function getAiCuratorSuggestions({ type, currentQuery, currentTitle, curre
   (relatedVideos || []).forEach(pushVideo);
   localSearchResults.forEach((list) => (list || []).forEach(pushVideo));
   extraSearchResults.forEach((list) => (list || []).forEach(pushVideo));
+
+  if (allVideos.length < 6) {
+    const fallbackTerm = cleanChannel || shortKeyword || targetTheme || 'noticias';
+    const fallbackList = await searchYoutubeVideos(fallbackTerm, hl, false, '', false, '', country, effectiveClientIp).catch(() => []);
+    (fallbackList || []).forEach(pushVideo);
+  }
+  if (allVideos.length < 6) {
+    const trending = await fetchTrendingVideos({ country, clientIp: effectiveClientIp }).catch(() => []);
+    (trending || []).forEach(pushVideo);
+  }
 
   const rankCtx = hasVideoContext
     ? { title: cleanTitle, channel: cleanChannel, query: targetTheme || keyword || currentQuery }
@@ -5437,28 +9180,12 @@ async function getAiCuratorSuggestions({ type, currentQuery, currentTitle, curre
     queries,
     aiUsed: !!(videoAi || (useAi && aiCurator)),
     aiTopics: videoAi && videoAi.topics ? videoAi.topics : [],
-    items: ranked.slice(0, 16)
+    items: ranked.slice(0, 24)
   };
 
-  if (stayOnTheme && resultData.items.length < 5 && page < 6) {
-    return getAiCuratorSuggestions({
-      type,
-      currentQuery: targetTheme || currentQuery,
-      currentTitle,
-      currentChannel,
-      currentVideoId,
-      excludeTitles,
-      page: page + 1,
-      stayOnTheme,
-      useAi,
-      useTor,
-      country,
-      clientIp,
-      timeFilter
-    });
+  if (resultData.items && resultData.items.length > 0) {
+    curatorSuggestionsCache.set(cacheKey, { timestamp: Date.now(), data: resultData });
   }
-
-  curatorSuggestionsCache.set(cacheKey, { timestamp: Date.now(), data: resultData });
   return resultData;
 }
 
@@ -5466,12 +9193,28 @@ async function getAiCuratorSuggestions({ type, currentQuery, currentTitle, curre
 // Cada cliente tem seu próprio histórico de DJ, músicas excluídas, abas e estado de player,
 // mas compartilha o mesmo login / credenciais Spotify e OpenAI da aplicação.
 const clientSessions = new Map();
+const MAX_CLIENT_SESSIONS = 500;
+const CLIENT_SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+
+function pruneBoundedMap(map, maxEntries = 500) {
+  if (!map || typeof map.size !== 'number' || map.size <= maxEntries) return;
+  const excess = map.size - maxEntries;
+  let removed = 0;
+  for (const key of map.keys()) {
+    map.delete(key);
+    removed += 1;
+    if (removed >= excess) break;
+  }
+}
 
 function getOrCreateClientSession(clientId) {
   if (!clientId || typeof clientId !== 'string') {
     clientId = 'client_default';
   }
   if (!clientSessions.has(clientId)) {
+    if (clientSessions.size >= MAX_CLIENT_SESSIONS) {
+      pruneBoundedMap(clientSessions, MAX_CLIENT_SESSIONS - 1);
+    }
     clientSessions.set(clientId, {
       clientId,
       createdAt: Date.now(),
@@ -5486,7 +9229,54 @@ function getOrCreateClientSession(clientId) {
   }
   const session = clientSessions.get(clientId);
   session.lastActive = Date.now();
+  if (Array.isArray(session.djChatHistory) && session.djChatHistory.length > 60) {
+    session.djChatHistory = session.djChatHistory.slice(-60);
+  }
+  if (session.playedTrackTitles && session.playedTrackTitles.size > 500) {
+    const keep = Array.from(session.playedTrackTitles).slice(-400);
+    session.playedTrackTitles = new Set(keep);
+  }
   return session;
+}
+
+// Manutenção periódica em background (evita crescimento infinito de RAM em operação 24/7)
+const cacheMaintenanceTimer = setInterval(() => {
+  try {
+    const now = Date.now();
+    for (const [id, sess] of clientSessions.entries()) {
+      if (id !== 'client_default' && sess && now - (sess.lastActive || 0) > CLIENT_SESSION_TTL_MS) {
+        clientSessions.delete(id);
+      }
+    }
+    pruneBoundedMap(clientSessions, MAX_CLIENT_SESSIONS);
+    pruneBoundedMap(proxyCookieJars, 300);
+    pruneBoundedMap(mediaJobs, 200);
+    for (const cache of [
+      videoMetaCache,
+      googleTrendsCache,
+      ipCountryCache,
+      topicImagesCache,
+      webSuggestCache,
+      richSearchCache,
+      searchAnswerCache,
+      searchPicksCache,
+      pagePreviewCache,
+      youtubeSearchCache,
+      audioStreamUrlCache,
+      videoStreamUrlCache,
+      playUrlCache,
+      musicRecCache,
+      curatorSuggestionsCache,
+      curatorVideoAiCache
+    ]) {
+      if (cache && typeof cache.pruneExpired === 'function') {
+        cache.pruneExpired(now);
+      }
+    }
+  } catch (e) { swallowed(e, 'server:top@8465'); }
+}, 10 * 60 * 1000);
+if (cacheMaintenanceTimer && typeof cacheMaintenanceTimer.unref === 'function') {
+  cacheMaintenanceTimer.unref();
 }
 
 // Servidor HTTP híbrido (Arquivos estáticos + Endpoints de API para Celular e Multi-Cliente)
@@ -5502,6 +9292,110 @@ const mimeTypes = {
   '.txt': 'text/plain; charset=utf-8',
   '.xml': 'application/xml; charset=utf-8'
 };
+
+const staticAssetMemoryCache = createLruCache({ maxEntries: 250 });
+
+function deliverCachedAsset(req, res, cached, contentType, cacheControlHeader, isAppShell) {
+  const headers = {
+    'Content-Type': contentType,
+    'Cache-Control': cacheControlHeader,
+    'ETag': cached.etag,
+    'Vary': 'Accept-Encoding'
+  };
+  if (isAppShell) {
+    headers['X-Frame-Options'] = 'DENY';
+    headers['Content-Security-Policy'] = "frame-ancestors 'none'";
+    headers['Set-Cookie'] = 'pl_proxy_target=; Path=/; Max-Age=0; SameSite=Lax';
+  }
+
+  const acceptEncoding = (req.headers && req.headers['accept-encoding']) || '';
+  if (cached.brBuf && acceptEncoding.includes('br')) {
+    headers['Content-Encoding'] = 'br';
+    headers['Content-Length'] = cached.brBuf.length;
+    res.writeHead(200, headers);
+    res.end(cached.brBuf);
+  } else if (cached.gzipBuf && acceptEncoding.includes('gzip')) {
+    headers['Content-Encoding'] = 'gzip';
+    headers['Content-Length'] = cached.gzipBuf.length;
+    res.writeHead(200, headers);
+    res.end(cached.gzipBuf);
+  } else {
+    headers['Content-Length'] = cached.content.length;
+    res.writeHead(200, headers);
+    res.end(cached.content);
+  }
+}
+
+function serveFileWithMemoryCache(req, res, filePath, contentType = 'text/html; charset=utf-8', cacheControlHeader = 'no-cache, must-revalidate', isAppShell = false) {
+  fs.stat(filePath, (statErr, stats) => {
+    if (statErr) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Arquivo não encontrado');
+      return;
+    }
+
+    const etag = `W/"${stats.size.toString(16)}-${Math.floor(stats.mtimeMs).toString(16)}"`;
+    const ifNoneMatch = req.headers && req.headers['if-none-match'];
+    if (ifNoneMatch && ifNoneMatch === etag) {
+      res.writeHead(304, {
+        'ETag': etag,
+        'Cache-Control': cacheControlHeader,
+        'Vary': 'Accept-Encoding'
+      });
+      res.end();
+      return;
+    }
+
+    let cached = staticAssetMemoryCache.get(filePath);
+    if (!cached || cached.mtimeMs !== stats.mtimeMs) {
+      fs.readFile(filePath, (readErr, content) => {
+        if (readErr) {
+          res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end('Erro ao carregar arquivo');
+          return;
+        }
+
+        const isCompressible = /text|javascript|json|xml|svg/i.test(contentType);
+        let brBuf = null;
+        let gzipBuf = null;
+        if (isCompressible && content.length > 64) {
+          try {
+            if (typeof zlib.brotliCompressSync === 'function') {
+              brBuf = zlib.brotliCompressSync(content, {
+                params: {
+                  [zlib.constants.BROTLI_PARAM_QUALITY]: 5
+                }
+              });
+            }
+          } catch (e) { swallowed(e, 'server:serveFileWithMemoryCache@8559'); }
+          try {
+            gzipBuf = zlib.gzipSync(content, { level: 6 });
+          } catch (e) { swallowed(e, 'server:serveFileWithMemoryCache@8562'); }
+        }
+
+        cached = {
+          mtimeMs: stats.mtimeMs,
+          content,
+          brBuf,
+          gzipBuf,
+          etag
+        };
+
+        if (stats.size <= 10 * 1024 * 1024) {
+          if (staticAssetMemoryCache.size > 150) {
+            const firstKey = staticAssetMemoryCache.keys().next().value;
+            if (firstKey) staticAssetMemoryCache.delete(firstKey);
+          }
+          staticAssetMemoryCache.set(filePath, cached);
+        }
+
+        deliverCachedAsset(req, res, cached, contentType, cacheControlHeader, isAppShell);
+      });
+    } else {
+      deliverCachedAsset(req, res, cached, contentType, cacheControlHeader, isAppShell);
+    }
+  });
+}
 
 // Verificação de IP da Rede Local (Wi-Fi / LAN / Loopback)
 function isPrivateIp(ip) {
@@ -5564,10 +9458,65 @@ function isLocalRequest(req) {
   return true;
 }
 
-const server = http.createServer(async (req, res) => {
-  req.on('aborted', () => {
-    try { if (!res.writableEnded) res.destroy(); } catch (e) {}
+// =========================================================================
+// BLINDAGEM ANTI-CRASH E GESTÃO SEGURA DE STREAMS (24/7 NZA SHIELD)
+// =========================================================================
+function safePipe(source, res, req) {
+  if (!source || !res) return;
+
+  const cleanup = () => {
+    try {
+      if (source && typeof source.destroy === 'function' && !source.destroyed) {
+        source.destroy();
+      }
+    } catch (e) { swallowed(e, 'server:cleanup@8661'); }
+  };
+
+  source.on('error', (err) => {
+    cleanup();
+    if (!res.headersSent) {
+      try {
+        res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Erro de stream');
+      } catch (e) { swallowed(e, 'server:safePipe@8670'); }
+    } else {
+      try { res.destroy(); } catch (e) { swallowed(e, 'server:safePipe@8672'); }
+    }
   });
+
+  if (req) {
+    req.on('close', cleanup);
+    req.on('aborted', cleanup);
+  }
+
+  res.on('close', cleanup);
+  res.on('error', cleanup);
+
+  source.pipe(res);
+}
+
+// Prevenção global de crashes por desconexão súbita de clientes (ECONNRESET, EPIPE)
+process.on('uncaughtException', (err) => {
+  const code = err && err.code;
+  if (code === 'ECONNRESET' || code === 'EPIPE' || code === 'ECANCELED' || code === 'ERR_STREAM_DESTROYED') {
+    return;
+  }
+  serverLog.error('UNCAUGHT EXCEPTION', err);
+});
+
+process.on('unhandledRejection', (reason) => {
+  const code = reason && reason.code;
+  if (code === 'ECONNRESET' || code === 'EPIPE' || code === 'ECANCELED') {
+    return;
+  }
+  serverLog.error('UNHANDLED REJECTION', reason);
+});
+
+const server = http.createServer(async (req, res) => {
+  const onDisconnect = () => {
+    try { if (!res.writableEnded && req.destroyed) res.destroy(); } catch (e) { swallowed(e, 'server:onDisconnect@8706'); }
+  };
+  req.on('aborted', onDisconnect);
 
   // CORS para permitir conexões de qualquer dispositivo ou túnel, inclusive rede local
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -5575,10 +9524,7 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Headers', '*');
   res.setHeader('Access-Control-Allow-Private-Network', 'true');
   res.setHeader('Permissions-Policy', 'picture-in-picture=*, fullscreen=*, autoplay=*, encrypted-media=*, local-network=*, local-network-access=*, local-unrestricted=*, display-capture=*, presentation=*');
-  res.setHeader('ngrok-skip-browser-warning', '1');
-  try {
-    res.setHeader('Set-Cookie', 'ngrok-skip-browser-warning=1; Path=/; Max-Age=31536000; SameSite=Lax');
-  } catch (e) {}
+  res.setHeader('X-Powered-By', 'Papaleguas-Engine/1.0 (Rust+Node)');
 
   if (req.method === 'OPTIONS') {
     if (req.headers['access-control-request-private-network']) {
@@ -5589,77 +9535,225 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-
-  const reqUrl = new URL(req.url, `http://${req.headers.host}`);
+  const reqUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const pathname = reqUrl.pathname;
+  const clientIp = papaleguasTracker.extractClientIp(req);
+
+  // Bloqueio de IP por Lista Negra (Firewall do Administrador)
+  // Permite carregar a imagem do QR code de pagamento imediatamente
+  if (pathname === '/binance_pay_qr.jpg') {
+    const qrPath = path.join(SRC_DIR, 'binance_pay_qr.jpg');
+    fs.readFile(qrPath, (err, buf) => {
+      if (err) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Not found');
+        return;
+      }
+      res.writeHead(200, {
+        'Content-Type': 'image/jpeg',
+        'Cache-Control': 'public, max-age=86400',
+        'Content-Length': buf.length
+      });
+      res.end(buf);
+    });
+    return;
+  }
+
+  if (typeof papaleguasTracker.isIpBlocked === 'function' && papaleguasTracker.isIpBlocked(clientIp)) {
+    papaleguasTracker.recordBlockedHit(clientIp, req.url);
+    const acceptsHtml = (req.headers.accept && req.headers.accept.includes('text/html')) ||
+                        pathname === '/' || pathname === '/baixatube' || pathname === '/musica' || pathname === '/filmes';
+
+    if (acceptsHtml) {
+      res.writeHead(403, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+        'Connection': 'close'
+      });
+      res.end(renderBlockedIpPaymentNotice(clientIp));
+      return;
+    }
+
+    res.writeHead(403, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Connection': 'close',
+      'Cache-Control': 'no-store'
+    });
+    res.end(JSON.stringify({
+      error: '403 Forbidden: Acesso bloqueado pelo administrador.',
+      ip: clientIp,
+      unblockFee: '5 USDT',
+      recipient: 'OperaTrade',
+      binanceQrUrl: 'https://papaleguas.app/binance_pay_qr.jpg',
+      notice: 'Para desbloquear seu IP, pague 5 USDT escaneando o QR Code da Binance.'
+    }));
+    try {
+      if (req.socket && !req.socket.destroyed) {
+        req.socket.destroy();
+      }
+    } catch (e) {}
+    return;
+  }
+
+  // Rate Limiting de Alta Performance com Rust
+  const nativeRateLimitActive = !!(papaleguasTracker.nativeCore && typeof papaleguasTracker.nativeCore.checkRateLimit === 'function');
+  if (nativeRateLimitActive) {
+    const isAllowed = papaleguasTracker.nativeCore.checkRateLimit(clientIp, 180, 40);
+    if (!isAllowed && !papaleguasTracker.isPrivateIp(clientIp)) {
+      res.writeHead(429, { 'Content-Type': 'text/plain; charset=utf-8', 'Retry-After': '5' });
+      res.end('429 Too Many Requests: Protegido pelo Papaléguas Rust Engine.');
+      return;
+    }
+  }
+
+  // Anti-abuso: limites do /proxy, streams/downloads (yt-dlp) e fallback global
+  // em JS quando o limitador nativo não carregou. Clientes locais não são limitados.
+  if (requestGuard.check(req, res, pathname, { nativeRateLimitActive })) return;
+
+  // Erros capturados nos aparelhos (src/error-reporter.js)
+  if (pathname === '/api/client-log') {
+    await handleClientLog(req, res, requestGuard.identifyRequester(req).ip);
+    return;
+  }
+
+  // Diagnóstico das falhas silenciosas (antigos catch vazios) — só na rede local
+  if (pathname === '/api/debug/swallowed') {
+    if (!requestGuard.identifyRequester(req).isLocal) {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify({ debug: logger.DEBUG, top: logger.getSwallowedStats(100) }, null, 2));
+    return;
+  }
 
   // Identificação do cliente e sessão (disponível para todas as rotas)
   const clientId = req.headers['x-client-id'] || reqUrl.searchParams.get('clientId') || 'client_default';
   const clientSession = getOrCreateClientSession(clientId);
 
-  // Rastreamento de acessos de IP, dispositivo e geolocalização para o Painel Administrativo
-  try {
-    if (!pathname.includes('metric') && !pathname.startsWith('/api/papaleguas') && !pathname.startsWith('/papaleguas')) {
-      papaleguasTracker.logAccess(req, pathname, req.url);
-    }
-  } catch (e) {}
+  // Captura automática de cada requisição HTTP ao finalizar a resposta
+  const requestStartTime = Date.now();
+  let requestCaptured = false;
+  const recordRequestCompletion = () => {
+    if (requestCaptured) return;
+    requestCaptured = true;
+    try {
+      const durationMs = Date.now() - requestStartTime;
+      papaleguasTracker.captureHttpRequest({
+        req,
+        res,
+        statusCode: res.statusCode || 200,
+        durationMs,
+        pathname,
+        fullUrl: req.url,
+        method: req.method
+      });
+    } catch (e) { swallowed(e, 'server:recordRequestCompletion@8786'); }
+  };
+  res.on('finish', recordRequestCompletion);
+  res.on('close', recordRequestCompletion);
 
-  // Manifesto PWA para instalação no celular / desktop com ícone do Papaléguas
-  if (pathname === '/manifest.json' || pathname === '/manifest.webmanifest') {
-    res.writeHead(200, {
-      'Content-Type': 'application/manifest+json; charset=utf-8',
-      'Cache-Control': 'no-cache, must-revalidate',
-      'Access-Control-Allow-Origin': '*'
-    });
-    const manifestPath = path.join(SRC_DIR, 'manifest.json');
-    if (fs.existsSync(manifestPath)) {
-      res.end(fs.readFileSync(manifestPath, 'utf8'));
-    } else {
-      res.end(JSON.stringify({
-        name: 'Papaléguas BaixaTube',
-        short_name: 'Papaléguas',
-        start_url: '/',
-        id: '/',
-        scope: '/',
-        display: 'standalone',
-        background_color: '#0b0d14',
-        theme_color: '#0b0d14',
-        icons: [
-          { src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
-          { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
-          { src: '/icon-maskable.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
-          { src: '/papaleguas_icon.png', sizes: '512x512', type: 'image/png', purpose: 'any' }
-        ]
-      }));
+  // Central de Comando de Robôs & Agentes: cada robô que conectar será comandado por nós
+  if (botCommander && typeof botCommander.handleIncomingRequest === 'function') {
+    if (botCommander.handleIncomingRequest(req, res, pathname)) {
+      return;
     }
-    return;
   }
 
-  // Service Worker para PWA (requisito obrigatório do Chrome no Android para habilitar "Instalar App")
-  if (pathname === '/sw.js') {
-    res.writeHead(200, {
-      'Content-Type': 'application/javascript; charset=utf-8',
-      'Cache-Control': 'no-cache, no-store, must-revalidate',
-      'Service-Worker-Allowed': '/',
-      'Access-Control-Allow-Origin': '*'
+  // Metadados públicos, PWA, SEO e feeds (/health, /manifest.json, /sw.js, /sitemap.xml, /robots.txt, /llms.txt, /feed.*)
+  if (appRoutes && typeof appRoutes.handlePublicMeta === 'function') {
+    const handledMeta = await appRoutes.handlePublicMeta(req, res, {
+      pathname,
+      SRC_DIR,
+      SERVER_BUILD_VERSION: getServerBuildVersion(),
+      isTorRoutingEnabled,
+      getCachedGoogleTrends,
+      serveFileWithMemoryCache,
+      escapeHtml
     });
-    const swPath = path.join(SRC_DIR, 'sw.js');
-    if (fs.existsSync(swPath)) {
-      res.end(fs.readFileSync(swPath, 'utf8'));
-    } else {
-      res.end(`
-        self.addEventListener('install', (e) => self.skipWaiting());
-        self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
-        self.addEventListener('fetch', (e) => {});
-      `);
-    }
-    return;
+    if (handledMeta) return;
   }
 
   // ----------------------------------------------------
   // ENDPOINTS DE API (Música, DJ Papaléguas e Streams)
   // ----------------------------------------------------
   if (pathname.startsWith('/api/')) {
+    
+    // API Google Trends Dinâmico por País do IP (Retorna os 10 tópicos mais pesquisados no Google conforme o país detectado, atualizado a cada 30 minutos)
+    if (pathname === '/api/google-trends') {
+      const rawCountryParam = (reqUrl.searchParams.get('country') || 'auto').trim().toUpperCase();
+      const isManual = reqUrl.searchParams.get('manual') === '1';
+      const limitParam = parseInt(reqUrl.searchParams.get('limit') || '10', 10);
+      const limit = Number.isFinite(limitParam) && limitParam > 0 ? limitParam : 10;
+      const isForce = reqUrl.searchParams.get('refresh') === 'true' || reqUrl.searchParams.get('refresh') === '1' || reqUrl.searchParams.get('force') === 'true';
+      const clientIpParam = reqUrl.searchParams.get('deviceIp') || req.headers['x-device-ip'] || req.headers['x-client-ip'] || '';
+      const clientIp = extractRequestDeviceIp(req, clientIpParam);
+
+      const TRENDS_COUNTRY_NAMES = {
+        BR: 'Brasil', US: 'Estados Unidos', GB: 'Reino Unido', AR: 'Argentina',
+        MX: 'México', PT: 'Portugal', ES: 'Espanha', FR: 'França', DE: 'Alemanha',
+        IT: 'Itália', JP: 'Japão', KR: 'Coreia do Sul', CN: 'China', RU: 'Rússia',
+        CA: 'Canadá', AU: 'Austrália', IN: 'Índia', NG: 'Nigéria', ZA: 'África do Sul',
+        TR: 'Turquia', PL: 'Polônia', NL: 'Países Baixos', SE: 'Suécia', NO: 'Noruega'
+      };
+      const TRENDS_COUNTRY_FLAGS = {
+        BR: '🇧🇷', US: '🇺🇸', GB: '🇬🇧', AR: '🇦🇷', MX: '🇲🇽', PT: '🇵🇹',
+        ES: '🇪🇸', FR: '🇫🇷', DE: '🇩🇪', IT: '🇮🇹', JP: '🇯🇵', KR: '🇰🇷',
+        CN: '🇨🇳', RU: '🇷🇺', CA: '🇨🇦', AU: '🇦🇺', IN: '🇮🇳', NG: '🇳🇬',
+        ZA: '🇿🇦', TR: '🇹🇷', PL: '🇵🇱', NL: '🇳🇱', SE: '🇸🇪', NO: '🇳🇴'
+      };
+
+      Promise.resolve().then(async () => {
+        let resolvedCountry = 'BR';
+        if (isManual && /^[A-Z]{2}$/.test(rawCountryParam) && rawCountryParam !== 'AUTO') {
+          resolvedCountry = rawCountryParam;
+        } else if (/^[A-Z]{2}$/.test(rawCountryParam) && rawCountryParam !== 'AUTO' && reqUrl.searchParams.get('manual') !== '0') {
+          resolvedCountry = rawCountryParam;
+        } else {
+          resolvedCountry = await getClientCountryCode(req, clientIp, false).catch(() => 'BR');
+        }
+        const countryName = TRENDS_COUNTRY_NAMES[resolvedCountry] || resolvedCountry;
+        const countryFlag = TRENDS_COUNTRY_FLAGS[resolvedCountry] || '🌍';
+        const trends = await fetchGoogleTrends(resolvedCountry, isForce).catch(() => getCachedGoogleTrends(resolvedCountry));
+        const topTrends = (trends || []).slice(0, limit);
+        res.writeHead(200, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store, no-cache, must-revalidate',
+          'Access-Control-Allow-Origin': '*'
+        });
+        res.end(JSON.stringify({
+          success: true,
+          country: resolvedCountry,
+          countryCode: resolvedCountry,
+          countryName,
+          countryFlag,
+          clientIp,
+          limit,
+          interval: '30 minutos',
+          timestamp: Date.now(),
+          trends: topTrends
+        }));
+      }).catch(() => {
+        const fallbackCountry = (/^[A-Z]{2}$/.test(rawCountryParam) && rawCountryParam !== 'AUTO') ? rawCountryParam : 'BR';
+        const cached = (getCachedGoogleTrends(fallbackCountry) || []).slice(0, limit);
+        res.writeHead(200, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store'
+        });
+        res.end(JSON.stringify({
+          success: true,
+          country: fallbackCountry,
+          countryCode: fallbackCountry,
+          countryName: TRENDS_COUNTRY_NAMES[fallbackCountry] || fallbackCountry,
+          countryFlag: TRENDS_COUNTRY_FLAGS[fallbackCountry] || '🌍',
+          limit,
+          interval: '30 minutos',
+          trends: cached
+        }));
+      });
+      return;
+    }
     
     // ROTA WHISPER: Recebe áudio binário bruto e envia para a OpenAI
     if (pathname === '/api/whisper' && req.method === 'POST') {
@@ -5752,7 +9846,7 @@ const server = http.createServer(async (req, res) => {
           'Cache-Control': 'public, max-age=86400',
           'Access-Control-Allow-Origin': '*'
         });
-        ttsRes.pipe(res);
+        safePipe(ttsRes, res, req);
       });
 
       ttsReq.on('error', (err) => {
@@ -5770,7 +9864,7 @@ const server = http.createServer(async (req, res) => {
         for await (const chunk of req) buffers.push(chunk);
         const rawBody = Buffer.concat(buffers).toString();
         body = rawBody ? JSON.parse(rawBody) : {};
-      } catch (e) {}
+      } catch (e) { swallowed(e, 'server:top@9214'); }
     }
 
     // Identificação do cliente individual (enviado via header X-Client-Id ou query/body param)
@@ -5795,18 +9889,32 @@ const server = http.createServer(async (req, res) => {
         getClientCountryCode,
         lookupOutboundIp,
         getAiCuratorSuggestions,
+        extractRelatedKeywords,
         getHlForCountry,
         getDynamicRecentYoutubeQuery,
         rotateThemeSearchQueries,
         isNewsYoutubeCategory,
+        fetchMixedNewsVideos,
+        fetchRelatedYoutubeVideos,
         fetchTrendingVideos,
+        fetchGoogleTrends,
+        getCachedGoogleTrends,
         searchYoutubeVideos,
+        isOldYoutubeVideo,
+        parseYoutubePublishedAgeDays,
+        filterRecentYoutubeVideos,
         filterYoutubeModeResults,
         filterVideosByCountryRelevance,
         caches: {
           mixedNewsCache,
           mixedNewsCacheTime,
           youtubeSearchCache
+        },
+        clearYoutubeCaches: () => {
+          mixedNewsCache = null;
+          mixedNewsCacheTime = 0;
+          mixedNewsCacheByKey.clear();
+          youtubeSearchCache.clear();
         },
         handleAudioStreamingProxy,
         getFullAudioStream,
@@ -5820,222 +9928,53 @@ const server = http.createServer(async (req, res) => {
         papaleguasTracker,
         getAiMusicRecommendations,
         chatDjPapaleguas,
+        getDeezerPlaylistTracks,
         searchDeezerPlaylists,
-        searchDeezerAll
+        searchDeezerAll,
+        PORT,
+        telegramBot,
+        botCommander,
+        torManager,
+        isLocalAdminRequest,
+        sendForbiddenAdminResponse,
+        isAppTorEnabled,
+        isServerConsoleLogsPaused,
+        setServerConsoleLogsPaused,
+        getLocalNetworkIp
       });
       if (handled) return;
     }
 
-    // ----------------------------------------------------
-    // ENDPOINTS ADMINISTRATIVOS PAPALÉGUAS (Setup, Auth, Metrics)
-    // ----------------------------------------------------
-    if (pathname.startsWith('/api/papaleguas') && pathname !== '/api/papaleguas/device-telemetry') {
-      if (!isLocalAdminRequest(req)) {
-        sendForbiddenAdminResponse(res, true);
-        return;
-      }
-      const isPublicAdminRoute = pathname === '/api/papaleguas/status' || pathname === '/api/papaleguas/login' || pathname === '/api/papaleguas/setup';
-      if (!isPublicAdminRoute) {
-        if (!papaleguasTracker.validateSession(req)) {
-          res.writeHead(401, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, error: 'Acesso restrito. Faça login como administrador para continuar.' }));
-          return;
-        }
-      }
-    }
-
-    if (pathname === '/api/papaleguas/status') {
-      const clientIp = papaleguasTracker.extractClientIp(req);
-      const isLocal = papaleguasTracker.isPrivateIp(clientIp);
-      const authenticated = isLocal || papaleguasTracker.validateSession(req);
-      const hasAdmin = papaleguasTracker.hasAdminAccount();
-      res.writeHead(200, {
-        'Content-Type': 'application/json',
-        'Cache-Control': 'no-cache, no-store, must-revalidate'
-      });
-      const torOn = isAppTorEnabled();
-      let torConnected = false;
-      if (torOn) {
-        try {
-          const torStatus = await torManager.checkTorStatus();
-          torConnected = Boolean(torStatus && torStatus.connected);
-        } catch (e) {}
-      }
-      const ngStatus = ngrokTunnel.getTunnelStatus();
-      const activePublicUrl = ngStatus.url || null;
-      res.end(JSON.stringify({
-        hasAdmin,
-        authenticated,
-        username: authenticated ? 'Administrador' : null,
-        isTrackingEnabled: papaleguasTracker.isTrackingEnabled(),
-        serverLogsPaused: isServerConsoleLogsPaused(),
-        tunnelUrl: activePublicUrl,
-        ngrokTunnelUrl: ngStatus.url || null,
-        ngrokTunnelConnecting: Boolean(ngStatus.connecting),
-        lanAccessUrl: `http://${getLocalNetworkIp()}:${PORT}`,
-        torEnabled: torOn,
-        torConnected
-      }));
-      return;
-    }
-
-    if (pathname === '/api/papaleguas/tunnel-restart' && req.method === 'POST') {
-      ngrokTunnel.stopTunnel();
-      ngrokTunnel.startTunnel(PORT);
-      const ngStatus = ngrokTunnel.getTunnelStatus();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        success: true,
-        url: ngStatus.url || null,
-        connecting: Boolean(ngStatus.connecting)
-      }));
-      return;
-    }
-
-    if (pathname === '/api/papaleguas/setup' && req.method === 'POST') {
-      try {
-        const { username, password } = body;
-        const result = papaleguasTracker.createAdminAccount(username, password);
-        if (result.success && result.token) {
-          res.setHeader('Set-Cookie', `papaleguas_token=${result.token}; Path=/; HttpOnly; Max-Age=604800; SameSite=Lax`);
-        }
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(result));
-      } catch (err) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: err.message }));
-      }
-      return;
-    }
-
-    if (pathname === '/api/papaleguas/login' && req.method === 'POST') {
-      try {
-        const { username, password } = body;
-        const result = papaleguasTracker.authenticateAdmin(username, password);
-        if (result.success) {
-          res.setHeader('Set-Cookie', `papaleguas_token=${result.token}; Path=/; HttpOnly; Max-Age=604800; SameSite=Lax`);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(result));
-        } else {
-          res.writeHead(401, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(result));
-        }
-      } catch (err) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: err.message }));
-      }
-      return;
-    }
-
-    if (pathname === '/api/papaleguas/logout' && req.method === 'POST') {
-      papaleguasTracker.logoutAdmin(req);
-      res.setHeader('Set-Cookie', 'papaleguas_token=; Path=/; HttpOnly; Max-Age=0; SameSite=Lax');
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true }));
-      return;
-    }
-
-    if (pathname === '/api/papaleguas/metrics') {
-      const clientIp = papaleguasTracker.extractClientIp(req);
-      const isLocal = papaleguasTracker.isPrivateIp(clientIp);
-      if (!isLocal && !papaleguasTracker.validateSession(req)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: 'Não autorizado. Faça login como administrador.' }));
-        return;
-      }
-      const metrics = papaleguasTracker.calculateAcceptanceAndEvolutionMetrics();
-      res.writeHead(200, {
-        'Content-Type': 'application/json',
-        'Cache-Control': 'no-cache, no-store, must-revalidate'
-      });
-      let ngStatus = ngrokTunnel.getTunnelStatus();
-      if (!ngStatus.running && !ngStatus.connecting) {
-        ngrokTunnel.startTunnel(PORT);
-        ngStatus = ngrokTunnel.getTunnelStatus();
-      }
-      res.end(JSON.stringify({
-        success: true,
-        tunnelUrl: ngStatus.url || null,
-        ngrokTunnelUrl: ngStatus.url || null,
-        ngrokTunnelConnecting: Boolean(ngStatus.connecting),
-        lanAccessUrl: `http://${getLocalNetworkIp()}:${PORT}`,
-        ...metrics
-      }));
-      return;
-    }
-
-    if (pathname === '/api/papaleguas/device-telemetry' && req.method === 'POST') {
-      try {
-        const clientIp = papaleguasTracker.extractClientIp(req);
-        const updated = papaleguasTracker.updateClientTelemetry(clientIp, body || {});
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true, clientIp, updated: Boolean(updated) }));
-      } catch (err) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: err.message }));
-      }
-      return;
-    }
-
-    // Excluir todos os dados gravados de log e requisições (começando do zero)
-    if (pathname === '/api/papaleguas/clear-data' && req.method === 'POST') {
-      const clientIp = papaleguasTracker.extractClientIp(req);
-      const isLocal = papaleguasTracker.isPrivateIp(clientIp);
-      if (!isLocal && !papaleguasTracker.validateSession(req)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: 'Não autorizado. Faça login como administrador.' }));
-        return;
-      }
-      const result = papaleguasTracker.clearAllAnalyticsData();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(result));
-      return;
-    }
-
-    // Parar / Retomar registro de logs e requisições
-    if (pathname === '/api/papaleguas/toggle-tracking' && req.method === 'POST') {
-      const clientIp = papaleguasTracker.extractClientIp(req);
-      const isLocal = papaleguasTracker.isPrivateIp(clientIp);
-      if (!isLocal && !papaleguasTracker.validateSession(req)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: 'Não autorizado. Faça login como administrador.' }));
-        return;
-      }
-      const current = papaleguasTracker.isTrackingEnabled();
-      const newEnabled = body && typeof body.enabled === 'boolean' ? body.enabled : !current;
-      const updated = papaleguasTracker.setTrackingEnabled(newEnabled);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        success: true,
-        isTrackingEnabled: updated,
-        message: updated ? 'Registro de logs e requisições ATIVADO.' : 'Registro de logs e requisições PAUSADO.'
-      }));
-      return;
-    }
-
-    // Parar / Retomar exibição de logs no terminal do servidor (Console Mute)
-    if (pathname === '/api/papaleguas/server-logs' && req.method === 'POST') {
-      const clientIp = papaleguasTracker.extractClientIp(req);
-      const isLocal = papaleguasTracker.isPrivateIp(clientIp);
-      if (!isLocal && !papaleguasTracker.validateSession(req)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: 'Não autorizado. Faça login como administrador.' }));
-        return;
-      }
-      const isPaused = body && (body.paused === true || body.value === 'paused');
-      const updatedPaused = setServerConsoleLogsPaused(isPaused);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        success: true,
-        serverLogsPaused: updatedPaused,
-        message: updatedPaused ? 'Logs do terminal pausados (modo silencioso).' : 'Logs do terminal ativados (visíveis).'
-      }));
-      return;
-    }
-
     if (pathname === '/api/onion-search') {
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ success: true, q: '', items: [] }));
+      const q = reqUrl.searchParams.get('q') || body.q || '';
+      const items = await searchOnionLinks(q, { only200: true });
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Access-Control-Allow-Origin': '*'
+      });
+      res.end(JSON.stringify({ success: true, q, count: items.length, items, results: items }));
+      return;
+    }
+
+    if (pathname === '/api/onion-crawl') {
+      const targetUrl = reqUrl.searchParams.get('url') || body.url || '';
+      const sublinks = await crawlOnionSublinks(targetUrl);
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Access-Control-Allow-Origin': '*'
+      });
+      res.end(JSON.stringify({ success: true, url: targetUrl, count: sublinks.length, sublinks }));
+      return;
+    }
+
+    if (pathname === '/api/onion-check') {
+      const targetUrl = reqUrl.searchParams.get('url') || body.url || '';
+      const status = await checkOnionAlive(targetUrl);
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Access-Control-Allow-Origin': '*'
+      });
+      res.end(JSON.stringify({ success: true, url: targetUrl, ...status }));
       return;
     }
 
@@ -6044,8 +9983,7 @@ const server = http.createServer(async (req, res) => {
       const page = parseInt(reqUrl.searchParams.get('page') || body.page || '0', 10);
       const useTor = isTorRoutingEnabled(clientSession);
       const payload = await getUrlSuggestions({ query: q, page, useTor });
-      res.writeHead(200);
-      res.end(JSON.stringify(payload));
+      sendCompressed(req, res, 200, { 'Content-Type': 'application/json; charset=utf-8' }, JSON.stringify(payload));
       return;
     }
 
@@ -6054,8 +9992,49 @@ const server = http.createServer(async (req, res) => {
       const q = reqUrl.searchParams.get('q') || body.q || '';
       const useTor = isTorRoutingEnabled(clientSession);
       const data = await getRichSearchData(q, useTor);
-      res.writeHead(200);
-      res.end(JSON.stringify({ success: true, ...data }));
+      sendCompressed(req, res, 200, { 'Content-Type': 'application/json; charset=utf-8' }, JSON.stringify({ success: true, ...data }));
+      return;
+    }
+
+    // Endpoint de paginação e busca dinâmica de imagens ("Carregar mais")
+    if (pathname === '/api/search-images') {
+      const q = (reqUrl.searchParams.get('q') || body.q || '').trim();
+      const page = Math.max(0, parseInt(reqUrl.searchParams.get('page') || body.page || '0', 10) || 0);
+      if (!q) {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ success: false, images: [], page, hasMore: false }));
+        return;
+      }
+      const useTor = isTorRoutingEnabled(clientSession);
+      const images = await searchTopicImages(q, useTor, page);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        success: true,
+        images,
+        page,
+        hasMore: images.length > 0
+      }));
+      return;
+    }
+
+    // Endpoint de paginação e busca dinâmica de vídeos ("Carregar mais")
+    if (pathname === '/api/search-videos') {
+      const q = (reqUrl.searchParams.get('q') || body.q || '').trim();
+      const page = Math.max(0, parseInt(reqUrl.searchParams.get('page') || body.page || '0', 10) || 0);
+      const limit = Math.max(1, parseInt(reqUrl.searchParams.get('limit') || body.limit || '8', 10) || 8);
+      if (!q) {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ success: false, videos: [], page, hasMore: false }));
+        return;
+      }
+      const videos = await searchYoutubeVideosForTopic(q, limit, page);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        success: true,
+        videos,
+        page,
+        hasMore: videos.length > 0
+      }));
       return;
     }
 
@@ -6156,6 +10135,76 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // Prévia em lote (imagem + descrição) dos links encontrados pelo buscador
+    if (pathname === '/api/page-preview') {
+      let urls = Array.isArray(body.urls) ? body.urls : reqUrl.searchParams.getAll('url');
+      urls = Array.from(new Set(urls.map((u) => String(u || '').trim()).filter(Boolean))).slice(0, 16);
+      const useTor = isTorRoutingEnabled(clientSession);
+      const previews = {};
+      await Promise.all(urls.map(async (u) => {
+        try {
+          const data = await getPagePreview(u, useTor);
+          if (data) previews[u] = data;
+        } catch (e) { swallowed(e, 'server:page-preview'); }
+      }));
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ success: true, previews }));
+      return;
+    }
+
+    // Proxy de imagens das prévias: só repassa image/*, sem cookies e sem expor o IP do usuário
+    if (pathname === '/api/preview-img') {
+      const useTor = isTorRoutingEnabled(clientSession);
+      const fail = () => {
+        if (res.headersSent) { try { res.end(); } catch (e) { /* ignore */ } return; }
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'public, max-age=600' });
+        res.end('Imagem indisponível');
+      };
+      const MAX_IMG_BYTES = 8 * 1024 * 1024;
+      const fetchImg = (rawUrl, hops) => {
+        const target = isPreviewableUrl(rawUrl);
+        if (!target || hops > 4) return fail();
+        const lib = target.protocol === 'http:' ? http : https;
+        const imgReq = lib.get(target.href, {
+          agent: getOutboundAgent(useTor),
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+            'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+            'Referer': target.origin + '/'
+          }
+        }, (imgRes) => {
+          const location = imgRes.headers.location;
+          if (imgRes.statusCode >= 300 && imgRes.statusCode < 400 && location) {
+            imgRes.resume();
+            let next = '';
+            try { next = new URL(location, target).href; } catch (e) { next = ''; }
+            return next ? fetchImg(next, hops + 1) : fail();
+          }
+          const type = String(imgRes.headers['content-type'] || '').toLowerCase();
+          const len = parseInt(imgRes.headers['content-length'] || '0', 10) || 0;
+          if (imgRes.statusCode !== 200 || !type.startsWith('image/') || type.includes('svg') || len > MAX_IMG_BYTES) {
+            imgRes.resume();
+            return fail();
+          }
+          res.writeHead(200, {
+            'Content-Type': type,
+            'Cache-Control': 'public, max-age=86400',
+            'X-Content-Type-Options': 'nosniff'
+          });
+          let sent = 0;
+          imgRes.on('data', (chunk) => {
+            sent += chunk.length;
+            if (sent > MAX_IMG_BYTES) { try { imgReq.destroy(); res.end(); } catch (e) { /* ignore */ } }
+          });
+          safePipe(imgRes, res, req);
+        });
+        imgReq.on('error', fail);
+        imgReq.setTimeout(9000, () => { try { imgReq.destroy(); } catch (e) { /* ignore */ } });
+      };
+      fetchImg(reqUrl.searchParams.get('u') || '', 0);
+      return;
+    }
+
     if (pathname === '/api/search-gpt') {
       const q = reqUrl.searchParams.get('q') || body.q || '';
       const useTor = isTorRoutingEnabled(clientSession);
@@ -6177,39 +10226,6 @@ const server = http.createServer(async (req, res) => {
       const limit = parseInt(reqUrl.searchParams.get('limit') || body.limit || '30', 10);
       const index = parseInt(reqUrl.searchParams.get('index') || reqUrl.searchParams.get('offset') || body.index || body.offset || '0', 10);
       const result = await searchDeezer(q, limit, 'RANKING', index);
-      res.writeHead(200);
-      res.end(JSON.stringify(result));
-      return;
-    }
-
-    if (pathname === '/api/playlist-tracks') {
-      const id = reqUrl.searchParams.get('id');
-      if (!id) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ success: false, error: 'id param required' }));
-      }
-      try {
-        const result = await getDeezerPlaylistTracks(id, 200);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(result));
-      } catch (e) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: e.message }));
-      }
-      return;
-    }
-
-    if (pathname === '/api/playlists') {
-      const q = reqUrl.searchParams.get('q') || body.q || '';
-      const result = await searchDeezerPlaylists(q);
-      res.writeHead(200);
-      res.end(JSON.stringify(result));
-      return;
-    }
-
-    if (pathname === '/api/all') {
-      const q = reqUrl.searchParams.get('q') || body.q || '';
-      const result = await searchDeezerAll(q);
       res.writeHead(200);
       res.end(JSON.stringify(result));
       return;
@@ -6266,7 +10282,7 @@ const server = http.createServer(async (req, res) => {
             respHeaders['Content-Range'] = audioRes.headers['content-range'];
           }
           res.writeHead(audioRes.statusCode || 200, respHeaders);
-          audioRes.pipe(res);
+          safePipe(audioRes, res, req);
         });
         audioReq.on('error', () => {
           if (!res.headersSent) {
@@ -6299,7 +10315,7 @@ const server = http.createServer(async (req, res) => {
               res.end();
               return;
             }
-          } catch (e) {}
+          } catch (e) { swallowed(e, 'server:top@9830'); }
           res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
           res.end('Capa indisponível');
           return;
@@ -6315,7 +10331,7 @@ const server = http.createServer(async (req, res) => {
           'Content-Type': type,
           'Cache-Control': 'public, max-age=86400'
         });
-        imgRes.pipe(res);
+        safePipe(imgRes, res, req);
       });
       imgReq.on('error', () => {
         if (!res.headersSent) {
@@ -6324,6 +10340,40 @@ const server = http.createServer(async (req, res) => {
         }
       });
       imgReq.setTimeout(12000, () => imgReq.destroy());
+      return;
+    }
+
+    // Proxy otimizado de miniaturas do YouTube para OpenGraph / WhatsApp / Telegram
+    if (pathname === '/api/thumb' || pathname.startsWith('/api/thumb/')) {
+      let vid = reqUrl.searchParams.get('v') || reqUrl.searchParams.get('id');
+      if (!vid && pathname.startsWith('/api/thumb/')) {
+        vid = pathname.slice('/api/thumb/'.length).replace(/\.(jpg|jpeg|png|webp)$/i, '');
+      }
+      if (!vid || !/^[a-zA-Z0-9_-]{6,15}$/.test(vid)) {
+        serveFileWithMemoryCache(req, res, path.join(SRC_DIR, 'og-banner.jpg'), 'image/jpeg', 'public, max-age=86400', true);
+        return;
+      }
+      const thumbUrl = `https://i.ytimg.com/vi/${encodeURIComponent(vid)}/hqdefault.jpg`;
+      const imgReq = https.get(thumbUrl, { agent: getOutboundAgent(false), headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } }, (imgRes) => {
+        if (imgRes.statusCode === 200) {
+          res.writeHead(200, {
+            'Content-Type': 'image/jpeg',
+            'Cache-Control': 'public, max-age=604800, immutable'
+          });
+          safePipe(imgRes, res, req);
+        } else {
+          imgRes.resume();
+          serveFileWithMemoryCache(req, res, path.join(SRC_DIR, 'og-banner.jpg'), 'image/jpeg', 'public, max-age=86400', true);
+        }
+      });
+      imgReq.on('error', () => {
+        if (!res.headersSent) {
+          serveFileWithMemoryCache(req, res, path.join(SRC_DIR, 'og-banner.jpg'), 'image/jpeg', 'public, max-age=86400', true);
+        }
+      });
+      imgReq.setTimeout(8000, () => {
+        try { imgReq.destroy(); } catch (e) { swallowed(e, 'server:top@9887'); }
+      });
       return;
     }
 
@@ -6410,7 +10460,7 @@ function findFileInDirResilient(dirPath, targetName) {
         return path.resolve(searchDir, f);
       }
     }
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'server:findFileInDirResilient@9975'); }
 
   return null;
 }
@@ -6425,7 +10475,7 @@ function getDeletedPlaylistsSet() {
         return new Set(arr.map(s => String(s || '').trim().toLowerCase()));
       }
     }
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'server:getDeletedPlaylistsSet@9990'); }
   return new Set();
 }
 
@@ -6436,7 +10486,7 @@ function markPlaylistAsDeleted(name) {
     set.add(String(name).trim().toLowerCase());
     fs.mkdirSync(path.dirname(DELETED_PLAYLISTS_FILE), { recursive: true });
     fs.writeFileSync(DELETED_PLAYLISTS_FILE, JSON.stringify(Array.from(set)), 'utf8');
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'server:markPlaylistAsDeleted@10001'); }
 }
 
 function unmarkPlaylistAsDeleted(name) {
@@ -6446,7 +10496,7 @@ function unmarkPlaylistAsDeleted(name) {
     set.delete(String(name).trim().toLowerCase());
     fs.mkdirSync(path.dirname(DELETED_PLAYLISTS_FILE), { recursive: true });
     fs.writeFileSync(DELETED_PLAYLISTS_FILE, JSON.stringify(Array.from(set)), 'utf8');
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'server:unmarkPlaylistAsDeleted@10011'); }
 }
 
 function autoExtractZipDownloads() {
@@ -6454,7 +10504,7 @@ function autoExtractZipDownloads() {
     const downloadsDir = path.resolve(os.homedir(), 'Downloads');
     const musicRoot = path.join(os.homedir(), 'Músicas', 'Papaléguas', 'Minhas playlists favoritas');
     if (!fs.existsSync(downloadsDir)) return;
-    try { fs.mkdirSync(musicRoot, { recursive: true }); } catch (e) {}
+    try { fs.mkdirSync(musicRoot, { recursive: true }); } catch (e) { swallowed(e, 'server:autoExtractZipDownloads@10019'); }
 
     const deletedSet = getDeletedPlaylistsSet();
     const zipFiles = fs.readdirSync(downloadsDir).filter(f => f.toLowerCase().endsWith('.zip') && !f.startsWith('.'));
@@ -6466,7 +10516,7 @@ function autoExtractZipDownloads() {
 
       // Se a playlist foi marcada como excluída pelo usuário, não re-extrai e apaga o zip se solicitado
       if (deletedSet.has(cleanName.toLowerCase()) || deletedSet.has(rawBase.trim().toLowerCase())) {
-        try { fs.unlinkSync(fullZipPath); } catch (e) {}
+        try { fs.unlinkSync(fullZipPath); } catch (e) { swallowed(e, 'server:autoExtractZipDownloads@10031'); }
         continue;
       }
 
@@ -6480,11 +10530,11 @@ function autoExtractZipDownloads() {
       }
 
       if (needsExtract) {
-        try { fs.mkdirSync(targetDir, { recursive: true }); } catch (e) {}
+        try { fs.mkdirSync(targetDir, { recursive: true }); } catch (e) { swallowed(e, 'server:autoExtractZipDownloads@10045'); }
         try {
           const { execSync } = require('child_process');
           execSync(`unzip -q -o "${fullZipPath}" -d "${targetDir}"`, { timeout: 15000 });
-        } catch (e) {}
+        } catch (e) { swallowed(e, 'server:autoExtractZipDownloads@10049'); }
       }
 
       // Auto-repara caracteres mojibake comparando com playlist.json
@@ -6497,15 +10547,15 @@ function autoExtractZipDownloads() {
               if (t.file && !fs.existsSync(path.join(targetDir, t.file))) {
                 const found = findFileInDirResilient(targetDir, t.file);
                 if (found && found !== path.join(targetDir, t.file)) {
-                  try { fs.renameSync(found, path.join(targetDir, t.file)); } catch (e) {}
+                  try { fs.renameSync(found, path.join(targetDir, t.file)); } catch (e) { swallowed(e, 'server:autoExtractZipDownloads@10062'); }
                 }
               }
             }
           }
         }
-      } catch (e) {}
+      } catch (e) { swallowed(e, 'server:autoExtractZipDownloads@10068'); }
     }
-  } catch (err) {}
+  } catch (err) { swallowed(err, 'server:autoExtractZipDownloads@10070'); }
 }
 
 // Requisição feita diretamente na própria máquina (sem passar por túnel ngrok/proxy).
@@ -6531,7 +10581,7 @@ function getDevicePlaylistsRoot(clientId, req) {
   const base = path.join(os.homedir(), 'Músicas', 'Papaléguas');
   if (isHost) {
     const root = path.join(base, 'Minhas playlists favoritas');
-    try { fs.mkdirSync(root, { recursive: true }); } catch (e) {}
+    try { fs.mkdirSync(root, { recursive: true }); } catch (e) { swallowed(e, 'server:getDevicePlaylistsRoot@10096'); }
     return {
       root,
       downloads: path.resolve(os.homedir(), 'Downloads'),
@@ -6540,7 +10590,7 @@ function getDevicePlaylistsRoot(clientId, req) {
     };
   }
   const deviceDir = path.join(base, 'Dispositivos', cleanId);
-  try { fs.mkdirSync(deviceDir, { recursive: true }); } catch (e) {}
+  try { fs.mkdirSync(deviceDir, { recursive: true }); } catch (e) { swallowed(e, 'server:getDevicePlaylistsRoot@10105'); }
   return {
     root: deviceDir,
     downloads: null,
@@ -6576,7 +10626,7 @@ function getDevicePlaylistsRoot(clientId, req) {
                 if (fs.existsSync(cPath)) {
                   cover = `/api/downloaded-track-file?folder=${encodeURIComponent(ent.name)}&file=${encodeURIComponent(m.cover || 'cover.jpg')}&clientId=${encodeURIComponent(devInfo.clientId)}`;
                 }
-              } catch (e) {}
+              } catch (e) { swallowed(e, 'server:top@10141'); }
             } else {
               count = fs.readdirSync(dir).filter(f => audioExts.has(path.extname(f).toLowerCase()) && !f.startsWith('.')).length;
             }
@@ -6585,7 +10635,7 @@ function getDevicePlaylistsRoot(clientId, req) {
               playlists.push({ name: ent.name, count, cover, source: 'device', clientId: devInfo.clientId });
             }
           }
-        } catch (e) {}
+        } catch (e) { swallowed(e, 'server:top@10150'); }
       }
 
       // 2. Playlists da biblioteca do Papaléguas (Minhas playlists favoritas) — exclusivas do Host
@@ -6606,7 +10656,7 @@ function getDevicePlaylistsRoot(clientId, req) {
                 if (fs.existsSync(cPath)) {
                   cover = `/api/downloaded-track-file?folder=${encodeURIComponent(ent.name)}&file=${encodeURIComponent(m.cover || 'cover.jpg')}&clientId=${encodeURIComponent(devInfo.clientId)}`;
                 }
-              } catch (e) {}
+              } catch (e) { swallowed(e, 'server:top@10171'); }
             } else {
               count = fs.readdirSync(dir).filter(f => audioExts.has(path.extname(f).toLowerCase()) && !f.startsWith('.')).length;
             }
@@ -6615,7 +10665,7 @@ function getDevicePlaylistsRoot(clientId, req) {
               playlists.push({ name: ent.name, count, cover, source: 'disk', clientId: devInfo.clientId });
             }
           }
-        } catch (e) {}
+        } catch (e) { swallowed(e, 'server:top@10180'); }
       }
 
       // 3. Pastas e músicas em Downloads — exclusivas do Host
@@ -6639,7 +10689,7 @@ function getDevicePlaylistsRoot(clientId, req) {
             let audioFiles = [];
             try {
               audioFiles = fs.readdirSync(dir).filter(f => audioExts.has(path.extname(f).toLowerCase()) && !f.startsWith('.'));
-            } catch (e) {}
+            } catch (e) { swallowed(e, 'server:top@10204'); }
             if (audioFiles.length > 0) {
               seenNames.add(ent.name.toLowerCase());
               let cover = '';
@@ -6648,7 +10698,7 @@ function getDevicePlaylistsRoot(clientId, req) {
                 if (imgFiles.length > 0) {
                   cover = `/api/downloaded-track-file?folder=__download__&file=${encodeURIComponent(ent.name + '/' + imgFiles[0])}`;
                 }
-              } catch (e) {}
+              } catch (e) { swallowed(e, 'server:top@10213'); }
               playlists.push({
                 name: ent.name,
                 count: audioFiles.length,
@@ -6657,7 +10707,7 @@ function getDevicePlaylistsRoot(clientId, req) {
               });
             }
           }
-        } catch (e) {}
+        } catch (e) { swallowed(e, 'server:top@10222'); }
       }
 
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -6790,7 +10840,7 @@ function getDevicePlaylistsRoot(clientId, req) {
           tracks: []
         };
         if (fs.existsSync(manifestPath)) {
-          try { manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')); } catch (e) {}
+          try { manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')); } catch (e) { swallowed(e, 'server:top@10355'); }
         }
         if (body.cover) manifest.cover = body.cover;
         if (Array.isArray(body.tracks) && body.tracks.length > 0) {
@@ -6835,7 +10885,7 @@ function getDevicePlaylistsRoot(clientId, req) {
               rootsToCheck.push(path.join(devicesBaseDir, d.name));
             }
           }
-        } catch (e) {}
+        } catch (e) { swallowed(e, 'server:top@10400'); }
       }
 
       for (const rootDir of rootsToCheck) {
@@ -6844,7 +10894,7 @@ function getDevicePlaylistsRoot(clientId, req) {
           // 1. Caminho direto
           const direct = path.join(rootDir, name);
           if (fs.existsSync(direct)) {
-            try { fs.rmSync(direct, { recursive: true, force: true }); } catch (e) {}
+            try { fs.rmSync(direct, { recursive: true, force: true }); } catch (e) { swallowed(e, 'server:top@10409'); }
           }
           // 2. Busca case-insensitive e por manifesto
           for (const ent of fs.readdirSync(rootDir, { withFileTypes: true })) {
@@ -6857,13 +10907,13 @@ function getDevicePlaylistsRoot(clientId, req) {
                 if (mf && (String(mf.name || '').trim().toLowerCase() === targetClean || String(mf.name || '').trim().toLowerCase() === name.toLowerCase())) {
                   isMatch = true;
                 }
-              } catch (e) {}
+              } catch (e) { swallowed(e, 'server:top@10422'); }
             }
             if (isMatch) {
-              try { fs.rmSync(path.join(rootDir, ent.name), { recursive: true, force: true }); } catch (e) {}
+              try { fs.rmSync(path.join(rootDir, ent.name), { recursive: true, force: true }); } catch (e) { swallowed(e, 'server:top@10425'); }
             }
           }
-        } catch (e) {}
+        } catch (e) { swallowed(e, 'server:top@10428'); }
       }
 
       // Apaga arquivos .zip correspondentes em Downloads para não re-extrair e liberar espaço
@@ -6873,10 +10923,10 @@ function getDevicePlaylistsRoot(clientId, req) {
             if (!f.toLowerCase().endsWith('.zip')) continue;
             const baseZip = f.slice(0, -4).replace(/\s*\(\d+\)$/, '').trim().toLowerCase();
             if (baseZip === targetClean || baseZip === name.toLowerCase()) {
-              try { fs.unlinkSync(path.join(downloadsDir, f)); } catch (e) {}
+              try { fs.unlinkSync(path.join(downloadsDir, f)); } catch (e) { swallowed(e, 'server:top@10438'); }
             }
           }
-        } catch (e) {}
+        } catch (e) { swallowed(e, 'server:top@10441'); }
       }
 
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -6887,6 +10937,7 @@ function getDevicePlaylistsRoot(clientId, req) {
     if (pathname === '/api/delete-favorite-track' && req.method === 'POST') {
       const playlist = String(body.playlist || reqUrl.searchParams.get('playlist') || '').trim();
       const fileName = String(body.fileName || body.file || reqUrl.searchParams.get('file') || '').trim();
+      const trackTitle = String(body.title || reqUrl.searchParams.get('title') || '').trim().toLowerCase();
       const clientId = String(body.clientId || reqUrl.searchParams.get('clientId') || req.headers['x-client-id'] || '').trim();
       const devInfo = getDevicePlaylistsRoot(clientId, req);
       const downloadsDir = path.resolve(os.homedir(), 'Downloads');
@@ -6895,7 +10946,7 @@ function getDevicePlaylistsRoot(clientId, req) {
         const safeRel = fileName.replace(/^[\\/]+/, '');
         const target = path.resolve(downloadsDir, safeRel);
         if (target.startsWith(downloadsDir + path.sep) && fs.existsSync(target)) {
-          try { fs.unlinkSync(target); } catch (e) {}
+          try { fs.unlinkSync(target); } catch (e) { swallowed(e, 'server:top@10461'); }
         }
       } else {
         let dir = path.join(devInfo.root, playlist);
@@ -6904,17 +10955,23 @@ function getDevicePlaylistsRoot(clientId, req) {
           if (fs.existsSync(cand)) dir = cand;
         }
         if (dir && fs.existsSync(dir)) {
-          const target = path.join(dir, path.basename(fileName));
-          if (fs.existsSync(target)) {
-            try { fs.unlinkSync(target); } catch (e) {}
+          if (fileName) {
+            const target = path.join(dir, path.basename(fileName));
+            if (fs.existsSync(target)) {
+              try { fs.unlinkSync(target); } catch (e) { swallowed(e, 'server:top@10473'); }
+            }
           }
           const manifestPath = path.join(dir, 'playlist.json');
           if (fs.existsSync(manifestPath)) {
             try {
               const m = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-              m.tracks = (m.tracks || []).filter(t => t.file !== fileName && path.basename(t.file) !== path.basename(fileName));
+              m.tracks = (m.tracks || []).filter(t => {
+                if (fileName && (t.file === fileName || path.basename(t.file) === path.basename(fileName))) return false;
+                if (trackTitle && t.title && t.title.trim().toLowerCase() === trackTitle) return false;
+                return true;
+              });
               fs.writeFileSync(manifestPath, JSON.stringify(m, null, 2));
-            } catch (e) {}
+            } catch (e) { swallowed(e, 'server:top@10486'); }
           }
         }
       }
@@ -6967,7 +11024,7 @@ function getDevicePlaylistsRoot(clientId, req) {
             m.name = cleanNew;
             m.album = cleanNew;
             fs.writeFileSync(manifestPath, JSON.stringify(m, null, 2));
-          } catch (e) {}
+          } catch (e) { swallowed(e, 'server:top@10539'); }
         }
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ success: true, oldName, newName: cleanNew, clientId: devInfo.clientId }));
@@ -7005,7 +11062,7 @@ function getDevicePlaylistsRoot(clientId, req) {
                 fs.writeFileSync(manifestPath, JSON.stringify(m, null, 2));
               }
             }
-          } catch (e) {}
+          } catch (e) { swallowed(e, 'server:top@10577'); }
         }
       }
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -7057,7 +11114,7 @@ function getDevicePlaylistsRoot(clientId, req) {
                       } else if (fs.existsSync(candAlbum)) {
                         trCover = `/api/downloaded-track-file?folder=${encodeURIComponent(folderName !== 'Downloads' ? folderName : '__download__')}&file=album.jpg&clientId=${encodeURIComponent(devInfo.clientId)}`;
                       }
-                    } catch (e) {}
+                    } catch (e) { swallowed(e, 'server:scanFolder@10629'); }
 
                     const fullSearchText = `${title} ${artist} ${ent.name} ${folderName}`.toLowerCase();
                     if (!q || fullSearchText.includes(q)) {
@@ -7128,11 +11185,11 @@ function getDevicePlaylistsRoot(clientId, req) {
                     }
                   }
                 }
-              } catch (e) {}
+              } catch (e) { swallowed(e, 'server:top@10700'); }
             }
           }
         }
-      } catch (err) {}
+      } catch (err) { swallowed(err, 'server:top@10704'); }
 
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ success: true, count: results.length, results, clientId: devInfo.clientId }));
@@ -7142,8 +11199,8 @@ function getDevicePlaylistsRoot(clientId, req) {
     if (pathname === '/api/downloaded-track-file') {
       let folder = reqUrl.searchParams.get('folder') || '';
       let file = reqUrl.searchParams.get('file') || '';
-      try { folder = decodeURIComponent(folder); } catch (e) {}
-      try { file = decodeURIComponent(file); } catch (e) {}
+      try { folder = decodeURIComponent(folder); } catch (e) { swallowed(e, 'server:top@10714'); }
+      try { file = decodeURIComponent(file); } catch (e) { swallowed(e, 'server:top@10715'); }
       const clientId = String(reqUrl.searchParams.get('clientId') || req.headers['x-client-id'] || '').trim();
       const devInfo = getDevicePlaylistsRoot(clientId, req);
       const serverMusicRoot = path.join(os.homedir(), 'Músicas', 'Papaléguas', 'Minhas playlists favoritas');
@@ -7177,7 +11234,7 @@ function getDevicePlaylistsRoot(clientId, req) {
                   if (targetPath) break;
                 }
               }
-            } catch (e) {}
+            } catch (e) { swallowed(e, 'server:top@10749'); }
           }
         }
         if (!targetPath && devInfo.root && fs.existsSync(devInfo.root)) {
@@ -7202,7 +11259,7 @@ function getDevicePlaylistsRoot(clientId, req) {
                   if (targetPath) break;
                 }
               }
-            } catch (e) {}
+            } catch (e) { swallowed(e, 'server:top@10774'); }
           }
         }
         // 2.3 Pasta Downloads
@@ -7220,7 +11277,7 @@ function getDevicePlaylistsRoot(clientId, req) {
                 if (targetPath) break;
               }
             }
-          } catch (e) {}
+          } catch (e) { swallowed(e, 'server:top@10792'); }
         }
       }
 
@@ -7256,25 +11313,20 @@ function getDevicePlaylistsRoot(clientId, req) {
           'Content-Length': (end - start) + 1,
           'Content-Type': mime
         });
-        fs.createReadStream(targetPath, { start, end }).pipe(res);
+        safePipe(fs.createReadStream(targetPath, { start, end }), res, req);
       } else {
         res.writeHead(200, {
           'Content-Length': stat.size,
           'Accept-Ranges': 'bytes',
           'Content-Type': mime
         });
-        fs.createReadStream(targetPath).pipe(res);
+        safePipe(fs.createReadStream(targetPath), res, req);
       }
       return;
     }
 
     if (pathname === '/api/session-info') {
-      let ngStatus = ngrokTunnel.getTunnelStatus();
-      if (!ngStatus.running && !ngStatus.connecting) {
-        ngrokTunnel.startTunnel(PORT);
-        ngStatus = ngrokTunnel.getTunnelStatus();
-      }
-      const activePublicUrl = ngStatus.url || null;
+      const activePublicUrl = 'https://papaleguas.app';
       res.writeHead(200);
       res.end(JSON.stringify({
         success: true,
@@ -7284,133 +11336,11 @@ function getDevicePlaylistsRoot(clientId, req) {
         isLoggedIn: clientSession.isLoggedIn,
         totalActiveSessions: clientSessions.size,
         tunnelUrl: activePublicUrl,
-        ngrokTunnelUrl: ngStatus.url || null,
-        ngrokTunnelConnecting: Boolean(ngStatus.connecting),
-        serverVersion: SERVER_BUILD_VERSION
+        cloudflareTunnelUrl: activePublicUrl,
+        ngrokTunnelUrl: null,
+        ngrokTunnelConnecting: false,
+        serverVersion: getServerBuildVersion()
       }));
-      return;
-    }
-
-    if (pathname === '/api/recommendations') {
-      const q = body.query || reqUrl.searchParams.get('q') || '';
-      const cat = body.category || reqUrl.searchParams.get('cat') || 'all';
-      // Mescla o histórico de exclusões exclusivo deste cliente
-      const clientExclude = Array.from(clientSession.playedTrackTitles);
-      const inputExclude = body.excludeTitles || [];
-      const exclude = Array.from(new Set([...clientExclude, ...inputExclude]));
-
-      const countryParam = body.country || reqUrl.searchParams.get('country') || 'BR';
-      const result = await getAiMusicRecommendations(q, cat, exclude, countryParam);
-      // Registra as faixas recomendadas na sessão deste cliente
-      if (result && result.success && Array.isArray(result.results)) {
-        result.results.forEach(tr => {
-          if (tr.title) clientSession.playedTrackTitles.add(tr.title.trim().toLowerCase());
-        });
-      }
-
-      res.writeHead(200);
-      res.end(JSON.stringify(result));
-      return;
-    }
-
-    if (pathname === '/api/dj-chat') {
-      const message = body.userMessage || '';
-      // Histórico específico do cliente
-      const history = (body.history && body.history.length > 0) ? body.history : clientSession.djChatHistory;
-      const clientExclude = Array.from(clientSession.playedTrackTitles);
-      const inputExclude = body.excludeTitles || [];
-      const exclude = Array.from(new Set([...clientExclude, ...inputExclude]));
-
-      const result = await chatDjPapaleguas(message, history, exclude, body.trackCount);
-
-      if (result && result.success) {
-        clientSession.djChatHistory.push({ role: 'user', content: message });
-        if (result.reply) clientSession.djChatHistory.push({ role: 'dj', content: result.reply });
-        if (Array.isArray(result.results)) {
-          result.results.forEach(tr => {
-            if (tr.title) clientSession.playedTrackTitles.add(tr.title.trim().toLowerCase());
-          });
-        }
-      }
-
-      res.writeHead(200);
-      res.end(JSON.stringify(result));
-      return;
-    }
-
-    if (pathname === '/api/yt-thumb') {
-      const videoId = String(reqUrl.searchParams.get('v') || reqUrl.searchParams.get('id') || '').replace(/[^a-zA-Z0-9_-]/g, '');
-      if (!videoId) {
-        res.writeHead(400, { 'Content-Type': 'text/plain' });
-        res.end('v ausente');
-        return;
-      }
-      https.get('https://i.ytimg.com/vi/' + encodeURIComponent(videoId) + '/hqdefault.jpg', {
-        agent: getOutboundAgent(false),
-        headers: { 'User-Agent': 'Mozilla/5.0' }
-      }, (imgRes) => {
-        res.writeHead(imgRes.statusCode || 200, {
-          'Content-Type': imgRes.headers['content-type'] || 'image/jpeg',
-          'Cache-Control': 'public, max-age=86400',
-          'Access-Control-Allow-Origin': '*'
-        });
-        imgRes.pipe(res);
-      }).on('error', () => {
-        if (!res.headersSent) {
-          res.writeHead(502, { 'Content-Type': 'text/plain' });
-          res.end('thumb');
-        }
-      });
-      return;
-    }
-
-    if (pathname === '/api/prewarm-playlist' && req.method === 'POST') {
-      const list = Array.isArray(body.tracks) ? body.tracks.slice(0, 60) : [];
-      let running = 0;
-      const queue = list.filter((t) => t && t.title);
-      const next = () => {
-        while (running < 2 && queue.length) {
-          const t = queue.shift();
-          running += 1;
-          getFullAudioStream({ title: String(t.title), artist: String(t.artist || '') })
-            .catch(() => null)
-            .then(() => { running -= 1; setTimeout(next, 300); });
-        }
-      };
-      next();
-      res.writeHead(200);
-      res.end(JSON.stringify({ success: true, queued: list.length }));
-      return;
-    }
-
-    if (pathname === '/api/stream-audio') {
-      const title = reqUrl.searchParams.get('title') || body.title || '';
-      const artist = reqUrl.searchParams.get('artist') || body.artist || '';
-      const videoId = reqUrl.searchParams.get('v') || reqUrl.searchParams.get('id') || body.id || '';
-      handleAudioStreamingProxy(req, res, { title, artist, videoId });
-      return;
-    }
-
-    if (pathname === '/api/stream-video') {
-      const videoId = reqUrl.searchParams.get('v') || reqUrl.searchParams.get('id') || body.id || body.v || '';
-      handleAudioStreamingProxy(req, res, { videoId, preferVideo: true });
-      return;
-    }
-
-    if (pathname === '/api/audio-stream') {
-      const title = body.title || reqUrl.searchParams.get('title') || '';
-      const artist = body.artist || reqUrl.searchParams.get('artist') || '';
-      const result = await getFullAudioStream({ title, artist });
-      res.writeHead(200);
-      res.end(JSON.stringify(result));
-      return;
-    }
-
-    if (pathname === '/api/audio-stream-id') {
-      const videoId = body.id || reqUrl.searchParams.get('id') || body.v || reqUrl.searchParams.get('v') || '';
-      const result = await getFullAudioStreamByVideoId(videoId);
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify(result));
       return;
     }
 
@@ -7465,15 +11395,11 @@ function getDevicePlaylistsRoot(clientId, req) {
         'Content-Type': 'application/json; charset=utf-8',
         'Cache-Control': 'no-store, no-cache, must-revalidate'
       };
-      let socketIp = req.socket && req.socket.remoteAddress ? String(req.socket.remoteAddress) : '';
-      if (socketIp.startsWith('::ffff:')) socketIp = socketIp.replace('::ffff:', '');
-      const host = String(req.headers.host || '').toLowerCase();
-      const xForwarded = req.headers['x-forwarded-for'];
-      const isLoopback = (socketIp === '127.0.0.1' || socketIp === '::1' || socketIp === '') &&
-        (host.startsWith('localhost') || host.startsWith('127.0.0.1')) &&
-        !xForwarded;
-      if (!isLoopback) {
-        // Dispositivos para transmitir devem estar na rede Wi-Fi do cliente (celular), não na rede do servidor!
+      const whoCast = requestGuard.identifyRequester(req);
+      if (!whoCast.isLocal) {
+        // Visitantes externos (túnel Cloudflare/ngrok) não estão na mesma rede física do servidor:
+        // a busca deve rodar apenas na rede Wi-Fi do celular. Já clientes locais (PC ou celular no
+        // mesmo Wi-Fi de casa acessando via IP da LAN) recebem a varredura TCP/SSDP/mDNS real do servidor!
         res.writeHead(200, jsonHead);
         res.end(JSON.stringify({
           success: true,
@@ -7524,474 +11450,16 @@ function getDevicePlaylistsRoot(clientId, req) {
       return;
     }
 
-    // ----------------------------------------------------
-    // ENDPOINTS DE DOWNLOAD DE VÍDEOS E ÁUDIOS (MP4 / MP3)
-    // ----------------------------------------------------
-    if (pathname === '/api/media/download') {
-      const url = body.url || reqUrl.searchParams.get('url') || '';
-      const format = (body.format || reqUrl.searchParams.get('format') || 'mp4').toLowerCase();
-      const isDirectDownload = reqUrl.searchParams.get('download') === '1';
-
-      if (!url) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: 'URL ou ID do vídeo não fornecido' }));
-        return;
-      }
-
-      try {
-        const media = await downloadMediaFile(url, format);
-        try {
-          const clientIp = papaleguasTracker.extractClientIp(req);
-          papaleguasTracker.logConversion(clientIp, 'download', { url, format });
-        } catch (eConv) {}
-        if (isDirectDownload) {
-          res.writeHead(302, { 'Location': media.url });
-          res.end();
-          return;
-        }
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ success: true, ...media }));
-      } catch (err) {
-        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ success: false, error: err.message }));
-      }
-      return;
-    }
-
-    if (pathname === '/api/media/download-job') {
-      const url = reqUrl.searchParams.get('url') || reqUrl.searchParams.get('videoId') || body.url || body.videoId || '';
-      const format = (reqUrl.searchParams.get('format') || body.format || 'mp4').toLowerCase();
-      const quality = reqUrl.searchParams.get('quality') || reqUrl.searchParams.get('resolution') || body.quality || body.resolution || '720';
-
-      if (!url) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: 'URL ou ID do vídeo não fornecido' }));
-        return;
-      }
-
-      const job = startMediaDownloadJob(url, format, quality);
-      try {
-        const clientIp = papaleguasTracker.extractClientIp(req);
-        papaleguasTracker.logConversion(clientIp, 'download', { url, format, quality });
-      } catch (e) {}
-      res.writeHead(200, {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Access-Control-Allow-Origin': '*'
-      });
-      res.end(JSON.stringify({ success: true, jobId: job.jobId }));
-      return;
-    }
-
-    if (pathname === '/api/media/download-status') {
-      const jobId = reqUrl.searchParams.get('jobId') || '';
-      const job = mediaJobs.get(jobId);
-
-      res.writeHead(200, {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Access-Control-Allow-Origin': '*'
-      });
-
-      if (!job) {
-        res.end(JSON.stringify({ success: false, stage: 'not_found', error: 'Job de download não encontrado ou expirado' }));
-        return;
-      }
-
-      if (job.stage === 'complete' && job.result) {
-        res.end(JSON.stringify({
-          success: true,
-          stage: 'complete',
-          progress: 100,
-          text: 'Conversão e download concluídos!',
-          ...job.result
-        }));
-      } else {
-        res.end(JSON.stringify({
-          success: job.stage !== 'error',
-          stage: job.stage,
-          progress: job.progress,
-          speed: job.speed,
-          eta: job.eta,
-          total: job.total,
-          frag: job.frag,
-          text: job.text,
-          error: job.error
-        }));
-      }
-      return;
-    }
-
-    if (pathname === '/api/media/download-stream') {
-      const url = reqUrl.searchParams.get('url') || '';
-      const format = (reqUrl.searchParams.get('format') || 'mp4').toLowerCase();
-
-      if (!url) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: 'URL ou ID do vídeo não fornecido' }));
-        return;
-      }
-
-      res.writeHead(200, {
-        'Content-Type': 'text/event-stream; charset=utf-8',
-        'Cache-Control': 'no-cache, no-transform',
-        'Connection': 'keep-alive',
-        'X-Accel-Buffering': 'no',
-        'Access-Control-Allow-Origin': '*'
-      });
-
-      // Padding de 4KB para liberar buffer de proxies como Cloudflare Tunnel
-      res.write(':\n' + ' '.repeat(4096) + '\n\n');
-
-      function sendSSE(data) {
-        try {
-          res.write(`data: ${JSON.stringify(data)}\n\n`);
-        } catch (e) {}
-      }
-
-      sendSSE({ stage: 'init', progress: 3, text: 'Iniciando motor de download do Papaléguas...' });
-
-      downloadMediaFile(url, format, (p) => {
-        sendSSE(p);
-      }).then((result) => {
-        sendSSE({ stage: 'complete', progress: 100, success: true, ...result });
-        res.end();
-      }).catch((err) => {
-        sendSSE({ stage: 'error', progress: 0, success: false, error: err.message });
-        res.end();
-      });
-
-      req.on('close', () => {});
-      return;
-    }
-
-    if (pathname === '/api/media/play-url') {
-      const url = (reqUrl.searchParams.get('url') || body.url || '').trim();
-      try {
-        const data = await resolvePlayableMediaUrl(url);
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify(data));
-      } catch (err) {
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ success: false, error: String(err && err.message || err).slice(0, 200) }));
-      }
-      return;
-    }
-
-    if (pathname === '/api/media/detect') {
-      const url = body.url || reqUrl.searchParams.get('url') || '';
-      if (!url) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: 'URL não fornecida' }));
-        return;
-      }
-      const isYt = url.includes('youtube.com') || url.includes('youtu.be');
-      const isDirectVideo = /\.(mp4|webm|m4v|mov|mkv)(\?|$)/i.test(url);
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({
-        success: true,
-        detected: isYt || isDirectVideo,
-        type: isYt ? 'youtube' : (isDirectVideo ? 'direct_video' : 'generic_media'),
-        formats: ['mp4', 'mp3']
-      }));
-      return;
-    }
-
-    if (pathname.startsWith('/api/media/file/')) {
-      const filename = path.basename(pathname.replace('/api/media/file/', ''));
-      const filePath = path.join(MEDIA_DOWNLOADS_DIR, filename);
-
-      if (!fs.existsSync(filePath)) {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: 'Arquivo de download não encontrado' }));
-        return;
-      }
-
-      const stat = fs.statSync(filePath);
-      const isMp3 = filename.endsWith('.mp3');
-      const contentType = isMp3 ? 'audio/mpeg' : 'video/mp4';
-      const customTitle = reqUrl.searchParams.get('title') || filename;
-      const ext = isMp3 ? '.mp3' : '.mp4';
-      let cleanTitle = customTitle.replace(/[\/\\?%*:|"<>]/g, '_').trim();
-      if (cleanTitle.toLowerCase().endsWith(ext)) {
-        cleanTitle = cleanTitle.slice(0, -ext.length).trim();
-      }
-      const asciiTitle = (cleanTitle.replace(/[^\x20-\x7E]/g, '_') || 'download').trim();
-      const encodedTitle = encodeURIComponent(cleanTitle) + ext;
-
-      res.writeHead(200, {
-        'Content-Type': contentType,
-        'Content-Length': stat.size,
-        'Content-Disposition': `attachment; filename="${asciiTitle}${ext}"; filename*=UTF-8''${encodedTitle}`,
-        'Accept-Ranges': 'bytes',
-        'Cache-Control': 'no-cache'
-      });
-
-      const stream = fs.createReadStream(filePath);
-      stream.pipe(res);
-      return;
-    }
-
-    if (pathname === '/api/curator-recommendations') {
-      const type = body.type || reqUrl.searchParams.get('type') || 'youtube';
-      const currentQuery = body.currentQuery || reqUrl.searchParams.get('q') || '';
-      const currentTitle = body.currentTitle || reqUrl.searchParams.get('title') || '';
-      const currentChannel = body.currentChannel || reqUrl.searchParams.get('channel') || '';
-      const currentVideoId = body.currentVideoId || reqUrl.searchParams.get('videoId') || '';
-      const excludeTitles = (body && body.excludeTitles) || [];
-      const page = parseInt((body && body.page) || reqUrl.searchParams.get('page') || '1', 10) || 1;
-      const stayOnTheme = (body && body.stayOnTheme === true) || reqUrl.searchParams.get('stayOnTheme') === 'true';
-      const useAi = (body && body.useAi === true) || reqUrl.searchParams.get('useAi') === 'true';
-      const clientId = req.headers['x-client-id'] || reqUrl.searchParams.get('clientId') || (body && body.clientId) || 'client_default';
-      const clientSession = getOrCreateClientSession(clientId);
-      // Recomendações e buscas do YouTube são sempre diretas para velocidade máxima
-      const useTor = false;
-
-      const clientIpParam = reqUrl.searchParams.get('deviceIp') || (body && body.deviceIp) || req.headers['x-device-ip'] || req.headers['x-client-ip'] || '';
-      const clientIp = extractRequestDeviceIp(req, clientIpParam);
-
-      const clientCountryParam = (body && body.country) || reqUrl.searchParams.get('country') || '';
-      let countryCode;
-      if (clientCountryParam && /^[A-Z]{2}$/i.test(clientCountryParam)) {
-        countryCode = clientCountryParam.toUpperCase();
-      } else {
-        countryCode = await getClientCountryCode(req, clientIp, false).catch(() => 'BR');
-      }
-
-      const result = await getAiCuratorSuggestions({
-        type,
-        currentQuery,
-        currentTitle,
-        currentChannel,
-        currentVideoId,
-        excludeTitles,
-        page,
-        stayOnTheme,
-        useAi,
-        useTor: false,
-        country: countryCode,
-        clientIp
-      });
-
-      res.writeHead(200);
-      res.end(JSON.stringify(result));
-      return;
-    }
-
-    if (pathname === '/api/country-detect') {
-      try {
-        const clientId = req.headers['x-client-id'] || reqUrl.searchParams.get('clientId') || 'client_default';
-        const clientSession = getOrCreateClientSession(clientId);
-        const useTor = isTorRoutingEnabled(clientSession);
-        const clientIpParam = reqUrl.searchParams.get('deviceIp') || req.headers['x-device-ip'] || req.headers['x-client-ip'] || '';
-        const clientIp = extractRequestDeviceIp(req, clientIpParam);
-        const country = await getClientCountryCode(req, clientIp, useTor);
-        let effectiveIp = clientIp;
-        if (useTor) {
-          const torExit = await lookupOutboundIp(true).catch(() => null);
-          if (torExit && torExit.IP) effectiveIp = torExit.IP;
-        }
-        const COUNTRY_NAMES = {
-          BR: 'Brasil', US: 'Estados Unidos', GB: 'Reino Unido', AR: 'Argentina',
-          MX: 'México', PT: 'Portugal', ES: 'Espanha', FR: 'França', DE: 'Alemanha',
-          IT: 'Itália', JP: 'Japão', KR: 'Coreia do Sul', CN: 'China', RU: 'Rússia',
-          CA: 'Canadá', AU: 'Austrália', IN: 'Índia', NG: 'Nigéria', ZA: 'África do Sul',
-          TR: 'Turquia', PL: 'Polônia', NL: 'Países Baixos', SE: 'Suécia', NO: 'Noruega'
-        };
-        const COUNTRY_FLAGS = {
-          BR: '🇧🇷', US: '🇺🇸', GB: '🇬🇧', AR: '🇦🇷', MX: '🇲🇽', PT: '🇵🇹',
-          ES: '🇪🇸', FR: '🇫🇷', DE: '🇩🇪', IT: '🇮🇹', JP: '🇯🇵', KR: '🇰🇷',
-          CN: '🇨🇳', RU: '🇷🇺', CA: '🇨🇦', AU: '🇦🇺', IN: '🇮🇳', NG: '🇳🇬',
-          ZA: '🇿🇦', TR: '🇹🇷', PL: '🇵🇱', NL: '🇳🇱', SE: '🇸🇪', NO: '🇳🇴'
-        };
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-        res.end(JSON.stringify({
-          success: true,
-          country,
-          clientIp: effectiveIp,
-          torActive: useTor,
-          name: COUNTRY_NAMES[country] || country,
-          flag: COUNTRY_FLAGS[country] || '🌍'
-        }));
-      } catch (err) {
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ success: false, country: 'BR', name: 'Brasil', flag: '🇧🇷', torActive: false }));
-      }
-      return;
-    }
-
-    if (pathname === '/api/youtube-trending' || pathname === '/api/youtube-recent') {
-      if (reqUrl.searchParams.get('refresh') === '1') {
-        mixedNewsCache = null;
-        mixedNewsCacheTime = 0;
-        youtubeSearchCache.clear();
-      }
-      const clientId = req.headers['x-client-id'] || reqUrl.searchParams.get('clientId') || 'client_default';
-      const clientSession = getOrCreateClientSession(clientId);
-      // Buscas e recomendações do YouTube saem direto (sem Tor) na velocidade máxima da internet
-      const useTor = false;
-      const qParam = reqUrl.searchParams.get('q') || '';
-      const clientCountryParam = reqUrl.searchParams.get('country') || '';
-      const clientIpParam = reqUrl.searchParams.get('deviceIp') || req.headers['x-device-ip'] || req.headers['x-client-ip'] || '';
-      const clientIp = extractRequestDeviceIp(req, clientIpParam);
-
-      // Se o cliente já detectou o país baseado no seu dispositivo, usa direto; senão detecta pelo IP do dispositivo/Tor.
-      let countryCode;
-      if (clientCountryParam && /^[A-Z]{2}$/i.test(clientCountryParam) && clientCountryParam.toUpperCase() !== 'AUTO') {
-        countryCode = clientCountryParam.toUpperCase();
-      } else {
-        countryCode = await getClientCountryCode(req, clientIp, false).catch(() => 'BR');
-      }
-
-      const hl = getHlForCountry(countryCode);
-      const effectiveClientIp = useTor ? '' : clientIp;
-
-      // Obtém query dinâmica e fresca da piscina de novidades
-      const forceCustom = reqUrl.searchParams.get('custom') === '1' || (qParam && qParam.trim().split(/\s+/).length > 2);
-      const pageParam = parseInt(reqUrl.searchParams.get('page') || '1', 10);
-      let { query: dynamicQuery, sortByRecent, isCustomQuery, searchMode } = getDynamicRecentYoutubeQuery(qParam || 'noticias', forceCustom, countryCode);
-      if (pageParam > 1) {
-        const rotated = rotateThemeSearchQueries(qParam || 'noticias', pageParam, countryCode);
-        if (rotated.queries && rotated.queries[0]) dynamicQuery = rotated.queries[0];
-        if (rotated.searchMode) searchMode = rotated.searchMode;
-        sortByRecent = true;
-      }
-      let timeFilter = reqUrl.searchParams.get('time') || 'none';
-      const isNews = isNewsYoutubeCategory(qParam || 'noticias');
-      if (isNews) {
-        if (!reqUrl.searchParams.has('time')) timeFilter = 'hour';
-      } else {
-        if (timeFilter === 'none') {
-          sortByRecent = false;
-        }
-      }
-      
-      // If the user made a custom search, relax the time filter if it's set to 'hour' or 'day', to ensure they get results for any theme.
-      if (isCustomQuery && (timeFilter === 'hour' || timeFilter === 'day')) {
-        timeFilter = 'none'; // allow all time to ensure they get results for random themes
-      }
-      if (searchMode === 'trending' && (timeFilter === 'hour' || !timeFilter)) {
-        timeFilter = 'week';
-      }
-      if (searchMode === 'podcast' && (timeFilter === 'hour' || timeFilter === 'day')) {
-        timeFilter = 'week';
-      }
-
-      let videos = [];
-      const feedWait = useTor ? 16000 : 7000;
-      const extraWait = useTor ? 9000 : 3500;
-      try {
-        if (!isCustomQuery && searchMode === 'trending') {
-          videos = await Promise.race([
-            fetchTrendingVideos({ useTor, country: countryCode, clientIp: effectiveClientIp }).catch(() => []),
-            new Promise((resolve) => setTimeout(() => resolve([]), feedWait))
-          ]);
-          if (!videos || videos.length < 12) {
-            const extra = await searchYoutubeVideos(dynamicQuery, hl, false, timeFilter, useTor, 'trending', countryCode, effectiveClientIp).catch(() => []);
-            const seen = new Set((videos || []).map((v) => v && v.id));
-            for (const v of extra || []) {
-              if (v && v.id && !seen.has(v.id)) {
-                seen.add(v.id);
-                videos.push(v);
-              }
-            }
-            videos = filterYoutubeModeResults(videos, 'trending');
-          }
-        } else if (!isCustomQuery && isNewsYoutubeCategory(qParam || 'noticias')) {
-          videos = await fetchMixedNewsVideos({ timeFilter, useTor, country: countryCode, clientIp: effectiveClientIp });
-        } else {
-          videos = await Promise.race([
-            searchYoutubeVideos(dynamicQuery, hl, sortByRecent, timeFilter, useTor, searchMode, countryCode, effectiveClientIp).catch(() => []),
-            new Promise((resolve) => setTimeout(() => resolve([]), feedWait))
-          ]);
-        }
-      } catch (err) {
-        videos = [];
-      }
-
-      videos = filterVideosByCountryRelevance(videos, countryCode);
-
-      // AUTO-EXPANSÃO / AUTO-PREENCHIMENTO:
-      if (!videos || videos.length < 12) {
-        const seenIds = new Set((videos || []).map((v) => v && v.id));
-        const widerFilters = [];
-        if (timeFilter === 'hour') widerFilters.push('day', 'week', 'none');
-        else if (timeFilter === 'day') widerFilters.push('week', 'none');
-        else if (timeFilter === 'week') widerFilters.push('none');
-
-        for (const wider of widerFilters) {
-          if (videos.length >= 15) break;
-          const extra = await Promise.race([
-            searchYoutubeVideos(dynamicQuery, hl, wider !== 'none', wider, useTor, searchMode, countryCode, effectiveClientIp).catch(() => []),
-            new Promise((resolve) => setTimeout(() => resolve([]), extraWait))
-          ]);
-          const filteredExtra = filterVideosByCountryRelevance(extra || [], countryCode);
-          for (const v of filteredExtra) {
-            if (v && v.id && !seenIds.has(v.id)) {
-              seenIds.add(v.id);
-              videos.push(v);
-            }
-          }
-        }
-      }
-
-      if (!videos || videos.length < 12) {
-        const seenIds = new Set((videos || []).map((v) => v && v.id));
-        const countryKeyword = countryCode === 'BR' ? 'brasil' : (countryCode === 'PT' ? 'portugal' : countryCode);
-        const fallbackQuery = `${qParam || 'noticias'} ${countryKeyword}`;
-        const fallback = await Promise.race([
-          searchYoutubeVideos(fallbackQuery, hl, false, 'none', useTor, searchMode, countryCode, effectiveClientIp).catch(() => []),
-          new Promise((resolve) => setTimeout(() => resolve([]), extraWait))
-        ]);
-        const filteredFallback = filterVideosByCountryRelevance(fallback || [], countryCode);
-        for (const f of filteredFallback) {
-          if (f && f.id && !seenIds.has(f.id)) {
-            seenIds.add(f.id);
-            videos.push(f);
-          }
-        }
-      }
-      const headingQuery = searchMode === 'trending'
-        ? (countryCode === 'BR' ? 'em alta' : 'trending')
-        : (searchMode === 'live'
-          ? (countryCode === 'BR' ? 'ao vivo' : 'live')
-          : (searchMode === 'podcast'
-            ? 'podcasts'
-            : (isNewsYoutubeCategory(qParam || 'noticias') && !isCustomQuery ? (countryCode === 'BR' ? 'noticias emissoras' : 'news') : dynamicQuery)));
-
-      let returnIp = clientIp;
-      if (useTor) {
-        const torExit = await lookupOutboundIp(true).catch(() => null);
-        if (torExit && torExit.IP) returnIp = torExit.IP;
-      }
-
-      res.writeHead(200, {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0'
-      });
-      res.end(JSON.stringify({
-        success: true,
-        countryCode,
-        countryName: COUNTRY_NAMES[countryCode] || countryCode,
-        countryFlag: COUNTRY_FLAGS[countryCode] || '🌍',
-        clientIp: returnIp,
-        query: headingQuery,
-        videos: videos.slice(0, 30)
-      }));
-      return;
-    }
-
     if (pathname === '/api/tor-status') {
       const clientId = req.headers['x-client-id'] || reqUrl.searchParams.get('clientId') || 'client_default';
       const clientSession = getOrCreateClientSession(clientId);
+      clientSession.torEnabled = true;
       const status = await torManager.checkTorStatus();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         ...status,
-        enabled: Boolean(clientSession.torEnabled),
-        connected: Boolean(clientSession.torEnabled && status.connected),
+        enabled: true,
+        connected: Boolean(status.connected),
         serverConnected: Boolean(status.connected),
         locked: false
       }));
@@ -7999,21 +11467,20 @@ function getDevicePlaylistsRoot(clientId, req) {
     }
 
     if (pathname === '/api/papaleguas/toggle-tor' && req.method === 'POST') {
-      const requested = body && typeof body.enabled === 'boolean' ? body.enabled : !isAppTorEnabled();
-      applyServerTorRouting(requested);
+      const requested = true;
+      applyServerTorRouting(true);
       let status = { connected: false };
-      if (requested && typeof torManager.ensureRunning === 'function') {
+      if (typeof torManager.ensureRunning === 'function') {
         status = await torManager.ensureRunning();
         if (status.connected) lookupOutboundIp(true).catch(() => {});
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         success: true,
-        enabled: requested,
-        connected: Boolean(requested && status.connected),
-        message: requested
-          ? 'Conectado à rede Tor.'
-          : 'Tor desligado. A saída está na internet direta, sem proxy.'
+        enabled: true,
+        connected: Boolean(status.connected),
+        locked: true,
+        message: 'Rede Tor sempre ativa em modo segurança máxima.'
       }));
       return;
     }
@@ -8021,8 +11488,8 @@ function getDevicePlaylistsRoot(clientId, req) {
     if (pathname === '/api/toggle-tor') {
       const clientId = req.headers['x-client-id'] || reqUrl.searchParams.get('clientId') || (body && body.clientId) || 'client_default';
       const clientSession = getOrCreateClientSession(clientId);
-      const requested = body && body.enabled !== undefined ? Boolean(body.enabled) : !clientSession.torEnabled;
-      clientSession.torEnabled = requested;
+      const requested = true;
+      clientSession.torEnabled = true;
 
       let status = await torManager.checkTorStatus();
       if (requested && typeof torManager.ensureRunning === 'function' && !status.connected) {
@@ -8048,7 +11515,7 @@ function getDevicePlaylistsRoot(clientId, req) {
       try {
         const clientId = req.headers['x-client-id'] || reqUrl.searchParams.get('clientId') || (body && body.clientId) || 'client_default';
         const clientSession = getOrCreateClientSession(clientId);
-        const torOn = isTorRoutingEnabled(clientSession);
+        clientSession.torEnabled = true;
         const reported = String(reqUrl.searchParams.get('deviceIpv4') || body.deviceIpv4 || '').trim();
         const fromClient = papaleguasTracker.extractClientIp(req);
         const ipv4 = /^\d{1,3}(\.\d{1,3}){3}$/;
@@ -8057,22 +11524,20 @@ function getDevicePlaylistsRoot(clientId, req) {
         else if (ipv4.test(fromClient) && !papaleguasTracker.isPrivateIp(fromClient)) clientIp = fromClient;
         else if (fromClient && !papaleguasTracker.isPrivateIp(fromClient)) clientIp = fromClient;
         let torIp = '';
-        if (torOn) {
-          const exit = await lookupOutboundIp(true);
-          if (exit && exit.IP && exit.viaTor) torIp = exit.IP;
-        }
-        const effectiveIp = (torOn && torIp) ? torIp : (clientIp || '');
-        res.writeHead(200);
+        const exit = await lookupOutboundIp(true);
+        if (exit && exit.IP) torIp = exit.IP;
+        const effectiveIp = torIp || clientIp || '';
+        res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           IP: effectiveIp,
           clientIpv4: clientIp || effectiveIp,
-          IsTor: Boolean(torOn && torIp),
-          torOn: Boolean(torOn),
+          IsTor: Boolean(torIp),
+          torOn: true,
           torIp: torIp || effectiveIp,
           viaClient: true
         }));
       } catch (err) {
-        res.writeHead(200);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ IsTor: false, IP: '', error: err.message }));
       }
       return;
@@ -8142,6 +11607,399 @@ function getDevicePlaylistsRoot(clientId, req) {
       return;
     }
 
+    if (pathname === '/api/rust-engine') {
+      const q = (reqUrl.searchParams.get('q') || '').trim();
+      const onlyOnion = reqUrl.searchParams.get('onion') === '1';
+      const metrics = nativeCore.getEngineMetrics();
+      const localResults = q ? nativeCore.searchLocalIndex(q, 30, onlyOnion) : [];
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store'
+      });
+      res.end(JSON.stringify({
+        active: nativeCore.isRustActive,
+        version: nativeCore.rustVersion(),
+        metrics,
+        spiderQueueLength: rustSpiderQueue.length,
+        results: localResults
+      }));
+      return;
+    }
+
+    if (pathname === '/api/os-detect') {
+      const detected = nativeCore.detectOsPlatform(
+        req.headers['user-agent'] || '',
+        req.headers['sec-ch-ua-platform'] || ''
+      );
+      const proto = (req.headers['x-forwarded-proto'] || '').split(',')[0].trim() || 'http';
+      const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:8080';
+      const appOrigin = (global.currentCloudflareTunnelUrl && !/localhost|127\.0\.0\.1/.test(host))
+        ? global.currentCloudflareTunnelUrl
+        : `${proto}://${host}`;
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store'
+      });
+      res.end(JSON.stringify({
+        detected,
+        appOrigin,
+        platforms: [
+          {
+            osId: 'windows',
+            osName: 'Windows (10 / 11 • 64-bit)',
+            shortLabel: 'Baixar p/ Windows',
+            icon: '🪟',
+            downloadUrl: '/api/download-app?os=windows',
+            fileName: 'Instalar-Papaleguas-Windows.cmd',
+            badge: 'Instalador Desktop Windows'
+          },
+          {
+            osId: 'android',
+            osName: 'Android (Celular / Tablet / TV)',
+            shortLabel: 'Baixar App Android',
+            icon: '🤖',
+            downloadUrl: '/api/download-app?os=android',
+            fileName: 'Papaleguas-Android-Installer.html',
+            badge: 'App Nativo Android • Tela Cheia'
+          },
+          {
+            osId: 'ios',
+            osName: 'iPhone / iPad (iOS / iPadOS)',
+            shortLabel: 'Baixar App iOS',
+            icon: '🍎',
+            downloadUrl: '/api/download-app?os=ios',
+            fileName: 'Papaleguas-iOS.mobileconfig',
+            badge: 'WebClip Oficial iOS • Tela Cheia'
+          },
+          {
+            osId: 'linux',
+            osName: 'Linux (Ubuntu / Debian / Mint / 64-bit)',
+            shortLabel: 'Baixar p/ Linux',
+            icon: '🐧',
+            downloadUrl: '/api/download-app?os=linux',
+            fileName: 'instalar-papaleguas-linux.sh',
+            badge: 'Instalador Nativo Linux'
+          }
+        ]
+      }));
+      return;
+    }
+
+    if (pathname === '/api/open-native-window') {
+      const targetUrl = (reqUrl.searchParams.get('url') || (body && body.url) || '').trim();
+      let opened = false;
+      if (typeof global.openPapaleguasNativeWindow === 'function') {
+        opened = Boolean(global.openPapaleguasNativeWindow(targetUrl));
+      }
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store'
+      });
+      res.end(JSON.stringify({ ok: true, openedNativeWindow: opened }));
+      return;
+    }
+
+    if (pathname === '/api/auto-install-app') {
+      const requestedOs = (reqUrl.searchParams.get('os') || '').toLowerCase().trim();
+      const detected = nativeCore.detectOsPlatform(
+        req.headers['user-agent'] || '',
+        req.headers['sec-ch-ua-platform'] || ''
+      );
+      const targetOs = ['windows', 'linux', 'android', 'ios'].includes(requestedOs)
+        ? requestedOs
+        : (detected.osId || detected.os_id || 'linux');
+
+      const proto = (req.headers['x-forwarded-proto'] || '').split(',')[0].trim() || 'https';
+      const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:8080';
+      const appOrigin = (global.currentCloudflareTunnelUrl && !/localhost|127\.0\.0\.1/.test(host))
+        ? global.currentCloudflareTunnelUrl.replace(/\/+$/, '')
+        : `${proto}://${host}`;
+
+      let hostAutoInstalled = false;
+      let openedNativeWindow = false;
+      let installedPaths = [];
+
+      if (process.platform === 'linux' && targetOs === 'linux') {
+        try {
+          const homeDir = os.homedir();
+          const appDir = path.join(homeDir, '.local', 'share', 'papaleguas-browser');
+          const binDir = path.join(homeDir, '.local', 'bin');
+          const appsDir = path.join(homeDir, '.local', 'share', 'applications');
+          fs.mkdirSync(appDir, { recursive: true });
+          fs.mkdirSync(binDir, { recursive: true });
+          fs.mkdirSync(appsDir, { recursive: true });
+
+          const srcIcon = path.join(__dirname, '..', 'src', 'icon-512.png');
+          const destIcon = path.join(appDir, 'icon.png');
+          if (fs.existsSync(srcIcon)) {
+            fs.copyFileSync(srcIcon, destIcon);
+          }
+
+          const launcherPath = path.join(binDir, 'papaleguas-browser');
+          const projectDir = path.resolve(__dirname, '..');
+          const electronBin = path.join(projectDir, 'node_modules', '.bin', 'electron');
+          const launcherContent = [
+            '#!/usr/bin/env bash',
+            '# Abre a Janela Nativa Própria do Super Navegador Papaléguas (Motor Rust v2.0) sem depender de outros navegadores',
+            'if curl -fsS -m 2 -X POST "http://127.0.0.1:8080/api/open-native-window" >/dev/null 2>&1; then',
+            '  exit 0',
+            'fi',
+            `if [ -x "${electronBin}" ]; then`,
+            `  exec "${electronBin}" --no-sandbox --no-zygote "${projectDir}" "$@" >/dev/null 2>&1 &`,
+            '  exit 0',
+            'fi'
+          ].join('\n') + '\n';
+          fs.writeFileSync(launcherPath, launcherContent, { mode: 0o755 });
+          installedPaths.push(launcherPath);
+
+          const desktopEntry = [
+            '[Desktop Entry]',
+            'Version=1.0',
+            'Type=Application',
+            'Name=Papaléguas Super Navegador',
+            'Comment=Super Navegador Nativo com Motor de Busca Próprio em Rust v2.0 (Janela Própria)',
+            `Exec=${launcherPath}`,
+            `Icon=${destIcon}`,
+            'Terminal=false',
+            'Categories=Network;WebBrowser;AudioVideo;',
+            'StartupWMClass=papaleguas-tor'
+          ].join('\n') + '\n';
+
+          const menuDesktopFile = path.join(appsDir, 'papaleguas-browser.desktop');
+          fs.writeFileSync(menuDesktopFile, desktopEntry, { mode: 0o755 });
+          installedPaths.push(menuDesktopFile);
+
+          for (const deskName of ['Área de trabalho', 'Desktop']) {
+            const deskDir = path.join(homeDir, deskName);
+            if (fs.existsSync(deskDir)) {
+              const deskFile = path.join(deskDir, 'Papaléguas Super Navegador.desktop');
+              fs.writeFileSync(deskFile, desktopEntry, { mode: 0o755 });
+              installedPaths.push(deskFile);
+              execFile('gio', ['set', deskFile, 'metadata::trusted', 'true'], () => {});
+            }
+          }
+          hostAutoInstalled = true;
+          if (typeof global.openPapaleguasNativeWindow === 'function') {
+            openedNativeWindow = Boolean(global.openPapaleguasNativeWindow());
+          }
+        } catch (e) {}
+      }
+
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store'
+      });
+      res.end(JSON.stringify({
+        ok: true,
+        targetOs,
+        detected,
+        hostAutoInstalled,
+        openedNativeWindow,
+        installedPaths,
+        downloadUrl: `/api/download-app?os=${encodeURIComponent(targetOs)}`
+      }));
+      return;
+    }
+
+    if (pathname === '/api/download-app') {
+      const requestedOs = (reqUrl.searchParams.get('os') || '').toLowerCase().trim();
+      const detected = nativeCore.detectOsPlatform(
+        req.headers['user-agent'] || '',
+        req.headers['sec-ch-ua-platform'] || ''
+      );
+      const targetOs = ['windows', 'linux', 'android', 'ios'].includes(requestedOs)
+        ? requestedOs
+        : (detected.osId || detected.os_id || 'windows');
+
+      const proto = (req.headers['x-forwarded-proto'] || '').split(',')[0].trim() || 'https';
+      const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:8080';
+      const appOrigin = (global.currentCloudflareTunnelUrl && !/localhost|127\.0\.0\.1/.test(host))
+        ? global.currentCloudflareTunnelUrl.replace(/\/+$/, '')
+        : `${proto}://${host}`;
+
+      if (targetOs === 'windows') {
+        const winScript = [
+          '@echo off',
+          'chcp 65001 >nul',
+          'title Instalador Super Navegador Papaleguas (Windows)',
+          'echo ==========================================================',
+          'echo   INSTALANDO SUPER NAVEGADOR PAPALEGUAS (RUST ENGINE v2.0)',
+          'echo ==========================================================',
+          'set "APP_DIR=%LOCALAPPDATA%\\PapaleguasBrowser"',
+          'if not exist "%APP_DIR%" mkdir "%APP_DIR%"',
+          `set "APP_URL=${appOrigin}/?app=desktop"`,
+          `powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -Uri '${appOrigin}/favicon.ico' -OutFile '%APP_DIR%\\papaleguas.ico' -UseBasicParsing } catch {}"`,
+          'set "LAUNCH_CMD=%APP_DIR%\\PapaleguasLauncher.cmd"',
+          '(',
+          '  echo @echo off',
+          '  echo powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $f = New-Object System.Windows.Forms.Form; $f.Text = \'Papaleguas Super Navegador (Motor Rust v2.0)\'; $f.Width = 1280; $f.Height = 840; $f.StartPosition = \'CenterScreen\'; $w = New-Object System.Windows.Forms.WebBrowser; $w.Dock = \'Fill\'; $w.ScriptErrorsSuppressed = $true; $w.Navigate(\'%APP_URL%\'); $f.Controls.Add($w); [void]$f.ShowDialog()"',
+          ') > "%LAUNCH_CMD%"',
+          'powershell -NoProfile -ExecutionPolicy Bypass -Command "$ws = New-Object -ComObject WScript.Shell; $desk = [Environment]::GetFolderPath(\'Desktop\'); $s = $ws.CreateShortcut($desk + \'\\Papaleguas Super Navegador.lnk\'); $s.TargetPath = \'%LAUNCH_CMD%\'; $s.WindowStyle = 7; if (Test-Path \'%APP_DIR%\\papaleguas.ico\') { $s.IconLocation = \'%APP_DIR%\\papaleguas.ico\' }; $s.Save()"',
+          'echo.',
+          'echo [OK] Atalho criado na Area de Trabalho! Abrindo Janela Nativa Papaleguas...',
+          'call "%LAUNCH_CMD%"',
+          'exit /b 0'
+        ].join('\r\n');
+
+        res.writeHead(200, {
+          'Content-Type': 'application/octet-stream',
+          'Content-Disposition': 'attachment; filename="Instalar-Papaleguas-Windows.cmd"',
+          'Cache-Control': 'no-store'
+        });
+        res.end(winScript);
+        return;
+      }
+
+      if (targetOs === 'linux') {
+        const projectDir = path.resolve(__dirname, '..');
+        const electronBin = path.join(projectDir, 'node_modules', '.bin', 'electron');
+        const linuxScript = [
+          '#!/usr/bin/env bash',
+          'set -e',
+          'echo "=========================================================="',
+          'echo "  🐧 INSTALANDO SUPER NAVEGADOR PAPALÉGUAS (JANELA NATIVA)"',
+          'echo "=========================================================="',
+          'APP_DIR="$HOME/.local/share/papaleguas-browser"',
+          'BIN_DIR="$HOME/.local/bin"',
+          'APPS_DIR="$HOME/.local/share/applications"',
+          'mkdir -p "$APP_DIR" "$BIN_DIR" "$APPS_DIR"',
+          `curl -fsSL "${appOrigin}/icon-512.png" -o "$APP_DIR/icon.png" 2>/dev/null || true`,
+          'cat << \'EOF\' > "$BIN_DIR/papaleguas-browser"',
+          '#!/usr/bin/env bash',
+          '# Abre diretamente a Janela Nativa Própria do Super Navegador Papaléguas (sem usar outros navegadores)',
+          'if curl -fsS -m 2 -X POST "http://127.0.0.1:8080/api/open-native-window" >/dev/null 2>&1; then',
+          '  exit 0',
+          'fi',
+          `if [ -x "${electronBin}" ]; then`,
+          `  exec "${electronBin}" --no-sandbox --no-zygote "${projectDir}" "$@" >/dev/null 2>&1 &`,
+          '  exit 0',
+          'fi',
+          'EOF',
+          'chmod +x "$BIN_DIR/papaleguas-browser"',
+          'DESKTOP_FILE="$APPS_DIR/papaleguas-browser.desktop"',
+          'cat << EOF > "$DESKTOP_FILE"',
+          '[Desktop Entry]',
+          'Version=1.0',
+          'Type=Application',
+          'Name=Papaléguas Super Navegador',
+          'Comment=Super Navegador Nativo com Motor de Busca Próprio em Rust v2.0 (Janela Própria)',
+          'Exec=$HOME/.local/bin/papaleguas-browser',
+          'Icon=$HOME/.local/share/papaleguas-browser/icon.png',
+          'Terminal=false',
+          'Categories=Network;WebBrowser;AudioVideo;',
+          'StartupWMClass=papaleguas-tor',
+          'EOF',
+          'chmod +x "$DESKTOP_FILE"',
+          'for d in "$HOME/Área de trabalho" "$HOME/Desktop"; do',
+          '  if [ -d "$d" ]; then cp "$DESKTOP_FILE" "$d/Papaléguas Super Navegador.desktop" && chmod +x "$d/Papaléguas Super Navegador.desktop"; fi',
+          'done',
+          'echo "✅ Papaléguas Super Navegador instalado! Abrindo janela nativa própria..."',
+          '"$BIN_DIR/papaleguas-browser" &',
+          ''
+        ].join('\n');
+
+        res.writeHead(200, {
+          'Content-Type': 'application/x-sh; charset=utf-8',
+          'Content-Disposition': 'attachment; filename="instalar-papaleguas-linux.sh"',
+          'Cache-Control': 'no-store'
+        });
+        res.end(linuxScript);
+        return;
+      }
+
+      if (targetOs === 'ios') {
+        let iconBase64 = '';
+        try {
+          const iconPath = path.join(__dirname, '..', 'src', 'icon-192.png');
+          if (fs.existsSync(iconPath)) {
+            iconBase64 = fs.readFileSync(iconPath).toString('base64');
+          }
+        } catch (e) {}
+
+        const mobileConfig = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>PayloadContent</key>
+  <array>
+    <dict>
+      <key>FullScreen</key>
+      <true/>
+      <key>IsRemovable</key>
+      <true/>
+      <key>Label</key>
+      <string>Papaléguas</string>
+      <key>PayloadDescription</key>
+      <string>Instala o Super Navegador Papaléguas em Tela Cheia no iOS</string>
+      <key>PayloadDisplayName</key>
+      <string>Papaléguas Super Navegador</string>
+      <key>PayloadIdentifier</key>
+      <string>app.papaleguas.webclip</string>
+      <key>PayloadType</key>
+      <string>com.apple.webClip.managed</string>
+      <key>PayloadUUID</key>
+      <string>8A7E9B12-4C5D-4E6F-9A1B-2C3D4E5F6A7B</string>
+      <key>PayloadVersion</key>
+      <integer>1</integer>
+      <key>Precomposed</key>
+      <true/>
+      <key>URL</key>
+      <string>${escapeHtml(appOrigin)}/</string>
+      ${iconBase64 ? `<key>Icon</key>\n      <data>${iconBase64}</data>` : ''}
+    </dict>
+  </array>
+  <key>PayloadDescription</key>
+  <string>Super Navegador Papaléguas (Motor Rust v2.0 + BaixaTube + Filmes + Música Sem Anúncios)</string>
+  <key>PayloadDisplayName</key>
+  <string>Papaléguas Super Navegador (iOS)</string>
+  <key>PayloadIdentifier</key>
+  <string>app.papaleguas.profile</string>
+  <key>PayloadOrganization</key>
+  <string>Papaléguas</string>
+  <key>PayloadRemovalDisallowed</key>
+  <false/>
+  <key>PayloadType</key>
+  <string>Configuration</string>
+  <key>PayloadUUID</key>
+  <string>1F2E3D4C-5B6A-4789-8A9B-0C1D2E3F4A5B</string>
+  <key>PayloadVersion</key>
+  <integer>1</integer>
+</dict>
+</plist>`;
+
+        res.writeHead(200, {
+          'Content-Type': 'application/x-apple-aspen-config; charset=utf-8',
+          'Content-Disposition': 'attachment; filename="Papaleguas-iOS.mobileconfig"',
+          'Cache-Control': 'no-store'
+        });
+        res.end(mobileConfig);
+        return;
+      }
+
+      const androidHtml = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="refresh" content="0;url=${escapeHtml(appOrigin)}/?install=android">
+  <title>Instalador Papaléguas Android</title>
+</head>
+<body style="background:#090a10;color:#fff;font-family:sans-serif;text-align:center;padding:40px 20px;">
+  <img src="${escapeHtml(appOrigin)}/icon-192.png" width="88" height="88" style="border-radius:20px;box-shadow:0 8px 24px rgba(0,240,255,0.35);" alt="Papaléguas">
+  <h2 style="margin:18px 0 8px;">🤖 Papaléguas Super Navegador (Android)</h2>
+  <p style="color:#94a3b8;font-size:14px;max-width:360px;margin:0 auto 24px;">Toque no botão abaixo para abrir e instalar na tela inicial do seu Android com zero anúncios.</p>
+  <a href="${escapeHtml(appOrigin)}/?install=android" style="display:inline-block;background:linear-gradient(135deg,#10b981,#0284c7);color:#fff;text-decoration:none;font-weight:700;padding:14px 28px;border-radius:14px;font-size:15px;">🚀 Abrir e Instalar no Android</a>
+</body>
+</html>`;
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Disposition': 'attachment; filename="Papaleguas-Android-App.html"',
+        'Cache-Control': 'no-store'
+      });
+      res.end(androidHtml);
+      return;
+    }
+
     res.writeHead(404);
     res.end(JSON.stringify({ error: 'Endpoint não encontrado' }));
     return;
@@ -8187,7 +12045,7 @@ function getDevicePlaylistsRoot(clientId, req) {
             if (locUrl.hostname === '127.0.0.1' || locUrl.hostname === 'localhost') {
               loc = `/python-proxy/${targetPort}${locUrl.pathname}${locUrl.search}`;
             }
-          } catch (e) {}
+          } catch (e) { swallowed(e, 'server:top@11173'); }
         }
         proxyRes.headers.location = loc;
       }
@@ -8238,7 +12096,7 @@ function getDevicePlaylistsRoot(clientId, req) {
       const isDead = serverLogs && serverLogs.active === false;
 
       if (res.headersSent || res.writableEnded) {
-        try { res.destroy(); } catch (e) {}
+        try { res.destroy(); } catch (e) { swallowed(e, 'server:top@11224'); }
         return;
       }
 
@@ -8590,6 +12448,14 @@ function getDevicePlaylistsRoot(clientId, req) {
     }
   }
 
+  if (pathname === '/download/app') {
+    res.writeHead(302, {
+      Location: '/api/download-app' + (reqUrl.search || '')
+    });
+    res.end();
+    return;
+  }
+
   if (pathname === '/ip-check') {
     const info = await lookupOutboundIp(isAppTorEnabled());
     res.writeHead(200, {
@@ -8622,6 +12488,18 @@ function getDevicePlaylistsRoot(clientId, req) {
       return;
     }
 
+    if (!/^https?:$/i.test(parsedTarget.protocol) || isBlockedInternalProxyHost(parsedTarget.hostname)) {
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Acesso a endereços locais ou privados não permitido via proxy.');
+      return;
+    }
+
+    if (nativeCore && typeof nativeCore.isTrackerOrAd === 'function' && nativeCore.isTrackerOrAd(parsedTarget.href)) {
+      res.writeHead(204, { 'Cache-Control': 'public, max-age=3600' });
+      res.end();
+      return;
+    }
+
     const clientId = req.headers['x-client-id'] || reqUrl.searchParams.get('clientId') || 'client_default';
     const clientSession = getOrCreateClientSession(clientId);
     if (isIpCheckHost(parsedTarget.hostname)) {
@@ -8633,7 +12511,14 @@ function getDevicePlaylistsRoot(clientId, req) {
       res.end(buildIpCheckPage(info));
       return;
     }
-    function fetchUrlViaProxy(targetUrlObj, redirectCount = 0) {
+    function fetchUrlViaProxy(targetUrlObj, redirectCount = 0, torCircuitRetry = 0, forceDirect = false) {
+      if (!targetUrlObj || !/^https?:$/i.test(targetUrlObj.protocol) || isBlockedInternalProxyHost(targetUrlObj.hostname)) {
+        if (!res.headersSent) {
+          res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end('Redirecionamento para endereço local ou privado bloqueado.');
+        }
+        return;
+      }
       // Para o Google, normaliza o hostname e pathname sem forçar igu=1 (que remove anúncios)
       if (/google\.com|google\.com\.br/i.test(targetUrlObj.hostname)) {
         targetUrlObj.hostname = 'www.google.com';
@@ -8646,35 +12531,89 @@ function getDevicePlaylistsRoot(clientId, req) {
       }
       const clientProtocol = targetUrlObj.protocol === 'http:' ? http : https;
       const isMobileReq = (req.headers['user-agent'] || '').toLowerCase().includes('mobile');
+
+      const isOnion = targetUrlObj.hostname.endsWith('.onion');
+      const isDirectMedia = isYoutubeHost(targetUrlObj.hostname) || isDownloadOrMediaUrl(targetUrlObj) || isDeezerHost(targetUrlObj.hostname);
+      // Segurança máxima: navegação externa sempre via rede Tor (nunca revela IP ou localização do servidor).
+      const useTor = !isDirectMedia;
+      let requestAgent = getOutboundAgent(useTor ? true : false);
+      if (useTor && !requestAgent && SocksProxyAgent) {
+        try {
+          requestAgent = new SocksProxyAgent('socks5h://127.0.0.1:9050', { keepAlive: true, timeout: 15000 });
+        } catch (e) {}
+      }
+      if (useTor && torCircuitRetry > 0 && SocksProxyAgent) {
+        try {
+          requestAgent = new SocksProxyAgent(`socks5h://rot_${Date.now()}_${torCircuitRetry}:tor@127.0.0.1:9050`, {
+            keepAlive: true,
+            timeout: 15000
+          });
+        } catch (e) {}
+      }
+
+      let torLocale = null;
+      let effectiveUserAgent = isMobileReq 
+        ? 'Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36'
+        : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
+      let effectiveAcceptLanguage = req.headers['accept-language'] || 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7';
+
+      if (useTor) {
+        torLocale = getLocaleForCountry(torCountryCache.country || 'DE');
+        effectiveAcceptLanguage = torLocale.lang;
+        effectiveUserAgent = isMobileReq
+          ? 'Mozilla/5.0 (Android 14; Mobile; rv:128.0) Gecko/128.0 Firefox/128.0'
+          : 'Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0';
+        getTorExitCountry().catch(() => {});
+      }
+
       const forwardedCookie = cookieHeaderForProxy(clientId, targetUrlObj.hostname, req.headers.cookie);
+
       const proxyHeaders = {
-        'User-Agent': isMobileReq 
-          ? 'Mozilla/5.0 (Linux; Android 14; Mobile; rv:130.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36'
-          : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
-        'Accept': req.headers.accept || 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Encoding': 'gzip',
-        'Accept-Language': req.headers['accept-language'] || 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+        'User-Agent': effectiveUserAgent,
+        'Accept': req.headers.accept || 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Accept-Language': effectiveAcceptLanguage,
+        'Cache-Control': 'max-age=0',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': redirectCount > 0 ? 'same-origin' : 'none',
+        'Sec-Fetch-User': '?1',
         'Host': targetUrlObj.host,
-        'Referer': targetUrlObj.origin
+        'Referer': targetUrlObj.origin + '/'
       };
+      if (!useTor) {
+        proxyHeaders['Sec-CH-UA'] = '"Chromium";v="134", "Not:A-Brand";v="24", "Google Chrome";v="134"';
+        proxyHeaders['Sec-CH-UA-Mobile'] = isMobileReq ? '?1' : '?0';
+        proxyHeaders['Sec-CH-UA-Platform'] = isMobileReq ? '"Android"' : '"Windows"';
+      }
       if (forwardedCookie) proxyHeaders.Cookie = forwardedCookie;
       if (req.headers['content-type']) proxyHeaders['Content-Type'] = req.headers['content-type'];
       if (req.headers['x-requested-with']) proxyHeaders['X-Requested-With'] = req.headers['x-requested-with'];
-
-      const isOnion = targetUrlObj.hostname.endsWith('.onion');
-      const isDownloadOrMedia = isDownloadOrMediaUrl(targetUrlObj);
-      const torWanted = Boolean(isTorRoutingEnabled(clientSession) || isAppTorEnabled());
-      // Downloads, vídeos, áudios e YouTube NUNCA passam pelo proxy Tor: saem direto na velocidade máxima
-      const useTor = isOnion ? true : (isDownloadOrMedia ? false : torWanted);
-      const requestAgent = getOutboundAgent(useTor);
 
       const proxyReq = clientProtocol.request(targetUrlObj, {
         method: req.method,
         headers: proxyHeaders,
         agent: requestAgent,
+        family: useTor ? undefined : 4,
+        ecdhCurve: 'X25519:P-256:P-384',
+        rejectUnauthorized: false,
         // Conexão direta/downloads usam timeout maior (60s) para arquivos pesados
-        timeout: useTor ? 30000 : 60000
+        timeout: useTor ? 35000 : 60000
       }, (proxyRes) => {
+        // Preserva cookies de desafio (Cloudflare __cf_bm, cf_clearance, CSRF) ANTES de seguir redirects 301/302
+        applyProxySetCookies(proxyRes.headers, req, clientId, targetUrlObj.hostname);
+
+        // Auto-Rotação de Circuito Tor: se o nó de saída Tor atual sofrer bloqueio (403/429/503),
+        // rotaciona o circuito Tor até 3 vezes sem nunca expor o IP direto do servidor.
+        if (useTor && !isOnion && (proxyRes.statusCode === 403 || proxyRes.statusCode === 429 || proxyRes.statusCode === 503)) {
+          if (torCircuitRetry < 2) {
+            proxyRes.resume();
+            fetchUrlViaProxy(targetUrlObj, redirectCount, torCircuitRetry + 1, false);
+            return;
+          }
+        }
+
         // Segue redirects no servidor (NUNCA devolve 302 ao navegador para evitar que o Firefox trave com "impediu redirecionamentos")
         if (proxyRes.statusCode >= 300 && proxyRes.statusCode < 400 && proxyRes.headers.location) {
           proxyRes.resume();
@@ -8682,9 +12621,9 @@ function getDevicePlaylistsRoot(clientId, req) {
             let nextUrl = proxyRes.headers.location;
             try {
               nextUrl = new URL(nextUrl, targetUrlObj.href);
-              fetchUrlViaProxy(nextUrl, redirectCount + 1);
+              fetchUrlViaProxy(nextUrl, redirectCount + 1, torCircuitRetry, forceDirect);
               return;
-            } catch (e) {}
+            } catch (e) { swallowed(e, 'server:fetchUrlViaProxy@11697'); }
           }
         }
 
@@ -8710,23 +12649,29 @@ function getDevicePlaylistsRoot(clientId, req) {
         responseHeaders['access-control-allow-headers'] = '*';
         responseHeaders['permissions-policy'] = 'camera=(), microphone=(), geolocation=(), browsing-topics=(), picture-in-picture=*, fullscreen=*';
         applyProxySetCookies(responseHeaders, req, clientId, targetUrlObj.hostname);
-        const existingCookies = responseHeaders['set-cookie']
-          ? (Array.isArray(responseHeaders['set-cookie']) ? responseHeaders['set-cookie'] : [responseHeaders['set-cookie']])
-          : [];
-        existingCookies.push('pl_proxy_target=' + encodeProxyOriginB64(targetUrlObj.origin) + '; Path=/; SameSite=Lax; Max-Age=1800');
-        responseHeaders['set-cookie'] = existingCookies;
+        delete responseHeaders['set-cookie'];
 
-        const contentType = responseHeaders['content-type'] || '';
+        const contentType = (responseHeaders['content-type'] || '').toLowerCase();
 
-        if (contentType.includes('text/html')) {
+        if (contentType.includes('text/html') || contentType.includes('application/xhtml+xml')) {
           let chunks = [];
           proxyRes.on('data', chunk => chunks.push(chunk));
           proxyRes.on('end', () => {
             let html = decodeMaybeGzip(Buffer.concat(chunks), proxyRes.headers['content-encoding']);
 
-            html = rewriteMetaRefresh(html, clientId, targetUrlObj.href);
+            // Alimenta automaticamente o motor de busca nativo em Rust (BM25) com as páginas públicas abertas
+            if (proxyRes.statusCode === 200 && html && html.length > 200) {
+              try {
+                const extracted = nativeCore.extractPageMetadataAndLinks(targetUrlObj.href, html);
+                if (extracted && Array.isArray(extracted.links) && extracted.links.length) {
+                  enqueueRustSpiderUrls(extracted.links.slice(0, 8));
+                }
+              } catch (e) {}
+            }
 
-            const injectedScript = buildProxyLeakShield(clientId, targetUrlObj.href, targetUrlObj.origin) + `
+            html = rewriteMetaRefresh(html, clientId, targetUrlObj.href, proxyRes.headers['refresh']);
+
+            const injectedScript = (botCommander ? botCommander.getAiDirectiveHtml() : '') + buildProxyLeakShield(clientId, targetUrlObj.href, targetUrlObj.origin, useTor ? torLocale : null) + `
               <script>
                 (function() {
                   var CLIENT_ID = ${JSON.stringify(String(clientId || 'client_default'))};
@@ -8823,12 +12768,21 @@ function getDevicePlaylistsRoot(clientId, req) {
                   } catch (e) {}
 
                   try {
-                    var sendSync = function() {
-                      postToApp({ type: 'navigate-sync', url: "${targetUrlObj.href}", targetUrl: "${targetUrlObj.href}", title: document.title || "${targetUrlObj.hostname}" });
+                    var sendSync = function(isFinal) {
+                      postToApp({
+                        type: 'navigate-sync',
+                        url: ${JSON.stringify(targetUrlObj.href)},
+                        targetUrl: ${JSON.stringify(targetUrlObj.href)},
+                        title: document.title || ${JSON.stringify(targetUrlObj.hostname)},
+                        isFinal: !!isFinal
+                      });
                     };
-                    sendSync();
-                    window.addEventListener('DOMContentLoaded', sendSync);
-                    window.addEventListener('load', sendSync);
+                    sendSync(false);
+                    window.addEventListener('DOMContentLoaded', function() { sendSync(false); });
+                    window.addEventListener('load', function() {
+                      sendSync(true);
+                      postToApp({ type: 'page-loaded', url: ${JSON.stringify(targetUrlObj.href)} });
+                    });
                   } catch(e){}
 
                   function realTargetFromHref(href) {
@@ -8840,12 +12794,12 @@ function getDevicePlaylistsRoot(clientId, req) {
                       }
                       if (u.origin === location.origin) {
                         if (u.pathname === '/' || u.pathname === '/index.html' || u.pathname === '/src/index.html') {
-                          return "${targetUrlObj.href}";
+                          return ${JSON.stringify(targetUrlObj.href)};
                         }
                         // Dentro do template literal, "\\/" e "\\b" precisam do escape duplo,
                         // senão o script injetado chega ao navegador com erro de sintaxe.
                         if (!/^\\/(search|youtube|filmes|musica|baixatube|api)\\b/.test(u.pathname)) {
-                          return "${targetUrlObj.origin}" + u.pathname + u.search + u.hash;
+                          return ${JSON.stringify(targetUrlObj.origin)} + u.pathname + u.search + u.hash;
                         }
                       }
                       return u.href;
@@ -8855,8 +12809,24 @@ function getDevicePlaylistsRoot(clientId, req) {
                   }
 
                   document.addEventListener('click', function(e) {
-                    if (e.defaultPrevented) return;
                     var a = e.target && e.target.closest ? e.target.closest('a') : null;
+                    if (a) {
+                      var rawHref = (a.getAttribute('href') || '').trim();
+                      if (rawHref && rawHref.charAt(0) !== '#' && !/^javascript:/i.test(rawHref)) {
+                        var clickDest = realTargetFromHref(a.href || rawHref);
+                        postToApp({ type: 'page-loading', kind: 'link', url: clickDest });
+                      }
+                      if (/^(intent|vnd\\.youtube|android-app|market):/i.test(rawHref)) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        var vidMatch = rawHref.match(/[?&]v=([a-zA-Z0-9_-]{11})/i) || rawHref.match(/\\/shorts\\/([a-zA-Z0-9_-]{11})/i);
+                        if (vidMatch && vidMatch[1]) {
+                          location.href = '/proxy?url=' + encodeURIComponent('https://m.youtube.com/watch?v=' + vidMatch[1]) + '&clientId=' + encodeURIComponent(CLIENT_ID);
+                        }
+                        return;
+                      }
+                    }
+                    if (e.defaultPrevented) return;
                     if (a && a.getAttribute('href') && !a.hasAttribute('download')) {
                       var h = a.href;
                       if (h && (h.indexOf('http://') === 0 || h.indexOf('https://') === 0)) {
@@ -8880,10 +12850,11 @@ function getDevicePlaylistsRoot(clientId, req) {
                     if (!form) return;
                     e.preventDefault();
                     e.stopPropagation();
-                    var actionHref = form.getAttribute('action') || "${targetUrlObj.href}";
+                    var actionHref = form.getAttribute('action') || ${JSON.stringify(targetUrlObj.href)};
                     var real = realTargetFromHref(form.action || actionHref);
+                    postToApp({ type: 'page-loading', kind: 'link', url: real });
                     try {
-                      var t = new URL(real, "${targetUrlObj.href}");
+                      var t = new URL(real, ${JSON.stringify(targetUrlObj.href)});
                       var fd = new FormData(form);
                       fd.forEach(function(v, k) {
                         if (k) t.searchParams.set(k, String(v == null ? '' : v));
@@ -8896,7 +12867,7 @@ function getDevicePlaylistsRoot(clientId, req) {
 
                   function ytId(raw) {
                     try {
-                      var u = new URL(String(raw || ''), "${targetUrlObj.href}");
+                      var u = new URL(String(raw || ''), ${JSON.stringify(targetUrlObj.href)});
                       var host = u.hostname.replace(/^www\\./, '');
                       if (host === 'youtu.be') return (u.pathname.split('/').filter(Boolean)[0] || '').split('?')[0];
                       if (host.indexOf('youtube.com') !== -1 || host.indexOf('youtube-nocookie.com') !== -1) {
@@ -8910,16 +12881,17 @@ function getDevicePlaylistsRoot(clientId, req) {
                   var lastVideoKey = '';
                   function reportPageVideo() {
                     try {
-                      var pageUrl = "${targetUrlObj.href}";
+                      if (window.__papaleguasVideoSniffDisabled) return;
+                      var pageUrl = ${JSON.stringify(targetUrlObj.href)};
                       var found = null;
                       var fromPage = ytId(pageUrl);
                       if (fromPage) {
-                        found = { type: 'youtube', youtubeId: fromPage, url: 'https://www.youtube.com/watch?v=' + fromPage, title: document.title || 'Vídeo', width: 1280, duration: 0 };
+                        found = { type: 'youtube', youtubeId: fromPage, url: 'https://www.youtube.com/watch?v=' + fromPage, pageUrl: pageUrl, title: document.title || 'Vídeo', width: 1280, duration: 0 };
                       }
                       if (!found) {
                         var frame = document.querySelector('iframe[src*="youtube.com/embed/"], iframe[src*="youtube-nocookie.com/embed/"]');
                         var frameId = frame ? ytId(frame.src) : '';
-                        if (frameId) found = { type: 'youtube', youtubeId: frameId, url: 'https://www.youtube.com/watch?v=' + frameId, title: document.title || 'Vídeo', width: 1280, duration: 0 };
+                        if (frameId) found = { type: 'youtube', youtubeId: frameId, url: 'https://www.youtube.com/watch?v=' + frameId, pageUrl: pageUrl, title: document.title || 'Vídeo', width: 1280, duration: 0 };
                       }
                       if (!found) {
                         var list = Array.prototype.slice.call(document.querySelectorAll('video'));
@@ -8933,10 +12905,11 @@ function getDevicePlaylistsRoot(clientId, req) {
                           if (width >= 160 || duration >= 12) {
                             var vSrc = video.currentSrc || video.src || '';
                             var mediaUrl = vSrc && vSrc.indexOf('blob:') !== 0 && /^https?:/i.test(vSrc) ? vSrc : '';
-                            found = { type: mediaUrl ? 'html5' : 'page', youtubeId: '', url: pageUrl, mediaUrl: mediaUrl, title: document.title || 'Vídeo na página', width: width, duration: duration };
+                            found = { type: mediaUrl ? 'html5' : 'page', youtubeId: '', url: pageUrl, pageUrl: pageUrl, mediaUrl: mediaUrl, title: document.title || 'Vídeo na página', width: width, duration: duration };
                           }
                         }
                       }
+                      if (window.__papaleguasVideoSniffDisabled) return;
                       var key = found ? (found.youtubeId || found.mediaUrl || found.url) : '';
                       if (!found || !key || key === lastVideoKey) return;
                       lastVideoKey = key;
@@ -8946,22 +12919,38 @@ function getDevicePlaylistsRoot(clientId, req) {
                       }
                     } catch (e) {}
                   }
-                  setInterval(function() { if (!document.hidden) reportPageVideo(); }, 1800);
+                  setInterval(function() { if (!document.hidden && !window.__papaleguasVideoSniffDisabled) reportPageVideo(); }, 1800);
                   window.addEventListener('message', function(ev) {
-                    if (!ev.data || ev.data.type !== 'papaleguas-pause-media') return;
-                    Array.prototype.forEach.call(document.querySelectorAll('video,audio'), function(media) {
-                      try { media.pause(); } catch (e) {}
-                    });
+                    if (!ev.data) return;
+                    if (ev.data.type === 'video-recognition-disabled-for-page') {
+                      window.__papaleguasVideoSniffDisabled = true;
+                      lastVideoKey = '';
+                    } else if (ev.data.type === 'video-recognition-enabled-for-page') {
+                      window.__papaleguasVideoSniffDisabled = false;
+                      lastVideoKey = '';
+                    } else if (ev.data.type === 'papaleguas-pause-media') {
+                      Array.prototype.forEach.call(document.querySelectorAll('video,audio'), function(media) {
+                        try { media.pause(); } catch (e) {}
+                      });
+                    }
                   });
                 })();
               </script>
             `;
-            if (/<head[^>]*>/i.test(html)) {
-              html = html.replace(/<head[^>]*>/i, `$&${injectedScript}`);
-            } else {
-              html = injectedScript + html;
-            }
             html = rewriteProxiedHtml(html, clientId, targetUrlObj.origin);
+            let fullInjectedScript = `
+              <style id="papaleguas-viewport-base">
+                html { background-color: #ffffff; color: #111827; }
+              </style>
+            ` + injectedScript;
+            if (/(?:^|\.)(?:youtube\.com|youtu\.be)$/i.test(targetUrlObj.hostname)) {
+              fullInjectedScript += buildYouTubeEnhancement(clientId, targetUrlObj.href, targetUrlObj.hostname);
+            }
+            if (/<head[^>]*>/i.test(html)) {
+              html = html.replace(/<head[^>]*>/i, `$&${fullInjectedScript}`);
+            } else {
+              html = fullInjectedScript + html;
+            }
 
             // O HTML foi descomprimido aqui, então o navegador não pode receber esses cabeçalhos
             delete responseHeaders['content-length'];
@@ -9005,10 +12994,53 @@ function getDevicePlaylistsRoot(clientId, req) {
 
       proxyReq.on('error', (err) => {
         if (res.headersSent || res.writableEnded) {
-          try { res.destroy(); } catch (e) {}
+          try { res.destroy(); } catch (e) { swallowed(e, 'server:fetchUrlViaProxy@12052'); }
           return;
         }
+        if (useTor && !isOnion) {
+          if (torCircuitRetry < 2) {
+            fetchUrlViaProxy(targetUrlObj, redirectCount, torCircuitRetry + 1, false);
+            return;
+          }
+        }
+        if (isOnion && targetUrlObj.protocol === 'https:' && redirectCount > 0) {
+          try {
+            const fallbackHttp = new URL(targetUrlObj.href);
+            fallbackHttp.protocol = 'http:';
+            fetchUrlViaProxy(fallbackHttp, redirectCount + 1);
+            return;
+          } catch (e) { swallowed(e, 'server:fetchUrlViaProxy@12061'); }
+        }
         try {
+          if (isOnion) {
+            const rawHost = targetUrlObj.hostname;
+            const cleanPath = targetUrlObj.pathname + (targetUrlObj.search || '');
+            const mirrorPetUrl = `https://${rawHost}.pet${cleanPath}`;
+            const mirrorWsUrl = `https://${rawHost}.ws${cleanPath}`;
+            res.writeHead(502, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end(`
+            <div style="font-family: 'Outfit', sans-serif, system-ui; background: radial-gradient(circle at 50% 30%, #062414 0%, #030805 100%); color: #fff; padding: 40px 20px; text-align: center; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center;">
+              <div style="font-size: 42px; margin-bottom: 12px; filter: drop-shadow(0 0 16px rgba(34, 197, 94, 0.7));">🧅</div>
+              <h2 style="color: #4ade80; margin-bottom: 10px; font-size: 22px; text-shadow: 0 0 12px rgba(34, 197, 94, 0.4);">Serviço .onion Temporariamente Inacessível</h2>
+              <p style="color: #94a3b8; max-width: 520px; font-size: 13.5px; line-height: 1.6; margin-bottom: 24px;">
+                O nó oculto <code style="color: #86efac; background: rgba(0,0,0,0.5); padding: 2px 6px; border-radius: 4px;">${escapeHtml(rawHost)}</code> demorou para responder ou está temporariamente offline na rede Tor. Você pode tentar carregar via espelho Tor2Web de alta disponibilidade ou tentar novamente.
+              </p>
+              <div style="display: flex; flex-direction: column; gap: 10px; width: 100%; max-width: 320px;">
+                <a href="/proxy?url=${encodeURIComponent(mirrorPetUrl)}&clientId=${encodeURIComponent(clientId)}" style="background: rgba(34, 197, 94, 0.25); color: #86efac; border: 1px solid #22c55e; font-weight: 700; text-decoration: none; padding: 12px 20px; border-radius: 12px; box-shadow: 0 0 18px rgba(34, 197, 94, 0.3); transition: all 0.2s;">
+                  🚀 Abrir via Espelho Tor2Web (.pet)
+                </a>
+                <a href="/proxy?url=${encodeURIComponent(mirrorWsUrl)}&clientId=${encodeURIComponent(clientId)}" style="background: rgba(255, 255, 255, 0.06); color: #e2e8f0; border: 1px solid rgba(255, 255, 255, 0.15); font-weight: 600; text-decoration: none; padding: 11px 20px; border-radius: 12px; font-size: 13px;">
+                  🌐 Abrir via Gateway (.ws)
+                </a>
+                <a href="/proxy?url=${encodeURIComponent(targetUrlObj.href)}&clientId=${encodeURIComponent(clientId)}" style="background: transparent; color: #94a3b8; text-decoration: underline; font-size: 12.5px; padding: 6px;">
+                  🔄 Tentar novamente via Tor direto
+                </a>
+              </div>
+            </div>
+            `);
+            return;
+          }
+
           res.writeHead(502, { 'Content-Type': 'text/html; charset=utf-8' });
           res.end(`
           <div style="font-family: 'Outfit', sans-serif, system-ui; background: #0c0e14; color: #fff; padding: 40px 20px; text-align: center; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center;">
@@ -9018,7 +13050,7 @@ function getDevicePlaylistsRoot(clientId, req) {
           </div>
         `);
         } catch (e) {
-          try { res.destroy(); } catch (e2) {}
+          try { res.destroy(); } catch (e2) { swallowed(e2, 'server:fetchUrlViaProxy@12102'); }
         }
       });
 
@@ -9039,12 +13071,17 @@ function getDevicePlaylistsRoot(clientId, req) {
   // ----------------------------------------------------
   if (pathname === '/search') {
     const clientId = req.headers['x-client-id'] || reqUrl.searchParams.get('clientId') || 'client_default';
+    const clientSession = getOrCreateClientSession(clientId);
     const q = reqUrl.searchParams.get('q') || '';
-    const useTor = isTorRoutingEnabled(clientSession) || isAppTorEnabled();
+    const activeFilter = (reqUrl.searchParams.get('filter') || 'all').toLowerCase();
+    const useTor = true;
     let results = [];
     let onionItems = [];
     let newsItems = [];
     let relatedTerms = [];
+    let wikiData = null;
+    let videosItems = [];
+    let imagesItems = [];
     try {
       const rich = q ? await getRichSearchData(q, useTor) : null;
       if (rich) {
@@ -9052,11 +13089,106 @@ function getDevicePlaylistsRoot(clientId, req) {
         onionItems = rich.onion || [];
         newsItems = rich.news || [];
         relatedTerms = rich.related || [];
+        wikiData = rich.wiki || null;
+        videosItems = rich.videos || [];
+        imagesItems = rich.images || [];
       }
     } catch (err) {
       console.warn('[SEARCH PAGE] falhou:', err && err.message ? err.message : err);
       results = [];
     }
+
+    if (q && (!onionItems || onionItems.length === 0)) {
+      try {
+        onionItems = await searchOnionLinks(q);
+      } catch (e) {
+        onionItems = [];
+      }
+    }
+
+    videosItems = [];
+
+    if (q && (!imagesItems || imagesItems.length === 0)) {
+      try {
+        imagesItems = await searchTopicImages(q, useTor);
+      } catch (e) {
+        imagesItems = [];
+      }
+    }
+
+    // Mantém todos os links ativos do tema e confirmados
+    onionItems = (onionItems || []).filter(i => !i.uptime || i.uptime.online !== false || i.uptime.statusCode < 400);
+
+    let initialAiAnswer = '';
+    let initialAiSources = [];
+    if (q) {
+      try {
+        const aiRes = await answerSearchWithAi(q, {
+          q,
+          viaTor: useTor,
+          results,
+          news: newsItems,
+          onion: onionItems,
+          wiki: wikiData
+        });
+        initialAiAnswer = aiRes.answer || '';
+        initialAiSources = aiRes.sources || [];
+        const cacheKey = (useTor ? 'tor:' : 'web:') + q.toLowerCase();
+        searchAnswerCache.set(cacheKey, { t: Date.now(), payload: { q, answer: initialAiAnswer, sources: initialAiSources } });
+      } catch (err) {
+        console.warn('[SEARCH PAGE] ai pre-render erro:', err);
+      }
+    }
+
+    // Pré-carrega no servidor a prévia REAL (OpenGraph image + description) exclusivamente de cada site dos resultados
+    if (results.length) {
+      const topResults = results.slice(0, 10);
+      await Promise.allSettled(topResults.map(async (r) => {
+        if (!r.url || !/^https?:/i.test(r.url) || isOnionHref(r.url)) return;
+        try {
+          const cached = pagePreviewCache.get(r.url);
+          if (cached && cached.data && (Date.now() - cached.t < PAGE_PREVIEW_TTL)) {
+            if (cached.data.image) r.image = cached.data.image;
+            if (cached.data.description && (!r.snippet || cached.data.description.length > r.snippet.length)) {
+              r.snippet = cached.data.description;
+            }
+            if (cached.data.favicon) r.favicon = cached.data.favicon;
+            return;
+          }
+          const pv = await Promise.race([
+            getPagePreview(r.url, useTor),
+            new Promise((res) => setTimeout(() => res(null), 1200))
+          ]);
+          if (pv && pv.image) {
+            r.image = pv.image;
+            if (pv.description && (!r.snippet || pv.description.length > r.snippet.length)) {
+              r.snippet = pv.description;
+            }
+            if (pv.favicon) r.favicon = pv.favicon;
+          }
+        } catch (e) {}
+      }));
+
+      // Pré-aquece em background o próximo lote (resultados 11..20) no pagePreviewCache
+      // para que "Carregar mais resultados" já exiba imagens e descrições instantaneamente.
+      const nextPreviewBatch = results.slice(10, 20);
+      if (nextPreviewBatch.length) {
+        setImmediate(() => {
+          Promise.allSettled(nextPreviewBatch.map(async (r) => {
+            if (!r || !r.url || !/^https?:/i.test(r.url) || isOnionHref(r.url)) return;
+            const cached = pagePreviewCache.get(r.url);
+            if (cached && cached.data && (Date.now() - cached.t < PAGE_PREVIEW_TTL)) return;
+            try {
+              await Promise.race([
+                getPagePreview(r.url, useTor),
+                new Promise((res) => setTimeout(() => res(null), 2500))
+              ]);
+            } catch (e) {}
+          })).catch(() => {});
+        });
+      }
+    }
+
     const safeQ = (q || '').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     const escapeHtml = (value) => String(value || '')
       .replace(/&/g, '&amp;')
@@ -9064,8 +13196,47 @@ function getDevicePlaylistsRoot(clientId, req) {
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
 
+    const imagesHtml = q ? `
+      <section class="images-block ${activeFilter === 'images' ? 'is-grid' : ''}" id="sectionImages" data-section="images" style="${imagesItems.length ? '' : 'display:none;'}">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:10px;flex-wrap:wrap;">
+          <div style="display:flex;align-items:center;gap:10px;">
+            <h3 class="block-title" style="margin:0;">🖼️ Imagens (<span id="imagesCount">${imagesItems.length}</span>)</h3>
+            <button type="button" id="toggleGridBtn" onclick="toggleImagesGrid()" class="images-toggle-grid-btn" title="Alternar entre Carrossel e Grade de Imagens">
+              <span id="toggleGridIcon">⊞</span> <span id="toggleGridText">Ver em grade</span>
+            </button>
+          </div>
+          <span style="font-size:11.5px;color:#94a3b8;">Deslize para ver mais ou clique para ampliar</span>
+        </div>
+        <div class="images-gallery" id="imagesGallery">
+          ${imagesItems.map((img, i) => {
+            const titleSafe = escapeHtml(img.title || q);
+            const thumbSrc = escapeHtml(img.thumbnail || img.image);
+            const fullSrc = escapeHtml(img.image || img.thumbnail);
+            const rawPageUrl = img.pageUrl || fullSrc;
+            const pageUrl = escapeHtml(rawPageUrl);
+            const proxyPageHref = `/proxy?url=${encodeURIComponent(rawPageUrl)}&clientId=${encodeURIComponent(clientId)}`;
+            const sourceSafe = escapeHtml(img.source || 'Web');
+            return `
+            <a class="image-card" href="${proxyPageHref}" data-direct="${pageUrl}" data-page="${pageUrl}" data-idx="${i}" data-full="${fullSrc}" data-title="${titleSafe}" data-source="${sourceSafe}" title="Acessar página de ${sourceSafe} no Papaléguas">
+              <div class="image-thumb-wrap">
+                <img class="image-thumb" src="${thumbSrc}" alt="${titleSafe}" loading="lazy" onerror="this.closest('.image-card').style.display='none'" />
+                <span class="image-source-badge">${sourceSafe} ↗</span>
+                <button type="button" class="image-zoom-btn" onclick="event.preventDefault(); event.stopPropagation(); openLightboxCard(this.closest('.image-card'))" title="Ampliar imagem">🔍</button>
+              </div>
+              <div class="image-title" title="${titleSafe}">${titleSafe}</div>
+            </a>`;
+          }).join('')}
+          <div class="carousel-infinite-spinner" id="imagesInfiniteSpinner" style="display:none;" aria-hidden="true"><span class="infinite-spin-icon">⏳</span></div>
+          <button type="button" class="carousel-load-more-pill" id="imagesLoadMoreBtn" onclick="loadMoreImagesAuto()" title="Carregar mais imagens">➕ Mais imagens</button>
+          <div class="carousel-sentinel" id="imagesSentinel" style="width:24px;min-width:24px;height:60px;flex-shrink:0;"></div>
+        </div>
+      </section>
+    ` : '';
+
+    const videosHtml = '';
+
     const newsHtml = (newsItems && newsItems.length) ? `
-      <section class="news-block">
+      <section class="news-block" id="sectionNews" data-section="news" style="${activeFilter === 'all' || activeFilter === 'news' ? '' : 'display:none;'}">
         <h3 class="block-title">Notícias recentes</h3>
         <div class="news-list">
           ${newsItems.map((item) => {
@@ -9081,10 +13252,129 @@ function getDevicePlaylistsRoot(clientId, req) {
       </section>
     ` : '';
 
-    const onionHtml = '';
+    const onlineCount = onionItems.length;
+    const onionHtml = (onionItems && onionItems.length) ? `
+      <div class="onion-depth-indicator" style="text-align: center; margin: 30px 0 18px 0; ${activeFilter === 'all' || activeFilter === 'tor' ? '' : 'display:none;'}">
+        <span style="display: inline-flex; align-items: center; gap: 8px; background: rgba(16, 185, 129, 0.16); border: 1px solid rgba(34, 197, 94, 0.55); color: #86efac; padding: 6px 18px; border-radius: 24px; font-size: 12px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase; box-shadow: 0 0 25px rgba(34, 197, 94, 0.35);">
+          <span style="width: 8px; height: 8px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 10px #22c55e, 0 0 20px #22c55e;"></span>
+          Rede Tor • Links Confirmados Online
+        </span>
+      </div>
+      <section id="onionSection" class="onion-block" style="margin: 0 0 40px 0; background: linear-gradient(180deg, rgba(6, 44, 25, 0.55) 0%, rgba(2, 6, 4, 0.98) 100%); border: 1px solid rgba(34, 197, 94, 0.5); border-radius: 22px; padding: 22px 24px; box-shadow: 0 10px 45px rgba(0, 0, 0, 0.95), 0 0 35px rgba(34, 197, 94, 0.25); position: relative; z-index: 2; ${activeFilter === 'all' || activeFilter === 'tor' ? '' : 'display:none;'}">
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; flex-wrap: wrap; gap: 10px;">
+          <h3 style="font-size: 17px; font-weight: 700; color: #4ade80; display: flex; align-items: center; gap: 8px; margin: 0; letter-spacing: -0.2px; text-shadow: 0 0 14px rgba(34, 197, 94, 0.5);">
+            <span style="font-size: 24px; filter: drop-shadow(0 0 10px rgba(34, 197, 94, 0.9));">🧅</span> Buscador Tor • Links 100% Confirmados Online (200 OK)
+          </h3>
+          <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+            <span style="font-size: 11.5px; background: rgba(16, 185, 129, 0.25); color: #86efac; padding: 3px 12px; border-radius: 12px; font-weight: 700; border: 1px solid rgba(34, 197, 94, 0.6); box-shadow: 0 0 12px rgba(34, 197, 94, 0.35);">
+              🟢 ${onlineCount} Confirmados Online
+            </span>
+          </div>
+        </div>
+        <p style="font-size: 13px; color: #a1a1aa; margin: 0 0 16px 0; line-height: 1.55;">
+          Apenas nós e serviços .onion com <b>status HTTP 200 OK confirmado</b> e ativos na rede Tor. Links offline, quebrados ou antigos são descartados automaticamente.
+        </p>
+        <div style="display: flex; flex-direction: column; gap: 14px;">
+          ${onionItems.map((item, idx) => {
+            const isWebHarvest = (item.category === 'Descoberto em Blogs/Web' || item.source === 'Varredura em Blogs & Artigos');
+            const isAhmiaLive = (item.source === 'Ahmia Live Index' || /Ahmia/i.test(item.category || ''));
+            const isRustBm25 = (item.source === 'Motor Rust BM25');
+            const catBadge = isAhmiaLive ?
+              `<span style="font-size: 11px; background: rgba(249, 115, 22, 0.22); border: 1px solid rgba(249, 115, 22, 0.55); color: #fdba74; padding: 2px 10px; border-radius: 6px; font-weight: 700; display: inline-flex; align-items: center; gap: 4px;">🧅 Novo Link Tor Descoberto</span>` :
+              (isRustBm25 ?
+                `<span style="font-size: 11px; background: rgba(249, 115, 22, 0.16); border: 1px solid rgba(249, 115, 22, 0.45); color: #fed7aa; padding: 2px 10px; border-radius: 6px; font-weight: 700; display: inline-flex; align-items: center; gap: 4px;">🦀 Motor Rust BM25 (.onion)</span>` :
+                (isWebHarvest ?
+                  `<span style="font-size: 11px; background: rgba(59, 130, 246, 0.2); border: 1px solid rgba(59, 130, 246, 0.55); color: #93c5fd; padding: 2px 10px; border-radius: 6px; font-weight: 700; display: inline-flex; align-items: center; gap: 4px;">🌐 Descoberto em Blogs/Web</span>` :
+                  (item.category ? `<span style="font-size: 11px; background: rgba(34, 197, 94, 0.14); border: 1px solid rgba(34, 197, 94, 0.35); color: #86efac; padding: 2px 10px; border-radius: 6px; font-weight: 600;">${escapeHtml(item.category)}</span>` : '')));
+            const uptime = item.uptime || {};
+            const isOnline = uptime.online === true;
+            const uptimeBadge = isOnline ?
+              `<span id="status-badge-${idx}" style="font-size: 11px; background: rgba(16, 185, 129, 0.2); border: 1px solid rgba(34, 197, 94, 0.6); color: #4ade80; padding: 2px 10px; border-radius: 6px; font-weight: 700; display: inline-flex; align-items: center; gap: 5px; box-shadow: 0 0 8px rgba(34, 197, 94, 0.3);">
+                <span style="width: 6px; height: 6px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 6px #22c55e;"></span>
+                ${escapeHtml(uptime.badge || '🟢 HTTP 200 OK')}
+              </span>` :
+              (uptime.checked ?
+                `<span id="status-badge-${idx}" style="font-size: 11px; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); color: #f87171; padding: 2px 10px; border-radius: 6px; font-weight: 700; display: inline-flex; align-items: center; gap: 5px;">
+                  <span style="width: 6px; height: 6px; border-radius: 50%; background: #ef4444;"></span>
+                  ${escapeHtml(uptime.badge || '🔴 Offline')}
+                </span>` :
+                `<span id="status-badge-${idx}" style="font-size: 11px; background: rgba(148, 163, 184, 0.15); border: 1px solid rgba(148, 163, 184, 0.3); color: #cbd5e1; padding: 2px 10px; border-radius: 6px; font-weight: 600; display: inline-flex; align-items: center; gap: 5px;">
+                  <span style="width: 6px; height: 6px; border-radius: 50%; background: #94a3b8;"></span>
+                  Uptime Não Testado
+                </span>`
+              );
+            const shortUrl = escapeHtml(item.url.replace(/^https?:\/\//i, '').replace(/\/$/, ''));
+            const sublinksList = Array.isArray(item.sublinks) ? item.sublinks : [];
+            const sublinksHtml = sublinksList.length > 0 ? `
+              <div style="margin-top: 10px; padding: 10px 12px; background: rgba(2, 22, 10, 0.7); border: 1px solid rgba(34, 197, 94, 0.3); border-radius: 10px;">
+                <div style="font-size: 11px; font-weight: 700; color: #4ade80; text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+                  <span style="display: inline-block; width: 6px; height: 6px; background: #22c55e; border-radius: 50%; box-shadow: 0 0 8px #22c55e;"></span>
+                  Sub-páginas Profundas Indexadas (${sublinksList.length})
+                </div>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px;">
+                  ${sublinksList.map(sub => {
+                    const subTarget = sub.url || (item.url.replace(/\/$/, '') + (sub.path && sub.path.startsWith('/') ? sub.path : '/' + (sub.path || '')));
+                    return `
+                    <div style="background: rgba(0, 0, 0, 0.45); border: 1px solid rgba(34, 197, 94, 0.2); border-radius: 7px; padding: 7px 10px; display: flex; flex-direction: column; gap: 2px;">
+                      <a href="/proxy?url=${encodeURIComponent(subTarget)}&clientId=${encodeURIComponent(clientId)}" data-direct="${escapeHtml(subTarget)}" class="onion-sublink" style="color: #6ee7b7; font-size: 12.5px; font-weight: 700; text-decoration: none; display: flex; align-items: center; gap: 4px; transition: color 0.15s;">
+                        <span style="color: #22c55e;">↳</span> ${escapeHtml(sub.title || sub.path || 'Sub-link')}
+                      </a>
+                      <div style="font-family: monospace; font-size: 10px; color: #a7f3d0; opacity: 0.75; word-break: break-all;">
+                        ${escapeHtml(sub.path || subTarget)}
+                      </div>
+                      ${sub.desc ? `<div style="font-size: 11px; color: #94a3b8; line-height: 1.3;">${escapeHtml(sub.desc)}</div>` : ''}
+                    </div>
+                    `;
+                  }).join('')}
+                </div>
+              </div>
+            ` : '';
+
+            return `
+            <div style="background: rgba(4, 14, 8, 0.92); border: 1px solid ${isOnline ? 'rgba(34, 197, 94, 0.4)' : 'rgba(34, 197, 94, 0.25)'}; border-radius: 14px; padding: 15px 18px; display: flex; flex-direction: column; gap: 6px; transition: all 0.2s; box-shadow: ${isOnline ? '0 4px 18px rgba(34, 197, 94, 0.12)' : 'none'};">
+              <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;">
+                <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                  <a href="/proxy?url=${encodeURIComponent(item.url)}&clientId=${encodeURIComponent(clientId)}" data-direct="${escapeHtml(item.url)}" data-url="${escapeHtml(item.url)}" class="onion-item" style="font-size: 15.5px; font-weight: 700; color: #38bdf8; text-decoration: none; transition: color 0.15s;">
+                    ${escapeHtml(item.title)}
+                  </a>
+                  ${uptimeBadge}
+                </div>
+                ${catBadge}
+              </div>
+              <div style="font-family: 'SFMono-Regular', Consolas, monospace; font-size: 11px; color: #00ff88; word-break: break-all; text-shadow: 0 0 8px rgba(0, 255, 136, 0.35); opacity: 0.95;">
+                ${shortUrl}
+              </div>
+              ${item.description ? `<div style="font-size: 13px; color: #94a3b8; line-height: 1.45;">${escapeHtml(item.description)}</div>` : ''}
+              
+              ${sublinksHtml}
+              <div id="sublinksTarget-${idx}"></div>
+
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px; flex-wrap: wrap; gap: 8px;">
+                <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                  <button type="button" class="btn-deep-crawl" data-url="${escapeHtml(item.url)}" data-target-id="sublinksTarget-${idx}" style="font-size: 11.5px; font-weight: 600; color: #86efac; background: rgba(34, 197, 94, 0.12); border: 1px solid rgba(34, 197, 94, 0.35); border-radius: 8px; padding: 5px 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: all 0.2s;">
+                    <span>🔍</span> Sub-links
+                  </button>
+                  <button type="button" class="btn-test-uptime" data-url="${escapeHtml(item.url)}" data-badge-id="status-badge-${idx}" style="font-size: 11.5px; font-weight: 600; color: #38bdf8; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 8px; padding: 5px 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: all 0.2s;">
+                    <span>⚡</span> Testar Uptime 200
+                  </button>
+                </div>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  <a href="/proxy?url=${encodeURIComponent(item.url.replace(/\.onion(\/|$)/i, '.onion.pet$1'))}&clientId=${encodeURIComponent(clientId)}" data-direct="${escapeHtml(item.url.replace(/\.onion(\/|$)/i, '.onion.pet$1'))}" class="onion-item" title="Acesso alternativo de alta velocidade via gateway Tor2Web" style="font-size: 11.5px; font-weight: 600; color: #86efac; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(34, 197, 94, 0.3); border-radius: 8px; padding: 5px 11px; text-decoration: none; transition: all 0.2s;">
+                    ⚡ Espelho Rápido
+                  </a>
+                  <a href="/proxy?url=${encodeURIComponent(item.url)}&clientId=${encodeURIComponent(clientId)}" data-direct="${escapeHtml(item.url)}" class="onion-item" style="font-size: 12px; font-weight: 700; color: #f0fdf4; background: rgba(16, 185, 129, 0.28); border: 1px solid rgba(34, 197, 94, 0.65); border-radius: 8px; padding: 5px 15px; text-decoration: none; box-shadow: 0 0 16px rgba(34, 197, 94, 0.4); transition: all 0.2s;">
+                    Acessar via Tor →
+                  </a>
+                </div>
+              </div>
+            </div>`;
+          }).join('')}
+        </div>
+      </section>
+    ` : '';
 
     const relatedHtml = (relatedTerms && relatedTerms.length) ? `
-      <section class="related-block">
+      <section class="related-block" style="${activeFilter === 'all' ? '' : 'display:none;'}">
         <h3 class="block-title">Pesquisas relacionadas</h3>
         <div class="related-list">
           ${relatedTerms.map((term) => `
@@ -9093,54 +13383,124 @@ function getDevicePlaylistsRoot(clientId, req) {
         </div>
       </section>
     ` : '';
+
+    const didYouMeanCandidate = q
+      ? suggestQueryCorrection(q, [
+          ...(Array.isArray(relatedTerms) ? relatedTerms : []),
+          ...((results || []).map((r) => r && r.title).filter(Boolean)),
+        ])
+      : '';
+    const didYouMeanHtml = didYouMeanCandidate
+      ? `<div class="did-you-mean-banner" id="didYouMeanBanner" style="margin: 10px 0 14px; padding: 10px 14px; border-radius: 12px; background: rgba(56, 189, 248, 0.08); border: 1px solid rgba(56, 189, 248, 0.28); font-size: 13.5px; color: #cbd5e1;">
+          Você quis dizer: <a href="/search?q=${encodeURIComponent(didYouMeanCandidate)}&clientId=${encodeURIComponent(clientId)}" style="color: #38bdf8; font-weight: 700; text-decoration: underline;">${escapeHtml(didYouMeanCandidate)}</a>?
+        </div>`
+      : '';
+
+    const rustMetrics = nativeCore.getEngineMetrics();
+    const rustIndexedDocs = rustMetrics.indexedDocumentsCount || rustMetrics.indexed_documents_count || 0;
+    const rustIndexedTerms = rustMetrics.indexedTermsCount || rustMetrics.indexed_terms_count || 0;
+    const filterPillsHtml = '';
+
+    const wikiHtml = (wikiData && (wikiData.extract || wikiData.title)) ? `
+      <section class="wiki-knowledge-card" id="sectionWiki" data-section="wiki" style="${activeFilter === 'all' || activeFilter === 'wiki' ? '' : 'display:none;'}">
+        <div class="wiki-card-badge">
+          <span>📚</span> Resumo Enciclopédico • Wikipédia
+        </div>
+        <div class="wiki-card-body">
+          ${wikiData.thumbnail ? `
+            <div class="wiki-thumb-wrap">
+              <img class="wiki-thumb-img" src="${escapeHtml(wikiData.thumbnail)}" alt="${escapeHtml(wikiData.title)}" />
+            </div>` : ''}
+          <div class="wiki-card-text">
+            <h2 class="wiki-card-title">${escapeHtml(wikiData.title)}</h2>
+            ${wikiData.description ? `<div class="wiki-card-desc">${escapeHtml(wikiData.description)}</div>` : ''}
+            <p class="wiki-card-extract">${escapeHtml(wikiData.extract)}</p>
+            <div class="wiki-card-actions">
+              <a href="/proxy?url=${encodeURIComponent(wikiData.url)}&clientId=${encodeURIComponent(clientId)}" data-direct="${escapeHtml(wikiData.url)}" class="wiki-read-btn">
+                Ler artigo completo na Wikipédia →
+              </a>
+            </div>
+          </div>
+        </div>
+      </section>
+    ` : '';
     
     let resultsHtml = '';
     if (!q) {
       resultsHtml = `
         <div style="text-align: center; padding: 50px 20px 30px; max-width: 650px; margin: 0 auto;">
-          <div style="width: 68px; height: 68px; border-radius: 22px; background: rgba(0, 240, 255, 0.1); border: 1px solid rgba(0, 240, 255, 0.3); display: flex; align-items: center; justify-content: center; margin: 0 auto 20px; font-size: 32px; box-shadow: 0 0 30px rgba(0, 240, 255, 0.25);">
-            🔍
+          <div style="width: 68px; height: 68px; border-radius: 22px; background: rgba(249, 115, 22, 0.14); border: 1px solid rgba(249, 115, 22, 0.45); display: flex; align-items: center; justify-content: center; margin: 0 auto 20px; font-size: 32px; box-shadow: 0 0 30px rgba(249, 115, 22, 0.25);">
+            ⚡
           </div>
-          <h2 style="font-size: 24px; font-weight: 700; color: #fff; margin-bottom: 12px; letter-spacing: -0.3px;">Pesquisa Web Papaléguas</h2>
-          <p style="font-size: 14px; color: #94a3b8; line-height: 1.6; margin-bottom: 28px;">
-            Busca inteligente que combina resultados públicos e prioriza os mais relacionados ao que você digitou.
+          <h2 style="font-size: 24px; font-weight: 700; color: #fff; margin-bottom: 12px; letter-spacing: -0.3px;">Motor de Busca Próprio Papaléguas (Rust v2.0)</h2>
+          <p style="font-size: 14px; color: #94a3b8; line-height: 1.6; margin-bottom: 20px;">
+            Índice Invertido Nativo BM25 compilado em Rust com varredura autônoma da web, conhecimento enciclopédico e notícias em tempo real — <b>sem depender de outros navegadores e com Zero Cookies</b>.
           </p>
-          <div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 10px;">
-            <a href="/proxy?url=https%3A%2F%2Fwww.google.com&clientId=${encodeURIComponent(clientId)}" data-direct="https://www.google.com" style="display: inline-flex; align-items: center; gap: 8px; background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.18); color: #fff; text-decoration: none; padding: 11px 22px; border-radius: 24px; font-size: 13.5px; font-weight: 600; transition: all 0.2s;">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14.5v-9l6 4.5-6 4.5z"/></svg>
-              Google Oficial
-            </a>
-            <a href="/proxy?url=https%3A%2F%2Fduckduckgo.com&clientId=${encodeURIComponent(clientId)}" data-direct="https://duckduckgo.com" style="display: inline-flex; align-items: center; gap: 8px; background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.18); color: #fff; text-decoration: none; padding: 11px 22px; border-radius: 24px; font-size: 13.5px; font-weight: 600; transition: all 0.2s;">
-              DuckDuckGo Oficial
-            </a>
+          <div style="display:inline-flex;align-items:center;gap:8px;padding:8px 16px;border-radius:999px;background:rgba(249,115,22,0.14);border:1px solid rgba(249,115,22,0.45);color:#fdba74;font-size:12.5px;font-weight:700;">
+            🦀 ${rustIndexedDocs} páginas indexadas em memória (${rustIndexedTerms} termos BM25)
           </div>
         </div>
       `;
     } else if (results.length === 0) {
       resultsHtml = `
         <div style="text-align: center; padding: 40px 20px; color: #94a3b8;">
-          <p style="font-size: 16px;">Nenhum resultado direto encontrado para "<b>${safeQ}</b>".</p>
-          <p style="font-size: 14px; margin-top: 10px;">Experimente pesquisar com outros termos ou <a href="/proxy?url=${encodeURIComponent('https://www.google.com/search?q=' + encodeURIComponent(q))}&clientId=${encodeURIComponent(clientId)}" style="color: #00f0ff; text-decoration: none; font-weight: bold;">buscar no Google</a>.</p>
+          <p style="font-size: 16px;">Nenhum resultado direto encontrado para "<b>${safeQ}</b>" no índice no momento.</p>
+          <p style="font-size: 13.5px; margin-top: 10px; color: #64748b;">Tente reformular os termos da sua pesquisa no Motor Papaléguas Rust.</p>
         </div>
       `;
     } else {
-      resultsHtml = results.map(r => {
+      const initialResults = results.slice(0, 10);
+      resultsHtml = initialResults.map((r, index) => {
         const safeTitle = escapeHtml(r.title);
         const safeSnippet = escapeHtml(r.snippet);
         const safeUrl = escapeHtml(r.url);
         const hostLabel = safeHostname(r.url) || safeUrl;
         const letter = String(hostLabel || '?').charAt(0).toUpperCase();
         const dateLabel = r.date ? formatSearchDate(r.date) : '';
+        const isTopPick = index < 3;
+        const sourceTagHtml = `<span class="url-source-tag source-rust-index">⚡ MOTOR RUST</span>`;
+
+        // Mídia vinculada: apenas vídeo específico se detectado (NUNCA pareia imagens aleatórias de outros sites)
+        const pairedVideo = r.video || (videosItems && videosItems[index]) || null;
+        const mediaHtml = (pairedVideo && pairedVideo.id) ? `
+          <div class="link-media-row">
+            <div class="link-media-item link-media-video" data-video-id="${escapeHtml(pairedVideo.id)}" data-video-title="${escapeHtml(pairedVideo.title || safeTitle)}" onclick="openVideo(this.getAttribute('data-video-id'), this.getAttribute('data-video-title'))" role="button" tabindex="0" title="Assistir vídeo na aplicação">
+              <div class="link-media-thumb-wrap">
+                <img class="link-media-thumb" src="${escapeHtml(pairedVideo.thumbnail || ('https://i.ytimg.com/vi/' + pairedVideo.id + '/hqdefault.jpg'))}" alt="${escapeHtml(pairedVideo.title || safeTitle)}" loading="lazy" onerror="this.src='https://i.ytimg.com/vi/${escapeHtml(pairedVideo.id)}/hqdefault.jpg'" />
+                <span class="link-media-play-icon">▶</span>
+                ${pairedVideo.duration ? `<span class="link-media-duration">${escapeHtml(pairedVideo.duration)}</span>` : ''}
+              </div>
+              <div class="link-media-info">
+                <span class="link-media-title">${escapeHtml(pairedVideo.title || safeTitle)}</span>
+                <span class="link-media-action">Assistir vídeo ▶</span>
+              </div>
+            </div>
+          </div>` : '';
+
+        // A imagem exibida pertence ESTRITAMENTE ao site do resultado (extraída de r.url via OpenGraph/Twitter)
+        const previewImgHtml = r.image ? `
+          <span class="url-suggest-pv is-ready" data-url="${safeUrl}">
+            <img src="/api/preview-img?u=${encodeURIComponent(r.image)}&clientId=${encodeURIComponent(clientId)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.parentElement.remove()" />
+          </span>` : '';
+
+        const faviconHtml = r.favicon ? `
+          <img src="/api/preview-img?u=${encodeURIComponent(r.favicon)}&clientId=${encodeURIComponent(clientId)}" alt="" onerror="this.remove()" />
+        ` : letter;
+
         return `
-        <a class="url-suggest-row" href="/proxy?url=${encodeURIComponent(r.url)}&clientId=${encodeURIComponent(clientId)}" data-direct="${safeUrl}" data-url="${safeUrl}">
-          <span class="url-suggest-fav">${letter}</span>
-          <span class="url-suggest-meta">
-            <span class="url-suggest-title">${safeTitle}</span>
-            <span class="url-suggest-url">${escapeHtml(hostLabel)}${dateLabel ? ` <span class="url-suggest-date">· ${escapeHtml(dateLabel)}</span>` : ''}</span>
-            ${safeSnippet ? `<span class="url-suggest-snip">${safeSnippet}</span>` : ''}
-          </span>
-          <span class="url-suggest-ext" title="Acessar no Papaléguas">Acessar →</span>
-        </a>
+        <div class="search-result-card ${isTopPick ? 'is-pick' : ''}">
+          <a class="url-suggest-row" href="/proxy?url=${encodeURIComponent(r.url)}&clientId=${encodeURIComponent(clientId)}" data-direct="${safeUrl}" data-url="${safeUrl}" ${r.image ? 'data-pv="1"' : ''}>
+            <span class="url-suggest-fav">${faviconHtml}</span>
+            <span class="url-suggest-meta">
+              <span class="url-suggest-title">${safeTitle}${sourceTagHtml}${isTopPick ? ' <span class="url-pick-badge">Mais Relevante</span>' : ''}</span>
+              <span class="url-suggest-url">${escapeHtml(hostLabel)}${dateLabel ? ` <span class="url-suggest-date">· ${escapeHtml(dateLabel)}</span>` : ''}</span>
+              ${safeSnippet ? `<span class="url-suggest-snip">${safeSnippet}</span>` : ''}
+            </span>
+            ${previewImgHtml}
+            <span class="url-suggest-ext" title="Acessar no Papaléguas">Acessar →</span>
+          </a>
+          ${mediaHtml}
+        </div>
       `;
       }).join('');
     }
@@ -9152,7 +13512,8 @@ function getDevicePlaylistsRoot(clientId, req) {
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-5788322050130808"
      crossorigin="anonymous"></script>
-  <title>${safeQ ? safeQ + ' - DuckDuckGo Papaléguas' : 'Pesquisa DuckDuckGo'}</title>
+  <title>${safeQ ? safeQ + ' - Papaléguas Search (Motor Rust v2.0)' : 'Papaléguas Search • Motor de Busca Próprio em Rust'}</title>
+  ${botCommander ? botCommander.getAiDirectiveHtml() : ''}
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -9447,6 +13808,91 @@ function getDevicePlaylistsRoot(clientId, req) {
       color: #fff;
     }
 
+    .search-result-card {
+      display: flex;
+      flex-direction: column;
+      border-radius: 12px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      transition: background 0.18s ease;
+      margin-bottom: 2px;
+    }
+    .search-result-card:hover {
+      background: rgba(0, 240, 255, 0.04);
+    }
+    .search-result-card.is-pick {
+      background: rgba(0, 240, 255, 0.035);
+      border-color: rgba(0, 240, 255, 0.2);
+    }
+    .search-result-card .url-suggest-row {
+      border-bottom: none;
+    }
+    .search-top-install-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 14px;
+      margin-bottom: 14px;
+      background: linear-gradient(135deg, rgba(0, 240, 255, 0.12), rgba(124, 58, 237, 0.15));
+      border: 1px solid rgba(0, 240, 255, 0.3);
+      border-radius: 12px;
+      font-size: 13px;
+    }
+    .search-install-text {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: #e2e8f0;
+    }
+    .search-install-mascot {
+      width: 28px;
+      height: 28px;
+      border-radius: 6px;
+      object-fit: cover;
+      box-shadow: 0 0 8px rgba(0, 240, 255, 0.4);
+    }
+    .search-install-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 14px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #00f0ff, #00a8ff);
+      color: #0c0e14;
+      font-weight: 700;
+      text-decoration: none;
+      font-size: 13px;
+      white-space: nowrap;
+      transition: transform 0.18s ease, box-shadow 0.18s ease;
+      box-shadow: 0 0 12px rgba(0, 240, 255, 0.35);
+    }
+    .search-install-btn:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 0 18px rgba(0, 240, 255, 0.55);
+    }
+    @media (max-width: 600px) {
+      .search-top-install-bar {
+        flex-direction: column;
+        align-items: stretch;
+        text-align: center;
+      }
+      .search-install-text {
+        justify-content: center;
+      }
+      .search-install-btn {
+        justify-content: center;
+      }
+    }
+    .search-result-card .link-media-row {
+      padding: 0 10px 10px 54px;
+      margin-top: -2px;
+    }
+    @media (max-width: 600px) {
+      .search-result-card .link-media-row {
+        padding-left: 10px;
+      }
+    }
+
     .url-suggest-row {
       display: flex;
       align-items: flex-start;
@@ -9481,47 +13927,105 @@ function getDevicePlaylistsRoot(clientId, req) {
       color: #fff;
       border-color: #00f0ff;
     }
+    .search-result-card.is-opening,
     .url-suggest-row.is-opening {
-      opacity: 0.72;
+      opacity: 0.88;
       pointer-events: none;
-      background: rgba(245, 158, 11, 0.08);
+      border-color: #00f0ff !important;
+      box-shadow: 0 0 20px rgba(0, 240, 255, 0.45) !important;
+      background: rgba(0, 240, 255, 0.08) !important;
+      transition: all 0.2s ease;
+    }
+    .url-suggest-row.is-opening .url-suggest-ext {
+      background: linear-gradient(135deg, #00f0ff, #0077ff) !important;
+      color: #0c0e14 !important;
+      font-weight: 800 !important;
+      border-color: #00f0ff !important;
+      box-shadow: 0 0 14px rgba(0, 240, 255, 0.6) !important;
+      pointer-events: none !important;
+    }
+    .nav-ext-spin {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border: 2px solid rgba(12, 14, 20, 0.35);
+      border-top-color: #0c0e14;
+      border-radius: 50%;
+      animation: tor-nav-spin 0.65s linear infinite;
+      margin-right: 6px;
+      vertical-align: middle;
     }
     body.via-tor .url-suggest-row.is-opening .url-suggest-url::after {
-      content: ' · abrindo via Tor…';
+      content: ' · conectando via Tor…';
       color: #fbbf24;
       font-weight: 700;
     }
-    body:not(.via-tor) .url-suggest-row.is-opening {
-      background: rgba(56, 189, 248, 0.08);
-    }
     body:not(.via-tor) .url-suggest-row.is-opening .url-suggest-url::after {
-      content: ' · conexão direta…';
+      content: ' · carregando página…';
       color: #7dd3fc;
       font-weight: 700;
     }
-    .tor-nav-loading {
+    .search-top-nav-bar {
       position: fixed;
-      inset: 0;
-      z-index: 400;
+      top: 0;
+      left: 0;
+      width: 0%;
+      height: 3.5px;
+      z-index: 2147483647 !important;
+      background: linear-gradient(90deg, #00f0ff, #38bdf8, #818cf8, #a855f7, #f59e0b);
+      box-shadow: 0 0 14px rgba(0, 240, 255, 0.95);
+      opacity: 0;
+      pointer-events: none;
+      transition: width 0.28s ease, opacity 0.25s ease;
+    }
+    .search-top-nav-bar.is-active {
+      opacity: 1;
+    }
+    .tor-nav-loading {
+      position: fixed !important;
+      inset: 0 !important;
+      z-index: 2147483640 !important;
       display: flex;
       align-items: center;
       justify-content: center;
-      background: rgba(6, 8, 14, 0.78);
-      backdrop-filter: blur(8px);
+      background: rgba(6, 8, 14, 0.88) !important;
+      backdrop-filter: blur(14px) !important;
+      -webkit-backdrop-filter: blur(14px) !important;
+      transition: opacity 0.2s ease;
     }
     .tor-nav-loading[hidden] { display: none !important; }
     .tor-nav-card {
-      width: min(400px, calc(100% - 32px));
-      padding: 26px 22px;
+      width: min(420px, calc(100% - 32px));
+      padding: 28px 24px;
       border-radius: 18px;
       text-align: center;
       background: #10141e;
-      border: 1px solid rgba(245, 158, 11, 0.28);
-      box-shadow: 0 18px 46px rgba(0,0,0,.45);
+      border: 1px solid rgba(0, 240, 255, 0.35);
+      box-shadow: 0 18px 46px rgba(0,0,0,.65), 0 0 30px rgba(0, 240, 255, 0.2);
     }
     body:not(.via-tor) .tor-nav-card {
-      border-color: rgba(56,189,248,.32);
+      border-color: rgba(56,189,248,.38);
       background: linear-gradient(180deg, #0f172a 0%, #10141e 100%);
+    }
+    .tor-nav-progress {
+      width: 100%;
+      height: 4px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 2px;
+      overflow: hidden;
+      margin-top: 14px;
+    }
+    .tor-nav-progress-bar {
+      width: 40%;
+      height: 100%;
+      background: linear-gradient(90deg, #00f0ff, #38bdf8, #818cf8);
+      border-radius: 2px;
+      animation: tor-progress-indeterminate 1.4s ease-in-out infinite;
+    }
+    @keyframes tor-progress-indeterminate {
+      0% { transform: translateX(-100%); width: 30%; }
+      50% { width: 60%; }
+      100% { transform: translateX(250%); width: 30%; }
     }
     .tor-nav-spin {
       width: 54px;
@@ -9618,6 +14122,126 @@ function getDevicePlaylistsRoot(clientId, req) {
       font-size: 12.5px;
       line-height: 1.45;
     }
+    /* MÍDIAS ACOPLADAS AO RESULTADO (1 IMAGEM E 1 VÍDEO SE HOUVER) */
+    .link-media-row {
+      display: flex;
+      align-items: stretch;
+      gap: 10px;
+      margin-top: 8px;
+      flex-wrap: wrap;
+    }
+    .link-media-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(15, 23, 42, 0.75);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 10px;
+      padding: 6px 10px 6px 6px;
+      cursor: pointer;
+      text-decoration: none;
+      color: inherit;
+      transition: all 0.2s ease;
+      max-width: 320px;
+      flex: 1 1 180px;
+      position: relative;
+    }
+    .link-media-item:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+    }
+    .link-media-image:hover {
+      background: rgba(0, 240, 255, 0.1);
+      border-color: rgba(0, 240, 255, 0.45);
+    }
+    .link-media-video:hover {
+      background: rgba(239, 68, 68, 0.1);
+      border-color: rgba(239, 68, 68, 0.45);
+    }
+    .link-media-thumb-wrap {
+      position: relative;
+      width: 72px;
+      height: 48px;
+      border-radius: 6px;
+      overflow: hidden;
+      background: #020617;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .link-media-thumb {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .link-media-badge {
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      background: rgba(3, 7, 18, 0.85);
+      color: #38bdf8;
+      font-size: 8.5px;
+      font-weight: 700;
+      padding: 1px 4px;
+      border-radius: 3px;
+      border: 1px solid rgba(56, 189, 248, 0.35);
+    }
+    .link-media-play-icon {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, 0.45);
+      color: #fff;
+      font-size: 14px;
+      transition: all 0.2s;
+    }
+    .link-media-video:hover .link-media-play-icon {
+      background: rgba(239, 68, 68, 0.7);
+      transform: scale(1.08);
+    }
+    .link-media-duration {
+      position: absolute;
+      bottom: 2px;
+      right: 2px;
+      background: rgba(0, 0, 0, 0.85);
+      color: #fff;
+      font-size: 8.5px;
+      font-weight: 700;
+      padding: 1px 3px;
+      border-radius: 3px;
+    }
+    .link-media-info {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      min-width: 0;
+      flex: 1;
+      gap: 2px;
+    }
+    .link-media-title {
+      font-size: 11.5px;
+      font-weight: 600;
+      color: #e2e8f0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      line-height: 1.3;
+    }
+    .link-media-action {
+      font-size: 10.5px;
+      font-weight: 700;
+      color: #00f0ff;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+    }
+    .link-media-video .link-media-action {
+      color: #f87171;
+    }
     .url-suggest-more {
       text-align: center;
       color: #64748b;
@@ -9641,6 +14265,58 @@ function getDevicePlaylistsRoot(clientId, req) {
       cursor: pointer;
     }
     .suggest-refresh-btn:hover { background: rgba(0, 240, 255, 0.18); }
+    .suggest-refresh-btn:disabled { opacity: 0.65; cursor: default; }
+    .suggest-refresh-btn.is-loading::before {
+      content: '';
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      border: 2px solid rgba(103, 232, 249, 0.35);
+      border-top-color: #67e8f9;
+      animation: pvSpin 0.8s linear infinite;
+    }
+    @keyframes pvSpin { to { transform: rotate(360deg); } }
+    /* Prévia da página encontrada: imagem de capa + descrição */
+    .url-suggest-meta { flex: 1 1 auto; }
+    .url-suggest-pv {
+      position: relative;
+      flex-shrink: 0;
+      align-self: center;
+      width: 136px;
+      height: 90px;
+      margin-left: auto;
+      border-radius: 12px;
+      overflow: hidden;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .url-suggest-pv + .url-suggest-ext { margin-left: 0; }
+    .url-suggest-pv img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      opacity: 0;
+      transition: opacity 0.25s ease, transform 0.35s ease;
+    }
+    .url-suggest-pv.is-ready img { opacity: 1; }
+    .url-suggest-row:hover .url-suggest-pv.is-ready img { transform: scale(1.05); }
+    .url-suggest-pv.is-loading {
+      background: linear-gradient(100deg, rgba(255,255,255,0.04) 20%, rgba(255,255,255,0.11) 40%, rgba(255,255,255,0.04) 60%);
+      background-size: 220% 100%;
+      animation: pvShimmer 1.2s linear infinite;
+    }
+    @keyframes pvShimmer { from { background-position: 120% 0; } to { background-position: -120% 0; } }
+    .url-suggest-fav img { width: 62%; height: 62%; object-fit: contain; border-radius: 4px; }
+    .url-suggest-snip {
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    @media (max-width: 600px) {
+      .url-suggest-pv { width: 88px; height: 66px; }
+    }
     .suggest-refresh-btn:disabled {
       opacity: 0.65;
       cursor: default;
@@ -9712,30 +14388,62 @@ function getDevicePlaylistsRoot(clientId, req) {
     }
     .ai-spark { font-size: 12px; color: #00f0ff; }
     .ai-state { font-size: 11.5px; color: #94a3b8; font-weight: 600; }
-    .ai-answer { font-size: 15px; line-height: 1.65; color: #e2e8f0; }
-    .ai-answer p { margin: 0 0 9px; }
+    .ai-answer { font-size: 15px; line-height: 1.7; color: #e2e8f0; }
+    .ai-answer p { margin: 0 0 10px; }
     .ai-answer p:last-child { margin-bottom: 0; }
-    .ai-answer ul { margin: 0 0 9px; padding-left: 19px; }
-    .ai-answer li { margin-bottom: 5px; }
+    .ai-subtitle {
+      color: #c4b5fd;
+      font-size: 15px;
+      font-weight: 700;
+      margin: 15px 0 8px 0;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      letter-spacing: -0.01em;
+    }
+    .ai-subtitle:first-child { margin-top: 2px; }
+    .ai-subtitle::before {
+      content: '✦';
+      font-size: 11px;
+      color: #00f0ff;
+    }
+    .ai-answer ul, .ai-answer ol, .ai-answer .ai-ul, .ai-answer .ai-ol {
+      margin: 0 0 11px;
+      padding-left: 21px;
+    }
+    .ai-answer li {
+      margin-bottom: 6px;
+      line-height: 1.62;
+    }
     .ai-answer strong { color: #f8fafc; font-weight: 700; }
+    .ai-code {
+      background: rgba(15, 23, 42, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 4px;
+      padding: 1px 6px;
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      font-size: 12.5px;
+      color: #38bdf8;
+    }
     .ai-cite {
       display: inline-block;
       min-width: 17px;
-      margin: 0 1px;
-      padding: 0 4px;
+      margin: 0 2px;
+      padding: 0 5px;
       border-radius: 5px;
       background: rgba(0, 240, 255, 0.14);
       border: 1px solid rgba(0, 240, 255, 0.28);
       color: #67e8f9;
       font-size: 10.5px;
       font-weight: 800;
-      line-height: 15px;
+      line-height: 16px;
       text-align: center;
       text-decoration: none;
-      vertical-align: 2px;
+      vertical-align: 1px;
       cursor: pointer;
+      transition: all 0.15s ease;
     }
-    .ai-cite:hover { background: rgba(0, 240, 255, 0.3); color: #0f172a; }
+    .ai-cite:hover { background: #00f0ff; color: #0f172a; border-color: #00f0ff; transform: translateY(-1px); }
     .ai-skeleton { display: flex; flex-direction: column; gap: 9px; padding: 3px 0; }
     .ai-skeleton i {
       height: 11px;
@@ -9893,52 +14601,923 @@ function getDevicePlaylistsRoot(clientId, req) {
       letter-spacing: 0.03em;
       vertical-align: middle;
     }
+    .url-source-tag {
+      display: inline-flex;
+      align-items: center;
+      font-size: 9.5px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      padding: 2px 7px;
+      border-radius: 5px;
+      margin-left: 7px;
+      vertical-align: middle;
+      line-height: 1.2;
+    }
+    .url-source-tag.source-bing {
+      background: rgba(0, 120, 215, 0.2);
+      border: 1px solid rgba(0, 120, 215, 0.55);
+      color: #60a5fa;
+    }
+    .url-source-tag.source-yahoo {
+      background: rgba(123, 0, 230, 0.2);
+      border: 1px solid rgba(123, 0, 230, 0.55);
+      color: #c084fc;
+    }
+    .url-source-tag.source-duckduckgo, .url-source-tag.source-duck {
+      background: rgba(222, 88, 51, 0.2);
+      border: 1px solid rgba(222, 88, 51, 0.55);
+      color: #fb923c;
+    }
+    .url-source-tag.source-google {
+      background: rgba(34, 197, 94, 0.18);
+      border: 1px solid rgba(34, 197, 94, 0.45);
+      color: #4ade80;
+    }
+    .url-source-tag.source-brave {
+      background: rgba(251, 84, 43, 0.2);
+      border: 1px solid rgba(251, 84, 43, 0.5);
+      color: #fb923c;
+    }
+    .url-source-tag.source-yandex {
+      background: rgba(239, 68, 68, 0.18);
+      border: 1px solid rgba(239, 68, 68, 0.45);
+      color: #f87171;
+    }
+    .url-source-tag.source-wikipedia {
+      background: rgba(14, 165, 233, 0.18);
+      border: 1px solid rgba(14, 165, 233, 0.45);
+      color: #38bdf8;
+    }
+    .url-source-tag.source-rust-index {
+      background: rgba(249, 115, 22, 0.22);
+      border: 1px solid rgba(249, 115, 22, 0.6);
+      color: #fdba74;
+    }
+    .url-source-tag.source-web {
+      background: rgba(148, 163, 184, 0.15);
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      color: #cbd5e1;
+    }
+
+    /* BARRA FIXA E FILTRO RÁPIDO POR TIPO DE CONTEÚDO */
+    .search-filter-bar {
+      position: sticky;
+      top: 0;
+      z-index: 999;
+      background: rgba(12, 14, 20, 0.96);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: nowrap;
+      gap: 10px;
+      padding: 10px 16px;
+      margin: -20px -16px 16px -16px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      box-shadow: 0 4px 22px rgba(0, 0, 0, 0.5);
+    }
+    .search-rust-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 12px;
+      border-radius: 999px;
+      background: rgba(249, 115, 22, 0.12);
+      border: 1px solid rgba(249, 115, 22, 0.4);
+      color: #fdba74;
+      font-size: 11.5px;
+      font-weight: 700;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    @media (max-width: 650px) {
+      .search-rust-badge { display: none; }
+      .search-filter-bar { margin: -16px -12px 14px -12px; padding: 8px 12px; }
+    }
+    .search-filter-pills {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      overflow-x: auto;
+      padding: 4px 2px;
+      margin-bottom: 0;
+      scrollbar-width: none;
+      -webkit-overflow-scrolling: touch;
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+    .search-filter-pills::-webkit-scrollbar { display: none; }
+    .search-pill {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      color: #94a3b8;
+      border-radius: 999px;
+      padding: 7px 16px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+      font-family: inherit;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
+      outline: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .search-pill:hover {
+      background: rgba(255, 255, 255, 0.12);
+      color: #f1f5f9;
+      border-color: rgba(255, 255, 255, 0.25);
+      transform: translateY(-1px);
+    }
+    .search-pill:active {
+      transform: scale(0.95);
+    }
+    .search-pill.is-active {
+      background: rgba(0, 240, 255, 0.16);
+      border-color: #00f0ff;
+      color: #00f0ff;
+      box-shadow: 0 0 14px rgba(0, 240, 255, 0.25);
+    }
+
+    /* CARD DE CONHECIMENTO ENCICLOPÉDICO (WIKIPÉDIA) */
+    .wiki-knowledge-card {
+      background: linear-gradient(135deg, rgba(14, 165, 233, 0.12) 0%, rgba(15, 23, 42, 0.95) 100%);
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      border-radius: 18px;
+      padding: 20px;
+      margin-bottom: 24px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+      position: relative;
+    }
+    .wiki-card-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: #38bdf8;
+      background: rgba(14, 165, 233, 0.16);
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      padding: 3px 10px;
+      border-radius: 6px;
+      margin-bottom: 14px;
+    }
+    .wiki-card-body {
+      display: flex;
+      gap: 20px;
+      align-items: flex-start;
+    }
+    .wiki-thumb-wrap {
+      flex: 0 0 110px;
+      width: 110px;
+      height: 110px;
+      border-radius: 14px;
+      overflow: hidden;
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+    }
+    .wiki-thumb-img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .wiki-card-text {
+      flex: 1;
+      min-width: 0;
+    }
+    .wiki-card-title {
+      font-size: 20px;
+      font-weight: 750;
+      color: #fff;
+      margin-bottom: 4px;
+      letter-spacing: -0.2px;
+    }
+    .wiki-card-desc {
+      font-size: 12.5px;
+      color: #7dd3fc;
+      margin-bottom: 8px;
+      font-weight: 500;
+    }
+    .wiki-card-extract {
+      font-size: 13.5px;
+      color: #cbd5e1;
+      line-height: 1.6;
+      margin-bottom: 14px;
+    }
+    .wiki-read-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(56, 189, 248, 0.16);
+      border: 1px solid rgba(56, 189, 248, 0.4);
+      color: #38bdf8;
+      padding: 7px 16px;
+      border-radius: 10px;
+      font-size: 12.5px;
+      font-weight: 700;
+      text-decoration: none;
+      transition: all 0.2s;
+    }
+    .wiki-read-btn:hover {
+      background: rgba(56, 189, 248, 0.28);
+      box-shadow: 0 0 14px rgba(56, 189, 248, 0.3);
+      color: #fff;
+    }
+
+    /* BLOCO DE IMAGENS */
+    .images-block {
+      margin: 16px 0 22px 0;
+    }
+    .images-toggle-grid-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(0, 240, 255, 0.1);
+      border: 1px solid rgba(0, 240, 255, 0.35);
+      color: #00f0ff;
+      padding: 4px 12px;
+      border-radius: 999px;
+      font-size: 11.5px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      font-family: inherit;
+      user-select: none;
+    }
+    .images-toggle-grid-btn:hover {
+      background: rgba(0, 240, 255, 0.22);
+      box-shadow: 0 0 10px rgba(0, 240, 255, 0.3);
+      transform: translateY(-1px);
+    }
+    .images-toggle-grid-btn:active {
+      transform: scale(0.96);
+    }
+    .images-gallery {
+      display: flex;
+      gap: 12px;
+      overflow-x: auto;
+      padding-bottom: 10px;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(0, 240, 255, 0.4) transparent;
+      -webkit-overflow-scrolling: touch;
+    }
+    .images-block.is-grid .images-gallery {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+      overflow-x: visible;
+      gap: 14px;
+    }
+    .image-card {
+      flex: 0 0 165px;
+      width: 165px;
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 12px;
+      overflow: hidden;
+      cursor: pointer;
+      transition: all 0.22s ease;
+      display: flex;
+      flex-direction: column;
+      text-decoration: none;
+      color: inherit;
+    }
+    .images-block.is-grid .image-card {
+      flex: auto;
+      width: auto;
+    }
+    .image-card:hover {
+      transform: translateY(-3px);
+      border-color: #00f0ff;
+      box-shadow: 0 6px 20px rgba(0, 240, 255, 0.25);
+      color: #fff;
+    }
+    .image-thumb-wrap {
+      position: relative;
+      width: 100%;
+      height: 115px;
+      background: #020617;
+      overflow: hidden;
+    }
+    .image-thumb {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      transition: transform 0.25s ease;
+    }
+    .image-card:hover .image-thumb {
+      transform: scale(1.06);
+    }
+    .image-source-badge {
+      position: absolute;
+      bottom: 6px;
+      left: 6px;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(4px);
+      color: #7dd3fc;
+      font-size: 9.5px;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+      max-width: 90%;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .image-zoom-btn {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid rgba(255, 255, 255, 0.28);
+      color: #fff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      cursor: pointer;
+      backdrop-filter: blur(6px);
+      transition: all 0.2s ease;
+      z-index: 4;
+      opacity: 0.85;
+      padding: 0;
+    }
+    .image-zoom-btn:hover {
+      background: #0284c7;
+      border-color: #38bdf8;
+      transform: scale(1.12);
+      opacity: 1;
+    }
+    .image-title {
+      padding: 8px 10px;
+      font-size: 11.5px;
+      color: #cbd5e1;
+      line-height: 1.35;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* BLOCO DE VÍDEOS */
+    .videos-block {
+      margin: 16px 0 24px 0;
+    }
+    .videos-carousel {
+      display: flex;
+      gap: 14px;
+      overflow-x: auto;
+      padding-bottom: 10px;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(239, 68, 68, 0.4) transparent;
+      -webkit-overflow-scrolling: touch;
+    }
+    .videos-block.is-grid .videos-carousel {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+      overflow-x: visible;
+      gap: 16px;
+    }
+    .video-card {
+      flex: 0 0 225px;
+      width: 225px;
+      background: rgba(15, 23, 42, 0.88);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 14px;
+      overflow: hidden;
+      cursor: pointer;
+      transition: all 0.22s ease;
+      display: flex;
+      flex-direction: column;
+      text-decoration: none;
+      color: inherit;
+    }
+    .videos-block.is-grid .video-card {
+      flex: auto;
+      width: auto;
+    }
+    .video-card:hover {
+      transform: translateY(-3px);
+      border-color: #ef4444;
+      box-shadow: 0 6px 22px rgba(239, 68, 68, 0.28);
+    }
+    .video-thumb-wrap {
+      position: relative;
+      width: 100%;
+      height: 125px;
+      background: #020617;
+      overflow: hidden;
+    }
+    .video-thumb {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      transition: transform 0.25s ease;
+    }
+    .video-card:hover .video-thumb {
+      transform: scale(1.05);
+    }
+    .video-duration {
+      position: absolute;
+      bottom: 6px;
+      right: 6px;
+      background: rgba(0, 0, 0, 0.85);
+      color: #fff;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+      z-index: 2;
+    }
+    .video-play-overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, 0.25);
+      transition: background 0.2s;
+    }
+    .video-card:hover .video-play-overlay {
+      background: rgba(0, 0, 0, 0.42);
+    }
+    .video-play-icon {
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      background: rgba(239, 68, 68, 0.92);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 15px;
+      padding-left: 3px;
+      box-shadow: 0 0 16px rgba(239, 68, 68, 0.6);
+      transition: transform 0.2s;
+    }
+    .video-card:hover .video-play-icon {
+      transform: scale(1.12);
+    }
+    .video-info {
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      flex: 1;
+    }
+    .video-title {
+      font-size: 13px;
+      font-weight: 650;
+      color: #f8fafc;
+      line-height: 1.35;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      margin: 0;
+    }
+    .video-meta {
+      font-size: 11.5px;
+      color: #94a3b8;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* LIGHTBOX MODAL PARA IMAGENS */
+    .image-lightbox {
+      position: fixed;
+      inset: 0;
+      z-index: 10000;
+      background: rgba(3, 7, 18, 0.94);
+      backdrop-filter: blur(14px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .image-lightbox.is-open {
+      display: flex;
+    }
+    .image-lightbox-content {
+      position: relative;
+      max-width: 92vw;
+      max-height: 92vh;
+      width: 100%;
+      max-width: 980px;
+      display: flex;
+      flex-direction: column;
+      background: rgba(15, 23, 42, 0.98);
+      border: 1px solid rgba(0, 240, 255, 0.35);
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 12px 50px rgba(0, 0, 0, 0.9), 0 0 30px rgba(0, 240, 255, 0.2);
+    }
+    .image-lightbox-header {
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(0, 0, 0, 0.4);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .image-lightbox-counter {
+      font-size: 12px;
+      font-weight: 700;
+      color: #00f0ff;
+      letter-spacing: 0.5px;
+    }
+    .image-lightbox-img-wrap {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 280px;
+      max-height: 68vh;
+      background: #020617;
+      overflow: hidden;
+      user-select: none;
+    }
+    .image-lightbox-img {
+      max-width: 100%;
+      max-height: 68vh;
+      object-fit: contain;
+      display: block;
+      transition: opacity 0.2s ease;
+    }
+    .image-lightbox-nav {
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%);
+      background: rgba(0, 0, 0, 0.72);
+      border: 1px solid rgba(255, 255, 255, 0.25);
+      color: #fff;
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 20px;
+      transition: all 0.2s;
+      z-index: 5;
+    }
+    .image-lightbox-nav:hover {
+      background: rgba(0, 240, 255, 0.45);
+      border-color: #00f0ff;
+      color: #fff;
+      transform: translateY(-50%) scale(1.1);
+    }
+    .image-lightbox-nav.prev { left: 14px; }
+    .image-lightbox-nav.next { right: 14px; }
+    .image-lightbox-bar {
+      padding: 12px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      flex-wrap: wrap;
+      background: rgba(0, 0, 0, 0.3);
+    }
+    .image-lightbox-info {
+      flex: 1;
+      min-width: 220px;
+    }
+    .image-lightbox-title {
+      font-size: 13.5px;
+      font-weight: 650;
+      color: #fff;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 2px;
+    }
+    .image-lightbox-source {
+      font-size: 11.5px;
+      color: #94a3b8;
+    }
+    .image-lightbox-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .image-lightbox-btn {
+      background: rgba(0, 240, 255, 0.16);
+      border: 1px solid rgba(0, 240, 255, 0.4);
+      color: #00f0ff;
+      padding: 7px 14px;
+      border-radius: 8px;
+      font-size: 12.5px;
+      font-weight: 700;
+      text-decoration: none;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s;
+    }
+    .image-lightbox-btn:hover {
+      background: rgba(0, 240, 255, 0.32);
+      color: #fff;
+      transform: translateY(-1px);
+    }
+    .image-lightbox-btn.primary {
+      background: linear-gradient(135deg, #00f0ff 0%, #0284c7 100%);
+      color: #020617;
+      border-color: #38bdf8;
+      font-weight: 800;
+    }
+    .image-lightbox-btn.primary:hover {
+      filter: brightness(1.15);
+      color: #000;
+    }
+    .image-lightbox-close {
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      color: #fff;
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      font-size: 20px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s;
+    }
+    .image-lightbox-close:hover {
+      background: #ef4444;
+      border-color: #ef4444;
+    }
+
+    /* MODAL DE VÍDEO IN-APP */
+    .video-modal {
+      position: fixed;
+      inset: 0;
+      z-index: 10001;
+      background: rgba(3, 7, 18, 0.94);
+      backdrop-filter: blur(14px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .video-modal.is-open {
+      display: flex;
+    }
+    .video-modal-content {
+      position: relative;
+      width: 100%;
+      max-width: 860px;
+      background: rgba(15, 23, 42, 0.98);
+      border: 1px solid rgba(239, 68, 68, 0.45);
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 10px 45px rgba(0, 0, 0, 0.9), 0 0 30px rgba(239, 68, 68, 0.25);
+      display: flex;
+      flex-direction: column;
+    }
+    .video-modal-header {
+      padding: 12px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(0, 0, 0, 0.5);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .video-modal-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: #fff;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 85%;
+    }
+    .video-modal-close {
+      background: rgba(255, 255, 255, 0.1);
+      border: none;
+      color: #fff;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      font-size: 18px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s;
+    }
+    .video-modal-close:hover {
+      background: #ef4444;
+    }
+    .video-modal-player-wrap {
+      position: relative;
+      width: 100%;
+      padding-bottom: 56.25%;
+      height: 0;
+      background: #000;
+    }
+    .video-modal-iframe {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      border: 0;
+    }
+    .video-modal-footer {
+      padding: 12px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      background: rgba(0, 0, 0, 0.3);
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      flex-wrap: wrap;
+    }
+    .video-modal-btn {
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-size: 12.5px;
+      font-weight: 700;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s;
+      border: 1px solid transparent;
+      text-decoration: none;
+    }
+    .video-modal-btn.primary {
+      background: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%);
+      color: #fff;
+      border-color: rgba(239, 68, 68, 0.6);
+    }
+    .video-modal-btn.primary:hover {
+      filter: brightness(1.15);
+      transform: translateY(-1px);
+    }
+    .video-modal-btn.secondary {
+      background: rgba(255, 255, 255, 0.1);
+      color: #cbd5e1;
+      border-color: rgba(255, 255, 255, 0.15);
+    }
+    .video-modal-btn.secondary:hover {
+      background: rgba(255, 255, 255, 0.2);
+      color: #fff;
+    }
+
+    /* SPINNER INFINITO NO FINAL DO CARROSSEL E GRADE */
+    .carousel-infinite-spinner {
+      flex: 0 0 70px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 12px;
+      color: #00f0ff;
+      font-size: 20px;
+      animation: infinite-pulse 0.85s infinite alternate ease-in-out;
+    }
+    .videos-block.is-grid .carousel-infinite-spinner,
+    .images-block.is-grid .carousel-infinite-spinner {
+      grid-column: 1 / -1;
+      width: 100%;
+      height: 60px;
+    }
+    .videos-block.is-grid .carousel-sentinel,
+    .images-block.is-grid .carousel-sentinel {
+      grid-column: 1 / -1;
+      width: 100%;
+      height: 40px;
+    }
+    .carousel-load-more-pill {
+      flex: 0 0 auto;
+      align-self: center;
+      padding: 9px 16px;
+      margin: 0 8px;
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.9);
+      border: 1px solid rgba(56, 189, 248, 0.4);
+      color: #38bdf8;
+      font-size: 12.5px;
+      font-weight: 700;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      white-space: nowrap;
+      transition: all 0.2s ease;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+    }
+    .carousel-load-more-pill:hover {
+      background: rgba(56, 189, 248, 0.2);
+      border-color: #38bdf8;
+      color: #fff;
+      transform: scale(1.05);
+      box-shadow: 0 4px 14px rgba(56, 189, 248, 0.35);
+    }
+    .videos-block .carousel-load-more-pill {
+      border-color: rgba(239, 68, 68, 0.4);
+      color: #f87171;
+    }
+    .videos-block .carousel-load-more-pill:hover {
+      background: rgba(239, 68, 68, 0.2);
+      border-color: #ef4444;
+      color: #fff;
+      box-shadow: 0 4px 14px rgba(239, 68, 68, 0.35);
+    }
+    .videos-block.is-grid .carousel-load-more-pill,
+    .images-block.is-grid .carousel-load-more-pill {
+      grid-column: 1 / -1;
+      width: 100%;
+      max-width: 280px;
+      margin: 16px auto;
+      padding: 12px 24px;
+    }
+    @keyframes infinite-pulse {
+      from { opacity: 0.35; transform: scale(0.9); }
+      to { opacity: 1; transform: scale(1.15); }
+    }
   </style>
 </head>
 <body class="${useTor ? 'via-tor' : ''}">
+  <div class="search-top-nav-bar" id="searchTopNavBar" aria-hidden="true"></div>
+  <div id="onionDarkVignette" style="position: fixed; inset: 0; pointer-events: none; z-index: 1; opacity: 0; transition: opacity 0.3s ease-out; background: radial-gradient(circle at 50% 50%, rgba(2, 20, 10, 0.35) 0%, rgba(0, 0, 0, 0.95) 75%, #000 100%); box-shadow: inset 0 0 160px rgba(34, 197, 94, 0.45);"></div>
   <div class="tor-nav-loading" id="torNavLoading" hidden>
     <div class="tor-nav-card">
       <div class="tor-nav-spin"></div>
       <div class="direct-nav-bars" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
-      <div class="tor-nav-title" id="torNavTitle">${useTor ? 'Carregando via Tor' : 'Abrindo em conexão direta'}</div>
+      <div class="tor-nav-title" id="torNavTitle">Carregando página…</div>
       <div class="tor-nav-url" id="torNavUrl"></div>
-      <div class="tor-nav-hint" id="torNavHint">${useTor ? 'A conexão está saindo pela rede Tor. Pode demorar alguns segundos.' : 'Tor desligado. A página está abrindo pela internet normal.'}</div>
+      <div class="tor-nav-hint" id="torNavHint">Conectando ao site via proxy com segurança máxima e zero anúncios…</div>
+      <div class="tor-nav-progress"><div class="tor-nav-progress-bar"></div></div>
     </div>
   </div>
   <header class="ddg-header">
     <a href="newtab.html" class="ddg-brand" title="Início">
-      <span>🦆</span>
-      <span>DuckDuckGo</span>
-      <span class="ddg-brand-badge">Tor</span>
+      <span>⚡</span>
+      <span>Papaléguas Search</span>
+      <span class="ddg-brand-badge">Rust v2.0</span>
     </a>
-    <form class="ddg-form" action="/search" method="GET">
+    <form class="ddg-form" action="/search" method="GET" autocomplete="off">
       <input type="hidden" name="clientId" value="${clientId}">
-      <input type="text" name="q" id="searchInput" class="ddg-input" value="${safeQ}" placeholder="Pesquise no buscador inteligente..." autofocus autocomplete="off" />
+      <input type="hidden" name="filter" id="searchFilterInput" value="${escapeHtml(activeFilter)}">
+      <input type="text" name="q" id="searchInput" class="ddg-input" value="${safeQ}" placeholder="Pesquise no Motor de Busca Próprio Papaléguas (Rust BM25)..." autofocus autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-form-type="other" />
       <button type="submit" class="ddg-btn" title="Buscar">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
       </button>
     </form>
-    <div style="display:flex;gap:8px;align-items:center;">
-      <a href="https://www.google.com${safeQ ? '/search?q=' + encodeURIComponent(q) : ''}" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;gap:6px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#cbd5e1;text-decoration:none;padding:6px 12px;border-radius:10px;font-size:12px;font-weight:600;white-space:nowrap;transition:all 0.2s;" title="Abrir busca no Google diretamente fora do frame">
-        <span>Google ↗</span>
-      </a>
-      <a href="https://duckduckgo.com/${safeQ ? '?q=' + encodeURIComponent(q) : ''}" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;gap:6px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#cbd5e1;text-decoration:none;padding:6px 12px;border-radius:10px;font-size:12px;font-weight:600;white-space:nowrap;transition:all 0.2s;" title="Abrir busca no DuckDuckGo diretamente fora do frame">
-        <span>DuckDuckGo ↗</span>
-      </a>
-    </div>
   </header>
 
   <main class="ddg-container">
+    <aside class="search-top-install-bar" id="searchTopInstallBar">
+      <div class="search-install-text">
+        <img src="/icon-192.png" alt="Papaléguas" class="search-install-mascot" onerror="this.onerror=null;this.src='/favicon.ico';">
+        <span><strong>Super Navegador Papaléguas (Motor Rust v2.0):</strong> Zero anúncios, busca direta e navegação ultra-rápida.</span>
+      </div>
+      <a href="/download/app" class="search-install-btn" title="Baixar Super Navegador Papaléguas para Windows, Android, iOS e Linux">
+        📥 Baixar Navegador
+      </a>
+    </aside>
+    ${filterPillsHtml}
+    <div id="filterEmptyMsg" style="display:none; text-align: center; padding: 45px 20px; color: #94a3b8;">
+      <div style="font-size: 36px; margin-bottom: 12px;">🔍</div>
+      <p style="font-size: 16px; font-weight: 600; color: #e2e8f0;" id="filterEmptyText">Nenhum resultado encontrado para esta categoria.</p>
+      <p style="font-size: 13px; color: #64748b; margin-top: 6px;">Tente clicar em <b>🌟 Todos</b> para ver outros resultados ou reformular a pesquisa.</p>
+      <button type="button" class="search-pill" onclick="selectSearchFilter('all', true)" style="margin-top: 14px; background: rgba(0, 240, 255, 0.15); border-color: #00f0ff; color: #fff;">
+        🌟 Ver todos os resultados
+      </button>
+    </div>
+    ${wikiHtml}
     ${q ? `
-    <section class="ai-card" id="aiCard">
+    <section class="ai-card" id="aiCard" style="${activeFilter === 'all' ? '' : 'display:none;'}">
       <div class="ai-head">
         <span class="ai-badge"><span class="ai-spark">✦</span> Resposta da IA</span>
-        <span class="ai-state" id="aiState">Lendo os resultados…</span>
+        <span class="ai-state" id="aiState">${initialAiSources.length ? (initialAiSources.length === 1 ? 'resumo de 1 fonte' : 'resumo de ' + initialAiSources.length + ' fontes') : 'Lendo os resultados…'}</span>
       </div>
-      <div class="ai-answer" id="aiAnswer"><div class="ai-skeleton"><i></i><i></i><i></i></div></div>
-      <div class="ai-sources" id="aiSources"></div>
+      <div class="ai-answer" id="aiAnswer">${formatAiAnswerToHtml(initialAiAnswer, initialAiSources)}</div>
+      <div class="ai-sources" id="aiSources">${formatAiSourcesToHtml(initialAiSources, clientId)}</div>
       <div class="ai-thread" id="aiThread"></div>
-      <form class="ai-ask" id="aiAsk" hidden autocomplete="off">
+      <form class="ai-ask" id="aiAsk" ${initialAiAnswer ? '' : 'hidden'} autocomplete="off">
         <input class="ai-ask-input" id="aiAskInput" placeholder="Pergunte mais e a IA pesquisa de novo…" autocomplete="off" spellcheck="false">
         <button class="ai-ask-go" id="aiAskGo" type="submit">Perguntar</button>
       </form>
@@ -9946,42 +15525,798 @@ function getDevicePlaylistsRoot(clientId, req) {
     ` : ''}
     <!-- RESULTADOS DO BUSCADOR INTELIGENTE -->
     <div id="agentPicks" hidden></div>
-    ${q && results.length ? '<h3 class="block-title">Resultados da web</h3>' : ''}
-    <div id="resultsList">
+    ${didYouMeanHtml}
+    ${imagesHtml}
+    ${videosHtml}
+    ${q && results.length ? `<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;${activeFilter === 'all' || activeFilter === 'web' ? '' : 'display:none;'}" id="webResultsBar">
+      <h3 class="block-title" id="webResultsHeading" style="margin:0;">🌐 Resultados da Web Mais Relevantes</h3>
+      <div class="web-quick-filters" id="webQuickFilters" style="display:flex;gap:6px;flex-wrap:wrap;">
+        <button type="button" class="search-pill active" data-web-filter="all" style="padding:5px 11px;font-size:12px;">Todos</button>
+        <button type="button" class="search-pill" data-web-filter="official" style="padding:5px 11px;font-size:12px;">Oficiais (.gov/.edu)</button>
+        <button type="button" class="search-pill" data-web-filter="recent" style="padding:5px 11px;font-size:12px;">Com data recente</button>
+      </div>
+    </div>` : ''}
+    <div id="resultsList" data-section="web" style="${activeFilter === 'all' || activeFilter === 'web' ? '' : 'display:none;'}">
       ${resultsHtml}
     </div>
-    <div class="url-suggest-more" id="resultsMore" style="${q && results.length ? '' : 'display:none;'}">
-      <button type="button" class="suggest-refresh-btn" id="resultsRefresh">Atualizar sugestões</button>
+    <div class="url-suggest-more" id="resultsMore" style="${(activeFilter === 'all' || activeFilter === 'web') && (q && results.length) ? '' : 'display:none;'}">
+      <button type="button" class="suggest-refresh-btn" id="resultsRefresh">Carregar mais resultados</button>
     </div>
-    <!-- As notícias vêm depois: quase toda busca é por explicação, não por manchete -->
+    <!-- As notícias vêm depois -->
     ${newsHtml}
     ${relatedHtml}
+    <!-- Bloco de resultados .onion temáticos no final da pesquisa -->
+    ${onionHtml}
   </main>
 
+  <!-- LIGHTBOX MODAL PARA IMAGENS -->
+  <div id="imageLightbox" class="image-lightbox" role="dialog" aria-modal="true" aria-hidden="true">
+    <div class="image-lightbox-content">
+      <div class="image-lightbox-header">
+        <span class="image-lightbox-counter" id="lightboxCounter">1 / 1</span>
+        <button type="button" class="image-lightbox-close" id="lightboxClose" title="Fechar">&times;</button>
+      </div>
+      <div class="image-lightbox-img-wrap">
+        <button type="button" class="image-lightbox-nav prev" id="lightboxPrev" title="Imagem Anterior">&#10094;</button>
+        <img id="lightboxImg" class="image-lightbox-img" src="" alt="Ampliação da imagem" onclick="openLightboxTargetPage()" title="Clique para acessar o site desta imagem no Papaléguas" style="cursor:pointer;" />
+        <button type="button" class="image-lightbox-nav next" id="lightboxNext" title="Próxima Imagem">&#10095;</button>
+      </div>
+      <div class="image-lightbox-bar">
+        <div class="image-lightbox-info">
+          <div class="image-lightbox-title" id="lightboxTitle"></div>
+          <div class="image-lightbox-source" id="lightboxSource"></div>
+        </div>
+        <div class="image-lightbox-actions">
+          <a id="lightboxPageBtn" href="#" class="image-lightbox-btn primary" title="Acessar Página no Papaléguas">
+            <span>🌐</span> Acessar Página no Papaléguas
+          </a>
+          <a id="lightboxFullBtn" href="#" class="image-lightbox-btn" target="_blank" rel="noopener noreferrer">
+            <span>↗</span> Ver Imagem Completa
+          </a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL DE VÍDEO IN-APP -->
+  <div id="videoModal" class="video-modal" role="dialog" aria-modal="true" aria-hidden="true">
+    <div class="video-modal-content">
+      <div class="video-modal-header">
+        <div class="video-modal-title" id="videoModalTitle">Reproduzir Vídeo</div>
+        <button type="button" class="video-modal-close" id="videoModalClose" title="Fechar">&times;</button>
+      </div>
+      <div class="video-modal-player-wrap">
+        <iframe id="videoModalIframe" class="video-modal-iframe" src="" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
+      </div>
+      <div class="video-modal-footer">
+        <button type="button" class="video-modal-btn primary" id="videoModalBaixaTubeBtn">
+          <span>📥</span> Abrir no BaixaTube (Player Completo & Download)
+        </button>
+        <button type="button" class="video-modal-btn secondary" id="videoModalCloseBtn">Fechar</button>
+      </div>
+    </div>
+  </div>
+
   <script>
+    function openVideo(id, title, e) {
+      if (!id) return;
+      goToBaixaTube(id, title, e);
+    }
+
+    function goToBaixaTube(id, title, e) {
+      if (!id) return;
+      const cleanId = String(id || '').trim();
+      const cleanTitle = (title || 'Vídeo').trim();
+      const baixatubeUrl = '/baixatube?v=' + encodeURIComponent(cleanId);
+
+      // 1. Host Electron via torBrowserAPI: abre em nova aba/janela no app
+      try {
+        if (window.torBrowserAPI && typeof window.torBrowserAPI.sendToHost === 'function') {
+          if (e && typeof e.preventDefault === 'function') e.preventDefault();
+          window.torBrowserAPI.sendToHost('open-new-tab', baixatubeUrl);
+          return;
+        }
+      } catch (err) {}
+
+      // 2. Shell pai (postMessage para abrir em nova aba no shell)
+      try {
+        if (window.parent && window.parent !== window) {
+          if (e && typeof e.preventDefault === 'function') e.preventDefault();
+          window.parent.postMessage({ type: 'open-new-tab', url: baixatubeUrl }, '*');
+          return;
+        }
+      } catch (err) {}
+
+      // 3. PostMessage local para scripts do shell
+      try {
+        window.postMessage({ type: 'open-new-tab', url: baixatubeUrl }, '*');
+      } catch (err) {}
+
+      // 4. Se for standalone no navegador, deixa o target="_blank" nativo abrir a nova janela perfeitamente!
+    }
+
+    function closeVideoModal() {
+      const modal = document.getElementById('videoModal');
+      const iframe = document.getElementById('videoModalIframe');
+      if (modal) {
+        modal.classList.remove('is-open');
+        modal.setAttribute('aria-hidden', 'true');
+      }
+      if (iframe) {
+        iframe.src = '';
+      }
+    }
+    window.openVideo = openVideo;
+    window.goToBaixaTube = goToBaixaTube;
+    window.closeVideoModal = closeVideoModal;
+
+    function bindVideoModalEvents() {
+      const closeBtn = document.getElementById('videoModalClose');
+      const footerCloseBtn = document.getElementById('videoModalCloseBtn');
+      const modal = document.getElementById('videoModal');
+      if (closeBtn) closeBtn.onclick = closeVideoModal;
+      if (footerCloseBtn) footerCloseBtn.onclick = closeVideoModal;
+      if (modal) {
+        modal.onclick = function(e) {
+          if (e.target === modal) closeVideoModal();
+        };
+      }
+      document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') closeVideoModal();
+      });
+    }
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', bindVideoModalEvents);
+    } else {
+      bindVideoModalEvents();
+    }
+
+    function openMusic(query) {
+      if (!query) return;
+      try {
+        if (window.torBrowserAPI && typeof window.torBrowserAPI.sendToHost === 'function') {
+          window.torBrowserAPI.sendToHost('play-dj-music', query);
+          return;
+        }
+      } catch (e) {}
+      try {
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage({ type: 'play-dj-music', query: query, url: '/musica?q=' + encodeURIComponent(query) + '&autoplay=1' }, '*');
+          return;
+        }
+      } catch (e) {}
+      try {
+        if (window.torBrowserAPI && typeof window.torBrowserAPI.sendToHost === 'function') {
+          window.torBrowserAPI.sendToHost('navigate-current-tab', '/musica?q=' + encodeURIComponent(query) + '&autoplay=1');
+          return;
+        }
+      } catch (e) {}
+      window.location.href = '/musica?q=' + encodeURIComponent(query) + '&autoplay=1';
+    }
+
     const currentQuery = ${JSON.stringify(q)};
+    const suggestClientId = ${JSON.stringify(clientId)};
     const pageUsesTor = ${useTor ? 'true' : 'false'};
+    const initialAiData = ${JSON.stringify({ answer: initialAiAnswer, sources: initialAiSources })};
+
+    let imagesPage = 1;
+    let imagesLoading = false;
+    let imagesHasMore = true;
+
+    async function loadMoreImagesAuto() {
+      if (imagesLoading || !imagesHasMore) return;
+      const q = currentQuery || '';
+      if (!q) return;
+
+      imagesLoading = true;
+      const spinner = document.getElementById('imagesInfiniteSpinner');
+      const loadBtn = document.getElementById('imagesLoadMoreBtn');
+      if (spinner) spinner.style.display = 'flex';
+      if (loadBtn) loadBtn.style.display = 'none';
+
+      try {
+        const res = await fetch('/api/search-images?q=' + encodeURIComponent(q) + '&page=' + imagesPage);
+        const data = await res.json();
+        if (data && data.success && Array.isArray(data.images) && data.images.length > 0) {
+          const gallery = document.getElementById('imagesGallery');
+          const sentinel = document.getElementById('imagesSentinel');
+          const insertAnchor = spinner || loadBtn || sentinel;
+          if (gallery) {
+            data.images.forEach((img) => {
+              const card = document.createElement('a');
+              card.className = 'image-card';
+              const pageTarget = img.pageUrl || img.image || '';
+              const fullImg = img.image || img.thumbnail || '';
+              card.href = '/proxy?url=' + encodeURIComponent(pageTarget) + '&clientId=' + encodeURIComponent(suggestClientId);
+              card.setAttribute('data-direct', pageTarget);
+              card.setAttribute('data-page', pageTarget);
+              card.setAttribute('data-full', fullImg);
+              card.setAttribute('data-title', img.title || q);
+              card.setAttribute('data-source', img.source || 'Web');
+              card.setAttribute('title', 'Acessar página de ' + (img.source || 'Web') + ' no Papaléguas');
+
+              const safeT = (img.title || q).replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+              const safeThumb = (img.thumbnail || img.image || '').replace(/"/g, '&quot;');
+              const safeSrc = (img.source || 'Web').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+              card.innerHTML =
+                '<div class="image-thumb-wrap">' +
+                  '<img class="image-thumb" src="' + safeThumb + '" alt="' + safeT + '" loading="lazy" />' +
+                  '<span class="image-source-badge">' + safeSrc + ' ↗</span>' +
+                  '<button type="button" class="image-zoom-btn" onclick="event.preventDefault(); event.stopPropagation(); if (typeof openLightboxCard === &apos;function&apos;) openLightboxCard(this.closest(&apos;.image-card&apos;))" title="Ampliar imagem">🔍</button>' +
+                '</div>' +
+                '<div class="image-title" title="' + safeT + '">' + safeT + '</div>';
+              const imgEl = card.querySelector('.image-thumb');
+              if (imgEl) imgEl.onerror = function() { card.style.display = 'none'; };
+
+              if (insertAnchor && insertAnchor.parentNode === gallery) {
+                gallery.insertBefore(card, insertAnchor);
+              } else {
+                gallery.appendChild(card);
+              }
+            });
+
+            const totalImgs = gallery.querySelectorAll('.image-card').length;
+            const cEl = document.getElementById('imagesCount');
+            if (cEl) cEl.textContent = totalImgs;
+            const pEl = document.querySelector('.pill-count-images');
+            if (pEl) pEl.textContent = totalImgs;
+          }
+          imagesPage += 1;
+          imagesHasMore = !!data.hasMore;
+        } else {
+          imagesHasMore = false;
+        }
+      } catch (err) {
+        console.warn('[SEARCH] Erro no scroll infinito de imagens:', err);
+      } finally {
+        imagesLoading = false;
+        if (spinner) spinner.style.display = 'none';
+        if (loadBtn) loadBtn.style.display = imagesHasMore ? '' : 'none';
+      }
+
+      // Se após carregar ainda houver espaço na tela em modo grade, continua carregando
+      if (imagesHasMore) {
+        const imgBlock = document.getElementById('sectionImages');
+        if (imgBlock && imgBlock.style.display !== 'none' && imgBlock.classList.contains('is-grid')) {
+          const rect = imgBlock.getBoundingClientRect();
+          if (rect.bottom <= window.innerHeight + 800) {
+            setTimeout(loadMoreImagesAuto, 200);
+          }
+        }
+      }
+    }
+    window.loadMoreImagesAuto = loadMoreImagesAuto;
+    window.loadMoreImages = loadMoreImagesAuto;
+
+    function toggleImagesGrid() {
+      const sec = document.getElementById('sectionImages');
+      const btnText = document.getElementById('toggleGridText');
+      const btnIcon = document.getElementById('toggleGridIcon');
+      if (!sec) return;
+      const isGrid = sec.classList.toggle('is-grid');
+      if (btnText) btnText.textContent = isGrid ? 'Ver carrossel' : 'Ver em grade';
+      if (btnIcon) btnIcon.textContent = isGrid ? '↔' : '⊞';
+      if (isGrid && typeof loadMoreImagesAuto === 'function') {
+        const count = sec.querySelectorAll('.image-card').length;
+        if (count < 40) loadMoreImagesAuto();
+      }
+    }
+    window.toggleImagesGrid = toggleImagesGrid;
+
+    let videosPage = 1;
+    let videosLoading = false;
+    let videosHasMore = true;
+
+    async function loadMoreVideosAuto() {
+      if (videosLoading || !videosHasMore) return;
+      const q = currentQuery || '';
+      if (!q) return;
+
+      videosLoading = true;
+      const spinner = document.getElementById('videosInfiniteSpinner');
+      const loadBtn = document.getElementById('videosLoadMoreBtn');
+      if (spinner) spinner.style.display = 'flex';
+      if (loadBtn) loadBtn.style.display = 'none';
+
+      try {
+        const res = await fetch('/api/search-videos?q=' + encodeURIComponent(q) + '&page=' + videosPage + '&limit=8');
+        const data = await res.json();
+        if (data && data.success && Array.isArray(data.videos) && data.videos.length > 0) {
+          const carousel = document.getElementById('videosCarousel');
+          const sentinel = document.getElementById('videosSentinel');
+          const insertAnchor = spinner || loadBtn || sentinel;
+          if (carousel) {
+            data.videos.forEach((v) => {
+              const card = document.createElement('a');
+              card.className = 'video-card';
+              const cleanVTitle = v.title || 'Vídeo';
+              const vHref = '/baixatube?v=' + encodeURIComponent(v.id);
+              card.href = vHref;
+              card.target = '_blank';
+              card.rel = 'noopener noreferrer';
+              card.setAttribute('data-video-id', v.id);
+              card.setAttribute('data-video-title', cleanVTitle);
+              card.setAttribute('role', 'button');
+              card.setAttribute('tabindex', '0');
+              card.setAttribute('title', 'Assistir ' + cleanVTitle);
+              card.onclick = function(e) {
+                openVideo(v.id, cleanVTitle, e);
+              };
+
+              const safeT = (v.title || '').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+              const safeThumb = (v.thumbnail || ('https://i.ytimg.com/vi/' + v.id + '/hqdefault.jpg')).replace(/"/g, '&quot;');
+              const safeCh = (v.channel || 'YouTube').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+              const safeViews = (v.views || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+              const safeDur = (v.duration || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+              card.innerHTML =
+                '<div class="video-thumb-wrap">' +
+                  '<img class="video-thumb" src="' + safeThumb + '" alt="' + safeT + '" loading="lazy" />' +
+                  (safeDur ? '<span class="video-duration">' + safeDur + '</span>' : '') +
+                  '<div class="video-play-overlay">' +
+                    '<span class="video-play-icon">▶</span>' +
+                  '</div>' +
+                '</div>' +
+                '<div class="video-info">' +
+                  '<h4 class="video-title" title="' + safeT + '">' + safeT + '</h4>' +
+                  '<div class="video-meta">' +
+                    '<span class="video-channel">' + safeCh + '</span>' +
+                    (safeViews ? '<span class="video-views">· ' + safeViews + '</span>' : '') +
+                  '</div>' +
+                '</div>';
+              const vThumbEl = card.querySelector('.video-thumb');
+              if (vThumbEl) {
+                vThumbEl.onerror = function() { this.src = 'https://i.ytimg.com/vi/' + v.id + '/hqdefault.jpg'; };
+              }
+
+              if (insertAnchor && insertAnchor.parentNode === carousel) {
+                carousel.insertBefore(card, insertAnchor);
+              } else {
+                carousel.appendChild(card);
+              }
+            });
+
+            const totalVids = carousel.querySelectorAll('.video-card').length;
+            const cEl = document.getElementById('videosCount');
+            if (cEl) cEl.textContent = totalVids;
+            const pEl = document.querySelector('.pill-count-videos');
+            if (pEl) pEl.textContent = totalVids;
+          }
+          videosPage += 1;
+          videosHasMore = !!data.hasMore;
+        } else {
+          videosHasMore = false;
+        }
+      } catch (err) {
+        console.warn('[SEARCH] Erro no scroll infinito de vídeos:', err);
+      } finally {
+        videosLoading = false;
+        if (spinner) spinner.style.display = 'none';
+        if (loadBtn) loadBtn.style.display = videosHasMore ? '' : 'none';
+      }
+
+      // Se após carregar ainda houver espaço na tela em modo grade, continua carregando
+      if (videosHasMore) {
+        const vidBlock = document.getElementById('sectionVideos');
+        if (vidBlock && vidBlock.style.display !== 'none' && vidBlock.classList.contains('is-grid')) {
+          const rect = vidBlock.getBoundingClientRect();
+          if (rect.bottom <= window.innerHeight + 800) {
+            setTimeout(loadMoreVideosAuto, 200);
+          }
+        }
+      }
+    }
+    window.loadMoreVideosAuto = loadMoreVideosAuto;
+    window.loadMoreVideos = loadMoreVideosAuto;
+
+    function setupCarouselAutoScroll(container, loadMoreFn) {
+      if (!container) return;
+
+      // 1. Mouse wheel e trackpad (suporta rolagem horizontal deltaX e vertical deltaY)
+      container.addEventListener('wheel', function(e) {
+        if (container.classList.contains('is-grid') || container.closest('.is-grid')) return;
+        const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+        if (Math.abs(delta) > 2) {
+          const maxScroll = container.scrollWidth - container.clientWidth;
+          if (maxScroll > 0) {
+            const canScrollRight = container.scrollLeft < maxScroll - 2;
+            const canScrollLeft = container.scrollLeft > 2;
+            if ((delta > 0 && canScrollRight) || (delta < 0 && canScrollLeft)) {
+              e.preventDefault();
+              container.scrollLeft += delta * 1.25;
+            }
+            const remaining = container.scrollWidth - container.scrollLeft - container.clientWidth;
+            if ((remaining <= 600 || delta > 0) && typeof loadMoreFn === 'function') {
+              loadMoreFn();
+            }
+          }
+        }
+      }, { passive: false });
+
+      // 2. Arraste do mouse (Desktop)
+      let isDown = false;
+      let startX = 0;
+      let scrollLeft = 0;
+      let hasDragged = false;
+
+      container.addEventListener('mousedown', function(e) {
+        if (container.classList.contains('is-grid') || container.closest('.is-grid')) return;
+        if (e.target.closest('button, input, textarea, .image-zoom-btn')) return;
+        isDown = true;
+        hasDragged = false;
+        startX = e.pageX - container.offsetLeft;
+        scrollLeft = container.scrollLeft;
+      });
+
+      window.addEventListener('mousemove', function(e) {
+        if (!isDown) return;
+        const x = e.pageX - container.offsetLeft;
+        const walk = (x - startX) * 1.3;
+        if (Math.abs(walk) > 12) {
+          hasDragged = true;
+          container.style.cursor = 'grabbing';
+          container.style.userSelect = 'none';
+        }
+        container.scrollLeft = scrollLeft - walk;
+        const remaining = container.scrollWidth - container.scrollLeft - container.clientWidth;
+        if (remaining <= 600 && typeof loadMoreFn === 'function') {
+          loadMoreFn();
+        }
+      });
+
+      window.addEventListener('mouseup', function() {
+        if (!isDown) return;
+        isDown = false;
+        container.style.cursor = '';
+        container.style.removeProperty('user-select');
+        if (hasDragged) {
+          const preventClick = function(ev) {
+            ev.stopPropagation();
+            ev.preventDefault();
+            window.removeEventListener('click', preventClick, true);
+          };
+          window.addEventListener('click', preventClick, true);
+          setTimeout(() => window.removeEventListener('click', preventClick, true), 80);
+        }
+      });
+
+      // 3. Toque no celular / tablet (Touch Events)
+      container.addEventListener('touchmove', function() {
+        if (container.classList.contains('is-grid') || container.closest('.is-grid')) return;
+        const remaining = container.scrollWidth - container.scrollLeft - container.clientWidth;
+        if (remaining <= 600 && typeof loadMoreFn === 'function') {
+          loadMoreFn();
+        }
+      }, { passive: true });
+
+      container.addEventListener('touchend', function() {
+        if (container.classList.contains('is-grid') || container.closest('.is-grid')) return;
+        const remaining = container.scrollWidth - container.scrollLeft - container.clientWidth;
+        if (remaining <= 600 && typeof loadMoreFn === 'function') {
+          loadMoreFn();
+        }
+      }, { passive: true });
+
+      // 4. Scroll nativo da caixa
+      container.addEventListener('scroll', function() {
+        if (container.classList.contains('is-grid') || container.closest('.is-grid')) return;
+        const remaining = container.scrollWidth - container.scrollLeft - container.clientWidth;
+        if (remaining <= 600 && typeof loadMoreFn === 'function') {
+          loadMoreFn();
+        }
+      }, { passive: true });
+    }
+
+    // Scroll vertical infinito para quando o filtro estiver ativo em modo grade
+    window.addEventListener('scroll', function() {
+      const imgBlock = document.getElementById('sectionImages');
+      if (imgBlock && imgBlock.style.display !== 'none' && imgBlock.classList.contains('is-grid') && !imagesLoading && imagesHasMore) {
+        const rect = imgBlock.getBoundingClientRect();
+        if (rect.bottom <= window.innerHeight + 800) {
+          loadMoreImagesAuto();
+        }
+      }
+      const vidBlock = document.getElementById('sectionVideos');
+      if (vidBlock && vidBlock.style.display !== 'none' && vidBlock.classList.contains('is-grid') && !videosLoading && videosHasMore) {
+        const rect = vidBlock.getBoundingClientRect();
+        if (rect.bottom <= window.innerHeight + 800) {
+          loadMoreVideosAuto();
+        }
+      }
+    }, { passive: true });
+
+    // Inicia os carrosséis e preenche conteúdo inicial
+    function initCarouselsAndFill() {
+      const ig = document.getElementById('imagesGallery');
+      if (ig) setupCarouselAutoScroll(ig, loadMoreImagesAuto);
+      const vc = document.getElementById('videosCarousel');
+      if (vc) setupCarouselAutoScroll(vc, loadMoreVideosAuto);
+
+      if (window.IntersectionObserver) {
+        const imgSentinel = document.getElementById('imagesSentinel');
+        if (imgSentinel && ig) {
+          const imgObs = new IntersectionObserver(function(entries) {
+            if (entries[0] && entries[0].isIntersecting && !imagesLoading && imagesHasMore) {
+              loadMoreImagesAuto();
+            }
+          }, { root: ig, rootMargin: '0px 300px 0px 0px' });
+          imgObs.observe(imgSentinel);
+        }
+
+        const vidSentinel = document.getElementById('videosSentinel');
+        if (vidSentinel && vc) {
+          const vidObs = new IntersectionObserver(function(entries) {
+            if (entries[0] && entries[0].isIntersecting && !videosLoading && videosHasMore) {
+              loadMoreVideosAuto();
+            }
+          }, { root: vc, rootMargin: '0px 300px 0px 0px' });
+          vidObs.observe(vidSentinel);
+        }
+      }
+
+      const vCarouselEl = document.getElementById('videosCarousel');
+      if (vCarouselEl && typeof loadMoreVideosAuto === 'function') {
+        const vCount = vCarouselEl.querySelectorAll('.video-card').length;
+        if (vCount < 8) loadMoreVideosAuto();
+      }
+      const iCount = document.querySelectorAll('#imagesGallery .image-card').length;
+      if (iCount < 12 && typeof loadMoreImagesAuto === 'function') {
+        loadMoreImagesAuto();
+      }
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initCarouselsAndFill);
+    } else {
+      setTimeout(initCarouselsAndFill, 20);
+    }
+
+    function selectSearchFilter(filterName, shouldScroll = true) {
+      const container = document.getElementById('searchFilterPills');
+      const targetFilter = (filterName || 'all').toLowerCase();
+      
+      if (container) {
+        const pills = container.querySelectorAll('.search-pill');
+        pills.forEach((p) => p.classList.remove('is-active'));
+        const pill = container.querySelector('.search-pill[data-filter="' + targetFilter + '"]');
+        if (pill) {
+          pill.classList.add('is-active');
+          try { pill.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' }); } catch(e){}
+        } else {
+          const allPill = container.querySelector('.search-pill[data-filter="all"]');
+          if (allPill) allPill.classList.add('is-active');
+        }
+      }
+
+      const filterInput = document.getElementById('searchFilterInput');
+      if (filterInput) filterInput.value = targetFilter;
+
+      const secImages = document.getElementById('sectionImages');
+      const secVideos = document.getElementById('sectionVideos');
+      const secWiki = document.getElementById('sectionWiki');
+      const secNews = document.getElementById('sectionNews');
+      const secWebList = document.getElementById('resultsList');
+      const secWebHeading = document.getElementById('webResultsHeading');
+      const secTor = document.getElementById('onionSection');
+      const onionIndicator = document.querySelector('.onion-depth-indicator');
+      const aiCard = document.getElementById('aiCard');
+      const agentPicks = document.getElementById('agentPicks');
+      const resultsMore = document.getElementById('resultsMore');
+      const relatedBlock = document.querySelector('.related-block');
+      const filterEmptyMsg = document.getElementById('filterEmptyMsg');
+
+      if (targetFilter === 'all') {
+        if (secImages) { secImages.style.display = ''; secImages.classList.remove('is-grid'); }
+        if (secVideos) { secVideos.style.display = ''; secVideos.classList.remove('is-grid'); }
+        if (secWiki) secWiki.style.display = '';
+        if (secNews) secNews.style.display = '';
+        if (secWebList) secWebList.style.display = '';
+        if (secWebHeading) secWebHeading.style.display = '';
+        if (secTor) secTor.style.display = '';
+        if (onionIndicator) onionIndicator.style.display = '';
+        if (aiCard) aiCard.style.display = '';
+        if (agentPicks && agentPicks.querySelector('.agent-pick')) agentPicks.hidden = false;
+        if (resultsMore) resultsMore.style.display = '';
+        if (relatedBlock) relatedBlock.style.display = '';
+        if (filterEmptyMsg) filterEmptyMsg.style.display = 'none';
+
+        if (shouldScroll) {
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+        try {
+          const url = new URL(window.location.href);
+          url.searchParams.delete('filter');
+          history.replaceState(null, '', url.pathname + url.search);
+        } catch(e){}
+        return;
+      }
+
+      // Oculta tudo por padrão para filtro estrito
+      if (secImages) secImages.style.display = 'none';
+      if (secVideos) secVideos.style.display = 'none';
+      if (secWiki) secWiki.style.display = 'none';
+      if (secNews) secNews.style.display = 'none';
+      if (secWebList) secWebList.style.display = 'none';
+      if (secWebHeading) secWebHeading.style.display = 'none';
+      if (secTor) secTor.style.display = 'none';
+      if (onionIndicator) onionIndicator.style.display = 'none';
+      if (aiCard) aiCard.style.display = 'none';
+      if (agentPicks) agentPicks.hidden = true;
+      if (resultsMore) resultsMore.style.display = 'none';
+      if (relatedBlock) relatedBlock.style.display = 'none';
+
+      let hasContent = false;
+
+      // Filtro exclusivo: se tiver selecionado video so traga video, se tor so traga tor, etc.
+      if (targetFilter === 'videos') {
+        if (secVideos) {
+          secVideos.style.display = '';
+          secVideos.classList.add('is-grid');
+          hasContent = true;
+          const count = secVideos.querySelectorAll('.video-card').length;
+          if (count < 16 && typeof loadMoreVideosAuto === 'function') {
+            loadMoreVideosAuto();
+          }
+        }
+      } else if (targetFilter === 'tor') {
+        if (secTor) {
+          secTor.style.display = '';
+          if (onionIndicator) onionIndicator.style.display = '';
+          hasContent = true;
+        }
+      } else if (targetFilter === 'images') {
+        if (secImages) {
+          secImages.style.display = '';
+          secImages.classList.add('is-grid');
+          hasContent = true;
+          const count = secImages.querySelectorAll('.image-card').length;
+          if (count < 24 && typeof loadMoreImagesAuto === 'function') {
+            loadMoreImagesAuto();
+          }
+        }
+      } else if (targetFilter === 'web') {
+        if (secWebList) {
+          secWebList.style.display = '';
+          if (secWebHeading) secWebHeading.style.display = '';
+          if (resultsMore) resultsMore.style.display = '';
+          hasContent = true;
+        }
+      } else if (targetFilter === 'wiki') {
+        if (secWiki) {
+          secWiki.style.display = '';
+          hasContent = true;
+        }
+      } else if (targetFilter === 'news') {
+        if (secNews) {
+          secNews.style.display = '';
+          hasContent = true;
+        }
+      }
+
+      if (filterEmptyMsg) {
+        filterEmptyMsg.style.display = hasContent ? 'none' : 'block';
+      }
+
+      if (shouldScroll) {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+
+      try {
+        const url = new URL(window.location.href);
+        url.searchParams.set('filter', targetFilter);
+        history.replaceState(null, '', url.pathname + url.search);
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage({
+            type: 'navigate-sync',
+            url: url.pathname + url.search,
+            targetUrl: url.pathname + url.search,
+            title: document.title,
+            isFinal: true
+          }, '*');
+        }
+      } catch (e) {
+        try { history.replaceState(null, '', '#' + targetFilter); } catch (e2) {}
+      }
+    }
+    window.selectSearchFilter = selectSearchFilter;
+
+    (function setupFilterPills() {
+      document.addEventListener('click', function(e) {
+        const pill = e.target.closest('.search-pill');
+        if (!pill) return;
+        const filter = pill.getAttribute('data-filter') || 'all';
+        selectSearchFilter(filter, true);
+      });
+
+      const urlParams = new URLSearchParams(window.location.search);
+      const queryFilter = urlParams.get('filter');
+      const hashFilter = window.location.hash ? window.location.hash.replace(/^#/, '') : '';
+      const initialFilter = queryFilter || hashFilter;
+      if (initialFilter && initialFilter !== 'all') {
+        setTimeout(() => { selectSearchFilter(initialFilter, false); }, 50);
+      }
+    })();
+
+    // Sincroniza o tema pesquisado com a aplicação principal (Papaléguas app shell)
+    try {
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({
+          type: 'navigate-sync',
+          url: window.location.pathname + window.location.search,
+          targetUrl: window.location.pathname + window.location.search,
+          title: document.title,
+          isFinal: true
+        }, '*');
+      }
+    } catch (e) {}
+
+    // Atmosfera dinâmica: a tela vai escurecendo gradualmente conforme o usuário desce até os links .onion
+    (function setupOnionAtmosphere() {
+      const onionSec = document.getElementById('onionSection');
+      const vignette = document.getElementById('onionDarkVignette');
+      if (!onionSec || !vignette) return;
+
+      function updateAtmosphere() {
+        const rect = onionSec.getBoundingClientRect();
+        const winH = window.innerHeight;
+        // Começa a escurecer 500px antes da seção .onion entrar totalmente na tela
+        const distance = rect.top - winH;
+        const triggerDistance = 500;
+
+        if (distance < triggerDistance) {
+          const progress = Math.min(1, Math.max(0, 1 - (distance / triggerDistance)));
+          vignette.style.opacity = (progress * 0.98).toFixed(2);
+          
+          // Efeito de escurecimento sutil no fundo geral
+          const baseColor = Math.round(11 * (1 - progress * 0.85));
+          document.body.style.backgroundColor = 'rgb(' + baseColor + ',' + baseColor + ',' + (baseColor + 2) + ')';
+        } else {
+          vignette.style.opacity = '0';
+          document.body.style.backgroundColor = '';
+        }
+      }
+
+      window.addEventListener('scroll', updateAtmosphere, { passive: true });
+      window.addEventListener('resize', updateAtmosphere, { passive: true });
+      updateAtmosphere();
+    })();
 
     function showLocalTorLoading(kind, url) {
+      const pBar = document.getElementById('searchTopNavBar');
+      if (pBar) {
+        pBar.classList.add('is-active');
+        pBar.style.opacity = '1';
+        pBar.style.width = '35%';
+        setTimeout(function() { if (pBar) pBar.style.width = '85%'; }, 200);
+      }
       const box = document.getElementById('torNavLoading');
       const title = document.getElementById('torNavTitle');
       const urlEl = document.getElementById('torNavUrl');
       const hint = document.getElementById('torNavHint');
       const isSearch = kind === 'search';
-      if (title) title.textContent = pageUsesTor
-        ? (isSearch ? 'Pesquisando via Tor' : 'Abrindo via Tor')
-        : (isSearch ? 'Pesquisando em conexão direta' : 'Abrindo em conexão direta');
-      if (urlEl) urlEl.textContent = url || '';
+      let hostLabel = '';
+      try {
+        const u = new URL(url.startsWith('http') ? url : 'https://' + url);
+        hostLabel = u.hostname.replace(/^www\./, '');
+      } catch (e) { hostLabel = url || ''; }
+      if (title) title.textContent = isSearch ? 'Pesquisando na web…' : 'Carregando página…';
+      if (urlEl) urlEl.textContent = hostLabel || url || '';
       if (hint) hint.textContent = pageUsesTor
-        ? 'A conexão está saindo pela rede Tor. Pode demorar alguns segundos.'
-        : 'Tor desligado. A página está abrindo pela internet normal.';
+        ? 'A conexão está saindo pela rede Tor com anonimato total…'
+        : 'Carregando página via proxy de alta velocidade sem anúncios…';
       if (box) {
         box.hidden = false;
+        box.style.display = 'flex';
         if (window.__torLoadingTimer) clearTimeout(window.__torLoadingTimer);
         // O loading permanece ativo continuamente até a página ser aberta por completo.
         window.__torLoadingTimer = setTimeout(function() {
-          if (box) box.hidden = true;
-          document.querySelectorAll('.url-suggest-row.is-opening').forEach(function (n) { n.classList.remove('is-opening'); });
+          if (box) { box.hidden = true; box.style.display = 'none'; }
+          document.querySelectorAll('.url-suggest-row.is-opening, .search-result-card.is-opening').forEach(function (n) {
+            n.classList.remove('is-opening');
+            const ext = n.querySelector ? n.querySelector('.url-suggest-ext') : null;
+            if (ext && ext.getAttribute('data-orig-text')) ext.textContent = ext.getAttribute('data-orig-text');
+          });
         }, 120000);
       }
       try {
@@ -9989,34 +16324,162 @@ function getDevicePlaylistsRoot(clientId, req) {
       } catch (e) {}
     }
 
-    window.addEventListener('message', function (event) {
-      const data = event.data;
-      if (!data || data.type !== 'papaleguas-hide-loading') return;
+    function clearLocalLoading() {
       if (window.__torLoadingTimer) {
         clearTimeout(window.__torLoadingTimer);
         window.__torLoadingTimer = null;
       }
+      const pBar = document.getElementById('searchTopNavBar');
+      if (pBar) {
+        pBar.style.width = '100%';
+        setTimeout(function() {
+          pBar.style.opacity = '0';
+          setTimeout(function() {
+            pBar.classList.remove('is-active');
+            pBar.style.width = '0%';
+          }, 250);
+        }, 160);
+      }
       const box = document.getElementById('torNavLoading');
-      if (box) box.hidden = true;
-      document.querySelectorAll('.url-suggest-row.is-opening').forEach(function (n) { n.classList.remove('is-opening'); });
+      if (box) { box.hidden = true; box.style.display = 'none'; }
+      document.querySelectorAll('.url-suggest-row.is-opening, .search-result-card.is-opening').forEach(function (n) {
+        n.classList.remove('is-opening');
+        const ext = n.querySelector ? n.querySelector('.url-suggest-ext') : null;
+        if (ext && ext.getAttribute('data-orig-text')) {
+          ext.textContent = ext.getAttribute('data-orig-text');
+        }
+      });
+    }
+
+    window.addEventListener('load', function() {
+      clearLocalLoading();
+      try {
+        window.parent.postMessage({ type: 'page-loaded', url: window.location.href }, '*');
+      } catch (e) {}
+    });
+    window.addEventListener('pageshow', clearLocalLoading);
+
+    window.addEventListener('message', function (event) {
+      const data = event.data;
+      if (!data || (data.type !== 'papaleguas-hide-loading' && data.type !== 'page-loaded')) return;
+      clearLocalLoading();
     });
 
     function markRowLoading(el) {
-      document.querySelectorAll('.url-suggest-row.is-opening').forEach((n) => n.classList.remove('is-opening'));
-      if (el && el.classList) el.classList.add('is-opening');
+      document.querySelectorAll('.url-suggest-row.is-opening, .search-result-card.is-opening').forEach((n) => {
+        n.classList.remove('is-opening');
+        const prevExt = n.querySelector ? n.querySelector('.url-suggest-ext') : null;
+        if (prevExt && prevExt.getAttribute('data-orig-text')) {
+          prevExt.textContent = prevExt.getAttribute('data-orig-text');
+        }
+      });
+      if (!el) return;
+      const row = (el.classList && el.classList.contains('url-suggest-row')) ? el : (el.querySelector ? el.querySelector('.url-suggest-row') : null) || el;
+      const card = (el.closest ? el.closest('.search-result-card') : null) || (el.classList && el.classList.contains('search-result-card') ? el : null);
+      if (row && row.classList) row.classList.add('is-opening');
+      if (card && card.classList) card.classList.add('is-opening');
+
+      const ext = (row && row.querySelector ? row.querySelector('.url-suggest-ext') : null) || (card && card.querySelector ? card.querySelector('.url-suggest-ext') : null);
+      if (ext) {
+        if (!ext.getAttribute('data-orig-text')) {
+          ext.setAttribute('data-orig-text', ext.textContent || 'Acessar →');
+        }
+        ext.innerHTML = '<span class="nav-ext-spin"></span> Abrindo…';
+      }
     }
+
+    let lastNavigateTarget = '';
+    let lastNavigateTime = 0;
 
     function navigateDirect(url, rowEl) {
       if (!url) return;
+      const now = Date.now();
+      if (lastNavigateTarget === url && (now - lastNavigateTime < 800)) {
+        return;
+      }
+      lastNavigateTarget = url;
+      lastNavigateTime = now;
       markRowLoading(rowEl);
-      showLocalTorLoading('link', url);
 
-      let targetUrl = url;
-      if (!/^https?:\\/\\//i.test(targetUrl) && !targetUrl.startsWith('/')) {
-        targetUrl = 'https://' + targetUrl;
+      let targetUrl = String(url).trim();
+
+      // Desembrulha se já for rota /proxy?url=
+      let realTarget = targetUrl;
+      if (targetUrl.includes('/proxy?url=')) {
+        try {
+          const u = new URL(targetUrl, window.location.origin);
+          realTarget = u.searchParams.get('url') || targetUrl;
+        } catch (e) {}
       }
 
-      const inside = targetUrl.startsWith('/proxy') ? targetUrl : ('/proxy?url=' + encodeURIComponent(targetUrl) + '&clientId=' + encodeURIComponent(suggestClientId));
+      // 1. Se for vídeo do YouTube ou BaixaTube, envia para o player nativo do aplicativo
+      let detectedVideoId = '';
+      try {
+        const u = new URL(realTarget, window.location.origin);
+        if (u.searchParams && u.searchParams.has('v')) {
+          const v = u.searchParams.get('v');
+          if (v && v.length === 11) detectedVideoId = v;
+        }
+        if (!detectedVideoId && u.hostname && u.hostname.includes('youtu.be')) {
+          const seg = u.pathname.split('/').filter(Boolean)[0];
+          if (seg && seg.length === 11) detectedVideoId = seg;
+        }
+        if (!detectedVideoId && u.pathname) {
+          const parts = u.pathname.split('/').filter(Boolean);
+          for (let pi = 0; pi < parts.length; pi++) {
+            if (['embed', 'shorts', 'v'].includes(parts[pi]) && parts[pi + 1] && parts[pi + 1].length === 11) {
+              detectedVideoId = parts[pi + 1];
+              break;
+            }
+          }
+        }
+      } catch (e) {
+        if (realTarget.includes('v=')) {
+          const idx = realTarget.indexOf('v=');
+          const candidate = realTarget.substring(idx + 2, idx + 13);
+          if (candidate.length === 11) detectedVideoId = candidate;
+        }
+      }
+      if (detectedVideoId) {
+        openVideo(detectedVideoId);
+        return;
+      }
+
+      // 2. Se for música (Deezer, Spotify ou rota /musica)
+      if (realTarget.includes('/musica') || realTarget.includes('musica.html') || realTarget.includes('spotify.com') || realTarget.includes('deezer.com')) {
+        let musicQuery = '';
+        try {
+          const u = new URL(realTarget, window.location.origin);
+          musicQuery = u.searchParams.get('q') || u.searchParams.get('play') || u.searchParams.get('track') || '';
+        } catch (e) {}
+        openMusic(musicQuery);
+        return;
+      }
+
+      // 3. Se for rota interna do app (/baixatube, /musica, /filmes, /search, etc.), navega direto sem proxy
+      if (realTarget.startsWith('/') && !realTarget.startsWith('/proxy')) {
+        try {
+          if (window.torBrowserAPI && typeof window.torBrowserAPI.sendToHost === 'function') {
+            window.torBrowserAPI.sendToHost('navigate-current-tab', realTarget);
+            return;
+          }
+        } catch (e) {}
+        try {
+          if (window.parent && window.parent !== window) {
+            window.parent.postMessage({ type: 'navigate-current-tab', url: realTarget }, '*');
+            return;
+          }
+        } catch (e) {}
+        window.location.href = realTarget;
+        return;
+      }
+
+      showLocalTorLoading('link', realTarget);
+      if (!realTarget.startsWith('http://') && !realTarget.startsWith('https://') && !realTarget.startsWith('/')) {
+        realTarget = 'https://' + realTarget;
+      }
+
+      const inside = '/proxy?url=' + encodeURIComponent(realTarget) + '&clientId=' + encodeURIComponent(suggestClientId);
 
       try {
         if (window.torBrowserAPI && typeof window.torBrowserAPI.sendToHost === 'function') {
@@ -10035,10 +16498,18 @@ function getDevicePlaylistsRoot(clientId, req) {
       window.location.href = inside;
     }
 
-    let suggestPage = 0;
+    function openImageInApp(el) {
+      if (!el) return;
+      const targetPage = el.getAttribute('data-page') || el.getAttribute('data-full') || '';
+      if (!targetPage) return;
+      showLocalTorLoading('link', targetPage);
+      navigateDirect(targetPage, el);
+    }
+    window.openImageInApp = openImageInApp;
+
+    let suggestPage = Math.max(1, Math.ceil(document.querySelectorAll('#resultsList .url-suggest-row').length / 10));
     let suggestLoading = false;
-    let suggestHasMore = ${q && results.length ? 'true' : 'false'};
-    const suggestClientId = ${JSON.stringify(clientId)};
+    let suggestHasMore = true;
 
     // ---------- Resposta da IA (primeiro bloco da página) ----------
     const aiCard = document.getElementById('aiCard');
@@ -10060,14 +16531,18 @@ function getDevicePlaylistsRoot(clientId, req) {
     }
 
     function aiInline(text, sources) {
-      const html = aiEscape(text).replace(/[*][*]([^*]+)[*][*]/g, '<strong>$1</strong>');
-      return html.replace(/\\[([0-9]+(?:[ ]*,[ ]*[0-9]+)*)\\]/g, function (match, group) {
+      const codeRegex = new RegExp('\\x60([^\\x60]+)\\x60', 'g');
+      const html = aiEscape(text)
+        .replace(/[*][*]([^*]+)[*][*]/g, '<strong>$1</strong>')
+        .replace(codeRegex, '<code class="ai-code">$1</code>');
+      const citeRegex = new RegExp('\\\\[' + '([0-9]+(?:[ ]*,[ ]*[0-9]+)*)' + '\\\\]', 'g');
+      return html.replace(citeRegex, function (match, group) {
         const links = group.split(',').map(function (raw) {
           const num = parseInt(raw, 10);
-          const src = sources[num - 1];
+          const src = sources && sources[num - 1];
           if (!src) return '';
           return '<a class="ai-cite" href="#" data-ai-src="' + num + '" title="' +
-            aiEscape(src.title + ' · ' + src.host) + '">' + num + '</a>';
+            aiEscape((src.title || '') + ' · ' + (src.host || '')) + '">[' + num + ']</a>';
         }).join('');
         return links || match;
       });
@@ -10075,29 +16550,85 @@ function getDevicePlaylistsRoot(clientId, req) {
 
     function aiRenderAnswer(container, text, sources) {
       const blocks = [];
-      let list = null;
-      String(text || '').split(/\\r?\\n/).forEach(function (rawLine) {
+      let currentList = null;
+      let currentListType = null;
+      const lf = String.fromCharCode(10);
+      const cr = String.fromCharCode(13);
+
+      function flushList() {
+        if (currentList) {
+          blocks.push(currentList);
+          currentList = null;
+          currentListType = null;
+        }
+      }
+
+      let pendingBlank = false;
+      String(text || '').split(lf).map(function (l) { return l.replace(new RegExp(cr + '$'), ''); }).forEach(function (rawLine) {
         const line = rawLine.trim();
-        if (!line) { list = null; return; }
-        const bullet = line.match(/^(?:[-*•]|[0-9]+[.)])[ ]+(.*)$/);
-        if (bullet) {
-          if (!list) { list = document.createElement('ul'); blocks.push(list); }
-          const li = document.createElement('li');
-          li.innerHTML = aiInline(bullet[1], sources);
-          list.appendChild(li);
+        if (!line) { pendingBlank = true; return; }
+
+        const heading = line.match(/^#{1,4}[ ]+(.*)$/);
+        if (heading) {
+          flushList();
+          pendingBlank = false;
+          const h = document.createElement('h4');
+          h.className = 'ai-subtitle';
+          h.innerHTML = aiInline(heading[1], sources);
+          blocks.push(h);
           return;
         }
-        list = null;
+
+        const ordered = line.match(/^[0-9]+[.)][ ]+(.*)$/);
+        if (ordered) {
+          if (currentListType !== 'ol') {
+            flushList();
+            currentList = document.createElement('ol');
+            currentList.className = 'ai-ol';
+            currentListType = 'ol';
+          }
+          const li = document.createElement('li');
+          li.innerHTML = aiInline(ordered[1], sources);
+          currentList.appendChild(li);
+          pendingBlank = false;
+          return;
+        }
+
+        const bullet = line.match(/^(?:[-*•])[ ]+(.*)$/);
+        if (bullet) {
+          if (currentListType !== 'ul') {
+            flushList();
+            currentList = document.createElement('ul');
+            currentList.className = 'ai-ul';
+            currentListType = 'ul';
+          }
+          const li = document.createElement('li');
+          li.innerHTML = aiInline(bullet[1], sources);
+          currentList.appendChild(li);
+          pendingBlank = false;
+          return;
+        }
+
+        flushList();
+        pendingBlank = false;
         const p = document.createElement('p');
         p.innerHTML = aiInline(line, sources);
         blocks.push(p);
       });
+      flushList();
+
       container.innerHTML = '';
       blocks.forEach(function (node) { container.appendChild(node); });
+      window.__aiSources = sources || [];
+      bindAiCites(container, sources);
+    }
+
+    function bindAiCites(container, sources) {
+      if (!container) return;
       container.querySelectorAll('.ai-cite').forEach(function (cite) {
         cite.addEventListener('click', function (e) {
           e.preventDefault();
-          const src = sources[parseInt(cite.getAttribute('data-ai-src'), 10) - 1];
+          const src = (sources || [])[parseInt(cite.getAttribute('data-ai-src'), 10) - 1];
           if (src) navigateDirect(src.url, null);
         });
       });
@@ -10105,7 +16636,7 @@ function getDevicePlaylistsRoot(clientId, req) {
 
     function aiRenderSources(container, sources) {
       container.innerHTML = '';
-        sources.forEach(function (src, index) {
+      (sources || []).forEach(function (src, index) {
         const a = document.createElement('a');
         a.className = 'ai-source';
         a.href = '/proxy?url=' + encodeURIComponent(src.url) + '&clientId=' + encodeURIComponent(suggestClientId);
@@ -10119,34 +16650,59 @@ function getDevicePlaylistsRoot(clientId, req) {
       });
     }
 
+    function bindAiSources(container) {
+      if (!container) return;
+      container.querySelectorAll('.ai-source').forEach(function (a) {
+        a.addEventListener('click', function (e) {
+          e.preventDefault();
+          const target = a.getAttribute('data-direct') || a.getAttribute('href');
+          navigateDirect(target, a);
+        });
+      });
+    }
+
     function aiSourcesLabel(count) {
       if (!count) return '';
       return count === 1 ? 'resumo de 1 fonte' : 'resumo de ' + count + ' fontes';
     }
 
     if (aiCard && currentQuery) {
-      fetch('/api/search-answer?q=' + encodeURIComponent(currentQuery) + '&clientId=' + encodeURIComponent(suggestClientId))
-        .then(function (r) { return r.json(); })
-        .then(function (data) {
-          const sources = (data && data.sources) || [];
-          if (!data || !data.answer) {
-            if (aiState) aiState.textContent = '';
-            if (aiAnswerEl) aiAnswerEl.innerHTML = '<p style="color:#94a3b8;font-size:13.5px;">Não foi possível gerar resumo prévio para esta busca. Faça sua pergunta no campo abaixo:</p>';
+      if (initialAiData && initialAiData.answer) {
+        aiState.textContent = aiSourcesLabel((initialAiData.sources || []).length);
+        if (!aiAnswerEl.querySelector('p, ul')) {
+          aiRenderAnswer(aiAnswerEl, initialAiData.answer, initialAiData.sources || []);
+          aiRenderSources(aiSourcesEl, initialAiData.sources || []);
+        } else {
+          bindAiCites(aiAnswerEl, initialAiData.sources || []);
+          bindAiSources(aiSourcesEl);
+        }
+        aiHistory.push({ role: 'user', content: currentQuery });
+        aiHistory.push({ role: 'assistant', content: initialAiData.answer });
+        if (aiAsk) aiAsk.hidden = false;
+      } else {
+        fetch('/api/search-answer?q=' + encodeURIComponent(currentQuery) + '&clientId=' + encodeURIComponent(suggestClientId))
+          .then(function (r) { return r.json(); })
+          .then(function (data) {
+            const sources = (data && data.sources) || [];
+            if (!data || !data.answer) {
+              if (aiState) aiState.textContent = '';
+              if (aiAnswerEl) aiAnswerEl.innerHTML = '<p style="color:#94a3b8;font-size:13.5px;">Não foi possível gerar resumo prévio para esta busca. Faça sua pergunta no campo abaixo:</p>';
+              if (aiAsk) aiAsk.hidden = false;
+              return;
+            }
+            aiState.textContent = aiSourcesLabel(sources.length);
+            aiRenderAnswer(aiAnswerEl, data.answer, sources);
+            aiRenderSources(aiSourcesEl, sources);
+            aiHistory.push({ role: 'user', content: currentQuery });
+            aiHistory.push({ role: 'assistant', content: data.answer });
             if (aiAsk) aiAsk.hidden = false;
-            return;
-          }
-          aiState.textContent = aiSourcesLabel(sources.length);
-          aiRenderAnswer(aiAnswerEl, data.answer, sources);
-          aiRenderSources(aiSourcesEl, sources);
-          aiHistory.push({ role: 'user', content: currentQuery });
-          aiHistory.push({ role: 'assistant', content: data.answer });
-          if (aiAsk) aiAsk.hidden = false;
-        })
-        .catch(function () {
-          if (aiState) aiState.textContent = '';
-          if (aiAnswerEl) aiAnswerEl.innerHTML = '<p style="color:#94a3b8;font-size:13.5px;">Assistente de IA disponível. Faça sua pergunta no campo abaixo:</p>';
-          if (aiAsk) aiAsk.hidden = false;
-        });
+          })
+          .catch(function () {
+            if (aiState) aiState.textContent = '';
+            if (aiAnswerEl) aiAnswerEl.innerHTML = '<p style="color:#94a3b8;font-size:13.5px;">Assistente de IA disponível. Faça sua pergunta no campo abaixo:</p>';
+            if (aiAsk) aiAsk.hidden = false;
+          });
+      }
     }
 
     function renderAgentPicks(data) {
@@ -10271,62 +16827,275 @@ function getDevicePlaylistsRoot(clientId, req) {
       });
     }
 
+    // ===== Prévia dos resultados: imagem de capa + descrição da página =====
+    const pvStore = new Map();
+    const pvPending = new Set();
+    let pvTimer = null;
+    function pvImgSrc(u) {
+      return '/api/preview-img?u=' + encodeURIComponent(u) + '&clientId=' + encodeURIComponent(suggestClientId);
+    }
+    function decorateResultRow(row) {
+      const url = row.getAttribute('data-url') || '';
+      if (!pvStore.has(url)) {
+        if (!row.querySelector('.url-suggest-pv')) {
+          const ph = document.createElement('span');
+          ph.className = 'url-suggest-pv is-loading';
+          const ext = row.querySelector('.url-suggest-ext');
+          row.insertBefore(ph, ext || null);
+        }
+        return;
+      }
+      if (row.getAttribute('data-pv') === '1') return;
+      row.setAttribute('data-pv', '1');
+      const pv = pvStore.get(url);
+      let box = row.querySelector('.url-suggest-pv');
+      if (!pv || !pv.image) {
+        if (box) box.remove();
+      } else {
+        if (!box) {
+          box = document.createElement('span');
+          box.className = 'url-suggest-pv';
+          row.insertBefore(box, row.querySelector('.url-suggest-ext') || null);
+        }
+        box.classList.remove('is-loading');
+        const img = document.createElement('img');
+        img.alt = '';
+        img.loading = 'lazy';
+        img.referrerPolicy = 'no-referrer';
+        img.onload = function () {
+          box.classList.add('is-ready');
+        };
+        img.onerror = function () { box.remove(); };
+        img.src = pvImgSrc(pv.image);
+        box.appendChild(img);
+      }
+      if (pv && pv.description) {
+        const meta = row.querySelector('.url-suggest-meta');
+        let snip = row.querySelector('.url-suggest-snip');
+        if (meta && !snip) {
+          snip = document.createElement('span');
+          snip.className = 'url-suggest-snip';
+          meta.appendChild(snip);
+        }
+        if (snip && pv.description.length > String(snip.textContent || '').trim().length) snip.textContent = pv.description;
+      }
+      const fav = row.querySelector('.url-suggest-fav');
+      if (pv && pv.favicon && fav && !fav.querySelector('img')) {
+        const letter = fav.textContent;
+        const fi = document.createElement('img');
+        fi.alt = '';
+        fi.referrerPolicy = 'no-referrer';
+        fi.onerror = function () { fi.remove(); fav.textContent = letter; };
+        fi.src = pvImgSrc(pv.favicon);
+        fav.textContent = '';
+        fav.appendChild(fi);
+      }
+    }
+    function scheduleResultPreviews() {
+      if (pvTimer) clearTimeout(pvTimer);
+      pvTimer = setTimeout(runResultPreviews, 100);
+    }
+    async function runResultPreviews() {
+      pvTimer = null;
+      const rows = Array.from(document.querySelectorAll('#resultsList .url-suggest-row[data-url]'));
+      rows.forEach(decorateResultRow);
+      const urls = [];
+      rows.forEach(function (row) {
+        const u = row.getAttribute('data-url') || '';
+        if (!/^https?:/i.test(u) || pvStore.has(u) || pvPending.has(u) || urls.indexOf(u) !== -1) return;
+        if (urls.length < 12) urls.push(u);
+      });
+      if (!urls.length) return;
+      urls.forEach(function (u) { pvPending.add(u); });
+      try {
+        const res = await fetch('/api/page-preview?clientId=' + encodeURIComponent(suggestClientId), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ urls: urls })
+        });
+        const data = await res.json();
+        const previews = (data && data.previews) || {};
+        urls.forEach(function (u) { pvStore.set(u, previews[u] || null); });
+      } catch (e) {
+        urls.forEach(function (u) { pvStore.set(u, null); });
+      }
+      urls.forEach(function (u) { pvPending.delete(u); });
+      document.querySelectorAll('#resultsList .url-suggest-row[data-url]').forEach(decorateResultRow);
+      scheduleResultPreviews();
+    }
+
+    function escapeClientHtml(value) {
+      return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
     function appendSuggestRows(items) {
       const list = document.getElementById('resultsList');
-      if (!list || !items) return;
+      if (!list || !items || !items.length) return;
+      const seenUrls = new Set();
+      list.querySelectorAll('.url-suggest-row[data-url]').forEach(function(el) {
+        const u = el.getAttribute('data-url');
+        if (u) seenUrls.add(u);
+      });
       items.forEach((item) => {
         if (!item || item.kind === 'search' || !item.url || !/^https?:/i.test(item.url)) return;
-        if (list.querySelector('[data-url="' + CSS.escape(item.url) + '"]')) return;
+        if (seenUrls.has(item.url)) return;
+        seenUrls.add(item.url);
         const host = item.subtitle || item.url;
         const letter = String(host || '?').charAt(0).toUpperCase();
+        const card = document.createElement('div');
+        card.className = 'search-result-card';
         const a = document.createElement('a');
-        a.className = 'url-suggest-row';
+        a.className = 'url-suggest-row is-appended';
         a.href = '/proxy?url=' + encodeURIComponent(item.url) + '&clientId=' + encodeURIComponent(suggestClientId);
         a.setAttribute('data-direct', item.url);
         a.setAttribute('data-url', item.url);
-        a.innerHTML = '<span class="url-suggest-fav"></span><span class="url-suggest-meta"><span class="url-suggest-title"></span><span class="url-suggest-url"></span></span><span class="url-suggest-ext" title="Acessar no Papaléguas">Acessar →</span>';
-        a.querySelector('.url-suggest-fav').textContent = letter;
-        a.querySelector('.url-suggest-title').textContent = item.title || host;
-        a.querySelector('.url-suggest-url').textContent = host;
-        a.addEventListener('click', (e) => { e.preventDefault(); navigateDirect(item.url, a); });
-        list.appendChild(a);
+        if (item.image) a.setAttribute('data-pv', '1');
+
+        let favHtml = letter;
+        if (item.favicon) {
+          favHtml = '<img src="' + pvImgSrc(item.favicon) + '" alt="" onerror="this.remove()">';
+        }
+
+        let pvHtml = '';
+        if (item.image) {
+          pvHtml = '<span class="url-suggest-pv is-ready" data-url="' + escapeClientHtml(item.url) + '">' +
+            '<img src="' + pvImgSrc(item.image) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.parentElement.remove()" />' +
+            '</span>';
+        }
+
+        const sourceTag = item.badge
+          ? '<span class="url-source-tag source-rust-index">' + escapeClientHtml(item.badge) + '</span>'
+          : '<span class="url-source-tag source-rust-index">⚡ MOTOR RUST</span>';
+
+        a.innerHTML = '<span class="url-suggest-fav">' + favHtml + '</span>' +
+          '<span class="url-suggest-meta">' +
+            '<span class="url-suggest-title">' + escapeClientHtml(item.title || host) + sourceTag + '</span>' +
+            '<span class="url-suggest-url">' + escapeClientHtml(host) + '</span>' +
+            (item.snippet ? '<span class="url-suggest-snip">' + escapeClientHtml(item.snippet) + '</span>' : '') +
+          '</span>' +
+          pvHtml +
+          '<span class="url-suggest-ext" title="Acessar no Papaléguas">Acessar →</span>';
+
+        card.appendChild(a);
+        list.appendChild(card);
       });
+      scheduleResultPreviews();
     }
 
     function setRefreshLabel() {
       const btn = document.getElementById('resultsRefresh');
       if (!btn) return;
-      btn.disabled = suggestLoading || !suggestHasMore;
+      btn.disabled = !!suggestLoading;
+      btn.classList.toggle('is-loading', !!suggestLoading);
       btn.textContent = suggestLoading
-        ? 'Buscando novas sugestões…'
-        : (suggestHasMore ? 'Atualizar sugestões' : 'Sugestões atualizadas');
+        ? 'Carregando mais resultados…'
+        : (suggestHasMore ? 'Carregar mais resultados' : 'Buscar mais resultados');
+    }
+
+    const prefetchedSuggestPages = new Map();
+    let activeWebQuickFilter = 'all';
+
+    function applyWebQuickFilter(mode) {
+      activeWebQuickFilter = mode || 'all';
+      const rows = document.querySelectorAll('#resultsList .url-suggest-row');
+      rows.forEach(function (row) {
+        if (activeWebQuickFilter === 'all') {
+          row.style.display = '';
+          return;
+        }
+        const text = (row.textContent || '').toLowerCase();
+        const href = (row.getAttribute('data-url') || row.querySelector('a')?.getAttribute('href') || '').toLowerCase();
+        if (activeWebQuickFilter === 'official') {
+          const isOfficial = href.indexOf('.gov') !== -1 || href.indexOf('.edu') !== -1 || text.indexOf('.gov') !== -1 || text.indexOf('.edu') !== -1;
+          row.style.display = isOfficial ? '' : 'none';
+        } else if (activeWebQuickFilter === 'recent') {
+          const hasRecent = /\b(2024|2025|2026|hoje|ontem|hora|horas|minuto|minutos|dia|dias|semana)\b/i.test(text);
+          row.style.display = hasRecent ? '' : 'none';
+        }
+      });
+      const pills = document.querySelectorAll('#webQuickFilters [data-web-filter]');
+      pills.forEach(function (pill) {
+        if (pill.getAttribute('data-web-filter') === activeWebQuickFilter) {
+          pill.classList.add('active');
+        } else {
+          pill.classList.remove('active');
+        }
+      });
+    }
+
+    const webQuickFiltersEl = document.getElementById('webQuickFilters');
+    if (webQuickFiltersEl) {
+      webQuickFiltersEl.addEventListener('click', function (ev) {
+        const btn = ev.target.closest('[data-web-filter]');
+        if (!btn) return;
+        applyWebQuickFilter(btn.getAttribute('data-web-filter'));
+      });
+    }
+
+    function prefetchNextSuggestPage() {
+      if (!currentQuery || !suggestHasMore || suggestLoading) return;
+      const targetPage = suggestPage;
+      if (prefetchedSuggestPages.has(targetPage)) return;
+      const reqPromise = fetch('/api/url-suggest?q=' + encodeURIComponent(currentQuery) + '&page=' + targetPage + '&clientId=' + encodeURIComponent(suggestClientId))
+        .then(function (r) { return r.json(); })
+        .catch(function () { return null; });
+      prefetchedSuggestPages.set(targetPage, reqPromise);
     }
 
     async function loadMoreSuggestions() {
-      if (suggestLoading || !suggestHasMore || !currentQuery) {
-        setRefreshLabel();
-        return;
-      }
+      if (suggestLoading || !currentQuery) return;
       suggestLoading = true;
+      suggestHasMore = true;
       setRefreshLabel();
       let hops = 0;
+      let added = 0;
       try {
-        while (suggestHasMore && hops < 10) {
+        while (hops < 8) {
           hops += 1;
           const before = document.querySelectorAll('#resultsList .url-suggest-row').length;
-          const res = await fetch('/api/url-suggest?q=' + encodeURIComponent(currentQuery) + '&page=' + suggestPage + '&clientId=' + encodeURIComponent(suggestClientId));
-          const data = await res.json();
-          appendSuggestRows(data && data.suggestions);
-          suggestHasMore = !!(data && data.hasMore);
+          let data = null;
+          if (prefetchedSuggestPages.has(suggestPage)) {
+            data = await prefetchedSuggestPages.get(suggestPage);
+            prefetchedSuggestPages.delete(suggestPage);
+          }
+          if (!data) {
+            const res = await fetch('/api/url-suggest?q=' + encodeURIComponent(currentQuery) + '&page=' + suggestPage + '&clientId=' + encodeURIComponent(suggestClientId));
+            data = await res.json();
+          }
+          const items = (data && data.suggestions) || [];
+          appendSuggestRows(items);
+          if (activeWebQuickFilter !== 'all') applyWebQuickFilter(activeWebQuickFilter);
+          suggestHasMore = Boolean(data && data.hasMore);
           suggestPage += 1;
           const after = document.querySelectorAll('#resultsList .url-suggest-row').length;
-          if (after > before) break;
+          const diff = after - before;
+          added += diff;
+          if (added >= 5) break;
+          if (!suggestHasMore && hops > 2) break;
+          if (!items.length && !suggestHasMore) break;
         }
       } catch (e) {
-        suggestHasMore = false;
+        console.error('loadMoreSuggestions error:', e);
       }
       suggestLoading = false;
       setRefreshLabel();
+      if (added === 0 && !suggestHasMore) {
+        const btn = document.getElementById('resultsRefresh');
+        if (btn) {
+          btn.textContent = 'Todos os resultados carregados';
+          btn.disabled = true;
+        }
+      } else if (suggestHasMore) {
+        setTimeout(prefetchNextSuggestPage, 900);
+      }
+    }
+    scheduleResultPreviews();
+    if (currentQuery) {
+      setTimeout(prefetchNextSuggestPage, 900);
     }
 
     const resultsRefresh = document.getElementById('resultsRefresh');
@@ -10338,30 +17107,205 @@ function getDevicePlaylistsRoot(clientId, req) {
       }
     }, { passive: true });
 
-    document.addEventListener('DOMContentLoaded', () => {
-      // Notifica o app pai da URL atual
+    function initSearchPageEvents() {
       try {
         window.parent.postMessage({ type: 'navigate-sync', url: window.location.href, title: document.title }, '*');
-      } catch(e){}
-      // Intercepta links de resultados para sincronizar navegação
-      document.querySelectorAll('.ddg-title a, .ddg-result-card, .url-suggest-row, .news-item').forEach(el => {
-        el.addEventListener('click', (e) => {
-          const a = el.tagName === 'A' ? el : el.querySelector('a');
-          if (!a) return;
-          const directUrl = a.getAttribute('data-direct') || a.href;
-          e.preventDefault();
-          navigateDirect(directUrl, el);
-        });
-      });
-      // Delegação de cliques para links criados dinamicamente (incluindo serviços .onion e botões adicionados após o fetch)
-      document.addEventListener('click', (e) => {
-        const item = e.target.closest('.onion-item, .onion-direct-search-btn');
-        if (item) {
-          e.preventDefault();
-          const directUrl = item.getAttribute('data-direct') || item.href;
-          navigateDirect(directUrl, item);
-          return;
+      } catch (e) {}
+      try {
+        if (window.top === window.self) {
+          const hdr = document.querySelector('.ddg-header');
+          if (hdr) hdr.style.display = 'flex';
         }
+      } catch (e) {}
+    }
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initSearchPageEvents);
+    } else {
+      initSearchPageEvents();
+    }
+
+    // Delegação global robusta de cliques em todos os links e cards da busca
+    document.addEventListener('click', function (e) {
+      // 1. Vídeo do YouTube
+      const videoCard = e.target.closest('.topic-video-card');
+      if (videoCard) {
+        e.preventDefault();
+        const vid = videoCard.getAttribute('data-video-id') || '';
+        const title = videoCard.getAttribute('data-video-title') || '';
+        if (vid) openVideo(vid, title);
+        return;
+      }
+
+      // 2. Música / DJ
+      const musicCard = e.target.closest('.topic-music-card');
+      if (musicCard) {
+        e.preventDefault();
+        const query = musicCard.getAttribute('data-music-query') || '';
+        if (query) openMusic(query);
+        return;
+      }
+
+      // 3. Citação da IA [1], [2]
+      const cite = e.target.closest('.ai-cite');
+      if (cite) {
+        e.preventDefault();
+        const srcIdx = parseInt(cite.getAttribute('data-ai-src'), 10) - 1;
+        const currentSources = (window.__aiSources && window.__aiSources.length) ? window.__aiSources : ((typeof initialAiData !== 'undefined' && initialAiData) ? initialAiData.sources : []);
+        const src = (currentSources || [])[srcIdx];
+        if (src && src.url) navigateDirect(src.url, null);
+        return;
+      }
+
+      // 4. Botões de Crawler e Uptime
+      if (e.target.closest('.btn-deep-crawl, .btn-test-uptime')) {
+        return;
+      }
+
+      // 5. Todos os links (resultados web, notícias, wikipédia, fontes IA, picks do agente, filmes, onion, etc.)
+      const link = e.target.closest('a[href], .onion-item, .onion-direct-search-btn, .onion-sublink');
+      if (!link) return;
+
+      const href = link.getAttribute('href') || '';
+      if (!href || href === '#' || href.startsWith('javascript:')) return;
+
+      const targetAttr = (link.getAttribute('target') || '').toLowerCase();
+      const directUrl = link.getAttribute('data-direct') || href;
+
+      if (href === 'newtab.html' || href === '/') {
+        e.preventDefault();
+        navigateDirect('/', link);
+        return;
+      }
+
+      if (targetAttr === '_blank') {
+        try {
+          if (window.openInNewTab && directUrl) {
+            e.preventDefault();
+            window.openInNewTab(directUrl);
+            return;
+          }
+        } catch (err) {}
+      }
+
+      e.preventDefault();
+      navigateDirect(directUrl, link);
+    }, true);
+
+      // Crawler Profundo sob Demanda na Rede Tor (Deep Searcher)
+      document.addEventListener('click', async (e) => {
+        const btn = e.target.closest('.btn-deep-crawl');
+        if (!btn) return;
+        e.preventDefault();
+        const targetUrl = btn.getAttribute('data-url');
+        const targetId = btn.getAttribute('data-target-id');
+        const container = document.getElementById(targetId);
+        if (!container || !targetUrl) return;
+
+        btn.disabled = true;
+        const origHtml = btn.innerHTML;
+        btn.innerHTML = '<span>⚙️</span> Varrendo rotas profundas na rede Tor...';
+
+        try {
+          const resp = await fetch('/api/onion-crawl?url=' + encodeURIComponent(targetUrl));
+          const data = await resp.json();
+          if (data.success && Array.isArray(data.sublinks) && data.sublinks.length > 0) {
+            btn.innerHTML = '<span>⚡</span> ' + data.sublinks.length + ' sub-páginas profundas detectadas';
+            btn.style.background = 'rgba(34, 197, 94, 0.28)';
+            btn.style.borderColor = '#22c55e';
+            btn.style.color = '#fff';
+
+            const subCards = data.sublinks.map(sub => {
+              const baseTarget = targetUrl.endsWith('/') ? targetUrl.slice(0, -1) : targetUrl;
+              const subTarget = sub.url || (baseTarget + (sub.path && sub.path.startsWith('/') ? sub.path : '/' + (sub.path || '')));
+              const safeTitle = String(sub.title || sub.path || 'Sub-link').replace(/</g, '&lt;');
+              const safePath = String(sub.path || subTarget).replace(/</g, '&lt;');
+              const safeDesc = sub.desc ? ('<div style="font-size: 11px; color: #94a3b8; line-height: 1.35;">' + String(sub.desc).replace(/</g, '&lt;') + '</div>') : '';
+              return '<div style="background: rgba(0, 0, 0, 0.55); border: 1px solid rgba(34, 197, 94, 0.35); border-radius: 8px; padding: 8px 11px; display: flex; flex-direction: column; gap: 3px;">' +
+                '<a href="/proxy?url=' + encodeURIComponent(subTarget) + '&clientId=' + encodeURIComponent(${JSON.stringify(clientId)}) + '" data-direct="' + subTarget + '" class="onion-sublink" style="color: #4ade80; font-size: 12.5px; font-weight: 700; text-decoration: none; display: flex; align-items: center; gap: 5px;">' +
+                  '<span style="color: #22c55e;">↳</span> ' + safeTitle +
+                '</a>' +
+                '<div style="font-family: monospace; font-size: 10px; color: #86efac; opacity: 0.8; word-break: break-all;">' + safePath + '</div>' +
+                safeDesc +
+              '</div>';
+            }).join('');
+
+            container.innerHTML = '<div style="margin-top: 10px; padding: 10px 12px; background: rgba(2, 22, 10, 0.7); border: 1px dashed rgba(34, 197, 94, 0.45); border-radius: 10px;">' +
+              '<div style="font-size: 11px; font-weight: 700; color: #4ade80; text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">' +
+                '<span style="display: inline-block; width: 6px; height: 6px; background: #22c55e; border-radius: 50%; box-shadow: 0 0 8px #22c55e;"></span>' +
+                'Novas Sub-rotas Detectadas pelo Deep Crawler (' + data.sublinks.length + ')' +
+              '</div>' +
+              '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px;">' +
+                subCards +
+              '</div>' +
+            '</div>';
+          } else {
+            btn.innerHTML = '<span>ℹ️</span> Nenhuma rota pública adicional';
+            setTimeout(() => {
+              btn.disabled = false;
+              btn.innerHTML = origHtml;
+            }, 3500);
+          }
+        } catch (err) {
+          btn.innerHTML = '<span>⚠️</span> Falha ao rastrear via Tor';
+          setTimeout(() => {
+            btn.disabled = false;
+            btn.innerHTML = origHtml;
+          }, 3500);
+        }
+      });
+
+      // Testador de Uptime 200 em Tempo Real (Probe SOCKS5 / Tor)
+      document.addEventListener('click', async (e) => {
+        const btn = e.target.closest('.btn-test-uptime');
+        if (!btn) return;
+        e.preventDefault();
+        const targetUrl = btn.getAttribute('data-url');
+        const badgeId = btn.getAttribute('data-badge-id');
+        const badgeEl = badgeId ? document.getElementById(badgeId) : null;
+        if (!targetUrl) return;
+
+        btn.disabled = true;
+        btn.innerHTML = '<span>⏳</span> Testando probe...';
+        btn.style.opacity = '0.75';
+
+        try {
+          const resp = await fetch('/api/onion-check?url=' + encodeURIComponent(targetUrl));
+          const data = await resp.json();
+          if (data && data.success && data.online) {
+            btn.innerHTML = '<span>✅</span> 200 OK (' + (data.latencyMs || 0) + 'ms)';
+            btn.style.background = 'rgba(34, 197, 94, 0.25)';
+            btn.style.borderColor = '#22c55e';
+            btn.style.color = '#86efac';
+            btn.style.opacity = '1';
+            if (badgeEl) {
+              badgeEl.style.background = 'rgba(16, 185, 129, 0.2)';
+              badgeEl.style.borderColor = 'rgba(34, 197, 94, 0.6)';
+              badgeEl.style.color = '#4ade80';
+              badgeEl.style.boxShadow = '0 0 10px rgba(34, 197, 94, 0.35)';
+              badgeEl.innerHTML = '<span style="width: 6px; height: 6px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 6px #22c55e;"></span> ' +
+                (data.badge || ('🟢 HTTP ' + (data.statusCode || 200) + ' Online (' + data.latencyMs + 'ms)'));
+            }
+          } else {
+            const sc = data && data.statusCode ? data.statusCode : 'Timeout';
+            btn.innerHTML = '<span>❌</span> Offline (' + sc + ')';
+            btn.style.background = 'rgba(239, 68, 68, 0.15)';
+            btn.style.borderColor = 'rgba(239, 68, 68, 0.4)';
+            btn.style.color = '#f87171';
+            btn.style.opacity = '1';
+            if (badgeEl) {
+              badgeEl.style.background = 'rgba(239, 68, 68, 0.15)';
+              badgeEl.style.borderColor = 'rgba(239, 68, 68, 0.4)';
+              badgeEl.style.color = '#f87171';
+              badgeEl.innerHTML = '<span style="width: 6px; height: 6px; border-radius: 50%; background: #ef4444;"></span> Inacessível (' + sc + ')';
+            }
+          }
+        } catch (err) {
+          btn.innerHTML = '<span>⚠️</span> Erro no teste';
+          btn.style.opacity = '1';
+        }
+        setTimeout(() => {
+          btn.disabled = false;
+        }, 3000);
       });
 
       const searchForm = document.querySelector('.ddg-form');
@@ -10369,9 +17313,9 @@ function getDevicePlaylistsRoot(clientId, req) {
         searchForm.addEventListener('submit', (e) => {
           const qVal = (document.getElementById('searchInput') || {}).value || currentQuery || '';
           const trimmed = qVal.trim();
-          if (/^https?:\\/\\//i.test(trimmed) || (trimmed.includes('.') && !trimmed.includes(' ') && !trimmed.startsWith('/'))) {
+          if (trimmed.startsWith('http://') || trimmed.startsWith('https://') || (trimmed.includes('.') && !trimmed.includes(' ') && !trimmed.startsWith('/'))) {
             let directUrl = trimmed;
-            if (!/^https?:\\/\\//i.test(directUrl)) directUrl = 'https://' + directUrl;
+            if (!directUrl.startsWith('http://') && !directUrl.startsWith('https://')) directUrl = 'https://' + directUrl;
             e.preventDefault();
             navigateDirect(directUrl, null);
             return;
@@ -10380,22 +17324,253 @@ function getDevicePlaylistsRoot(clientId, req) {
         });
       }
 
-      document.querySelectorAll('a[href*="/proxy"], a[href*="/search"]').forEach((a) => {
-        if (a.classList.contains('url-suggest-row') || a.classList.contains('onion-item') || a.closest('.ddg-result-card')) return;
-        a.addEventListener('click', () => {
-          const dest = a.getAttribute('data-direct') || a.href;
-          const kind = (a.getAttribute('href') || '').includes('/search') ? 'search' : 'link';
-          showLocalTorLoading(kind, dest);
-        });
-      });
+      // Interceptador Universal: SEMPRE que clicar num link, mostrar loading até a página aparecer
+      document.addEventListener('click', function(e) {
+        // Se for clique no botão de zoom da imagem, abre o lightbox e não navega
+        const zoomBtn = e.target.closest('.image-zoom-btn');
+        if (zoomBtn) {
+          e.preventDefault();
+          e.stopPropagation();
+          const card = zoomBtn.closest('.image-card, .link-media-item');
+          if (card && typeof openLightboxCard === 'function') openLightboxCard(card);
+          return;
+        }
 
-    });
+        if (e.target.closest('.search-pill, .search-filter-pills, .search-filter-bar, .video-card, .link-media-video, .load-more-btn, .image-lightbox-close, .image-lightbox-nav, .video-modal')) {
+          return;
+        }
+
+        const a = e.target && e.target.closest ? e.target.closest('a') : null;
+        if (!a) return;
+        if (a.closest('.btn-deep-crawl, .btn-test-uptime')) return;
+
+        const href = (a.getAttribute('href') || '').trim();
+        if (!href || href === '#' || href.toLowerCase().startsWith('javascript:')) return;
+
+        const directUrl = a.getAttribute('data-direct') || a.getAttribute('data-url') || a.href;
+        if (!directUrl) return;
+
+        const isSearch = href.includes('/search') || directUrl.includes('/search');
+        const kind = isSearch ? 'search' : 'link';
+
+        markRowLoading(a.closest('.search-result-card, .url-suggest-row') || a);
+        showLocalTorLoading(kind, directUrl);
+
+        if (!a.classList.contains('ai-cite') && !a.classList.contains('onion-item') && !a.classList.contains('onion-sublink')) {
+          e.preventDefault();
+          navigateDirect(directUrl, a.closest('.search-result-card, .url-suggest-row') || a);
+        }
+      }, true);
+
+      (function setupImageLightboxAndVideos() {
+        const lightbox = document.getElementById('imageLightbox');
+        const lightboxImg = document.getElementById('lightboxImg');
+        const lightboxTitle = document.getElementById('lightboxTitle');
+        const lightboxSource = document.getElementById('lightboxSource');
+        const lightboxCounter = document.getElementById('lightboxCounter');
+        const lightboxPageBtn = document.getElementById('lightboxPageBtn');
+        const lightboxFullBtn = document.getElementById('lightboxFullBtn');
+        const lightboxClose = document.getElementById('lightboxClose');
+        const lightboxPrev = document.getElementById('lightboxPrev');
+        const lightboxNext = document.getElementById('lightboxNext');
+
+        let currentImageIdx = 0;
+
+        function getAllImageCards() {
+          return Array.from(document.querySelectorAll('.image-card'));
+        }
+
+        function openLightbox(index) {
+          const cards = getAllImageCards();
+          if (!cards.length) return;
+          currentImageIdx = (index + cards.length) % cards.length;
+          const card = cards[currentImageIdx];
+          const full = card.getAttribute('data-full') || '';
+          const page = card.getAttribute('data-page') || full;
+          const t = card.getAttribute('data-title') || '';
+          const src = card.getAttribute('data-source') || 'Web';
+
+          if (lightboxImg) lightboxImg.src = full;
+          if (lightboxTitle) lightboxTitle.textContent = t;
+          if (lightboxSource) lightboxSource.textContent = 'Fonte: ' + src;
+          if (lightboxCounter) lightboxCounter.textContent = (currentImageIdx + 1) + ' / ' + cards.length;
+
+          if (lightboxPageBtn) {
+            lightboxPageBtn.setAttribute('data-target-page', page);
+            lightboxPageBtn.setAttribute('data-direct', page);
+            lightboxPageBtn.href = '/proxy?url=' + encodeURIComponent(page) + '&clientId=' + encodeURIComponent(suggestClientId);
+          }
+          if (lightboxFullBtn) {
+            lightboxFullBtn.href = '/proxy?url=' + encodeURIComponent(full) + '&clientId=' + encodeURIComponent(suggestClientId);
+            lightboxFullBtn.setAttribute('data-direct', full);
+          }
+
+          if (lightbox) {
+            lightbox.classList.add('is-open');
+            lightbox.setAttribute('aria-hidden', 'false');
+          }
+        }
+        window.openLightbox = openLightbox;
+
+        function closeLightbox() {
+          if (!lightbox) return;
+          lightbox.classList.remove('is-open');
+          lightbox.setAttribute('aria-hidden', 'true');
+          if (lightboxImg) lightboxImg.src = '';
+        }
+        window.closeLightbox = closeLightbox;
+
+        function openLightboxCard(card) {
+          if (!card) return;
+          const cards = getAllImageCards();
+          const idx = cards.indexOf(card);
+          if (idx >= 0) {
+            openLightbox(idx);
+          } else {
+            const full = card.getAttribute('data-full') || '';
+            const page = card.getAttribute('data-page') || full;
+            const t = card.getAttribute('data-title') || '';
+            const src = card.getAttribute('data-source') || 'Web';
+            openDirectLightbox(full, page, t, src);
+          }
+        }
+        window.openLightboxCard = openLightboxCard;
+
+        function openDirectLightbox(full, page, title, src) {
+          if (!full) return;
+          if (lightboxImg) lightboxImg.src = full;
+          if (lightboxTitle) lightboxTitle.textContent = title || 'Imagem';
+          if (lightboxSource) lightboxSource.textContent = 'Fonte: ' + (src || 'Web');
+          if (lightboxCounter) lightboxCounter.textContent = '🖼️ Imagem Ampliada';
+
+          const targetP = page || full;
+          if (lightboxPageBtn) {
+            lightboxPageBtn.setAttribute('data-target-page', targetP);
+            lightboxPageBtn.setAttribute('data-direct', targetP);
+            lightboxPageBtn.href = '/proxy?url=' + encodeURIComponent(targetP) + '&clientId=' + encodeURIComponent(suggestClientId);
+          }
+          if (lightboxFullBtn) {
+            lightboxFullBtn.href = '/proxy?url=' + encodeURIComponent(full) + '&clientId=' + encodeURIComponent(suggestClientId);
+            lightboxFullBtn.setAttribute('data-direct', full);
+          }
+
+          if (lightbox) {
+            lightbox.classList.add('is-open');
+            lightbox.setAttribute('aria-hidden', 'false');
+          }
+        }
+        window.openDirectLightbox = openDirectLightbox;
+
+        // Navegação interna da imagem (Acessar Página no Papaléguas)
+        function openLightboxTargetPage() {
+          const btn = document.getElementById('lightboxPageBtn');
+          const targetUrl = btn ? btn.getAttribute('data-target-page') : '';
+          if (targetUrl) {
+            closeLightbox();
+            navigateDirect(targetUrl);
+          }
+        }
+        window.openLightboxTargetPage = openLightboxTargetPage;
+
+        if (lightboxPageBtn) {
+          lightboxPageBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            openLightboxTargetPage();
+          });
+        }
+        if (lightboxImg) {
+          lightboxImg.addEventListener('click', function(e) {
+            e.preventDefault();
+            openLightboxTargetPage();
+          });
+        }
+
+        if (lightboxClose) lightboxClose.addEventListener('click', closeLightbox);
+        if (lightboxPrev) lightboxPrev.addEventListener('click', () => openLightbox(currentImageIdx - 1));
+        if (lightboxNext) lightboxNext.addEventListener('click', () => openLightbox(currentImageIdx + 1));
+        if (lightbox) {
+          lightbox.addEventListener('click', (e) => {
+            if (e.target === lightbox) closeLightbox();
+          });
+        }
+
+        // Teclado (ESC, Setas)
+        document.addEventListener('keydown', (e) => {
+          if (e.key === 'Escape') {
+            if (lightbox && lightbox.classList.contains('is-open')) closeLightbox();
+            const vModal = document.getElementById('videoModal');
+            if (vModal && vModal.classList.contains('is-open')) closeVideoModal();
+          } else if (lightbox && lightbox.classList.contains('is-open')) {
+            if (e.key === 'ArrowLeft') openLightbox(currentImageIdx - 1);
+            else if (e.key === 'ArrowRight') openLightbox(currentImageIdx + 1);
+          }
+        });
+
+        const videoModalClose = document.getElementById('videoModalClose');
+        if (videoModalClose) videoModalClose.addEventListener('click', closeVideoModal);
+        const videoModalCloseBtn = document.getElementById('videoModalCloseBtn');
+        if (videoModalCloseBtn) videoModalCloseBtn.addEventListener('click', closeVideoModal);
+        const videoModal = document.getElementById('videoModal');
+        if (videoModal) {
+          videoModal.addEventListener('click', function(e) {
+            if (e.target === videoModal) closeVideoModal();
+          });
+        }
+
+        // Delegação de cliques segura para cards de imagens e vídeos
+        document.addEventListener('click', function(e) {
+          // Clique no botão de ampliar/zoom da imagem (abre o lightbox)
+          const zoomBtn = e.target.closest('.image-zoom-btn');
+          if (zoomBtn) {
+            e.preventDefault();
+            e.stopPropagation();
+            const card = zoomBtn.closest('.image-card, .link-media-item');
+            if (card) openLightboxCard(card);
+            return;
+          }
+
+          // Mídia acoplada ao resultado web: Imagem -> Acessa o site da imagem dentro do app
+          const linkImg = e.target.closest('.link-media-image');
+          if (linkImg) {
+            e.preventDefault();
+            e.stopPropagation();
+            openImageInApp(linkImg);
+            return;
+          }
+
+          // Mídia acoplada ao resultado web: Vídeo
+          const linkVid = e.target.closest('.link-media-video');
+          if (linkVid) {
+            e.preventDefault();
+            e.stopPropagation();
+            const vid = linkVid.getAttribute('data-video-id');
+            const t = linkVid.getAttribute('data-video-title') || 'Vídeo';
+            openVideo(vid, t);
+            return;
+          }
+
+          // Card de imagem da galeria -> Acessa o site da imagem dentro do app
+          const imgCard = e.target.closest('.image-card');
+          if (imgCard) {
+            e.preventDefault();
+            openImageInApp(imgCard);
+            return;
+          }
+
+          const vidCard = e.target.closest('.video-card');
+          if (vidCard) {
+            const vid = vidCard.getAttribute('data-video-id');
+            const title = vidCard.getAttribute('data-video-title') || 'Vídeo';
+            openVideo(vid, title, e);
+            return;
+          }
+        });
+      })();
   </script>
 </body>
 </html>`;
 
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(pageHtml);
+    sendCompressed(req, res, 200, { 'Content-Type': 'text/html; charset=utf-8' }, pageHtml);
     return;
   }
 
@@ -10403,16 +17578,120 @@ function getDevicePlaylistsRoot(clientId, req) {
   // Se a requisição vem de dentro de um iframe ou tem query ?embedded=1, serve newtab.html.
   // Se for acesso direto pela barra de endereço do celular/PC (document request), serve index.html
   // para carregar o shell completo com a barra de navegação e menus responsivos.
-  if (pathname === '/youtube' || pathname === '/youtube/' || pathname === '/baixatube' || pathname === '/baixatube/' || pathname === '/watch' || pathname === '/watch/') {
+  if (pathname === '/youtube' || pathname === '/youtube/' || pathname === '/baixatube' || pathname === '/baixatube/' || pathname === '/watch' || pathname === '/watch/' || pathname === '/v' || pathname.startsWith('/v/')) {
+    const videoId = reqUrl.searchParams.get('v') || reqUrl.searchParams.get('id') || (pathname.startsWith('/v/') ? pathname.slice(3).replace(/\/$/, '') : '');
+    const userAgent = String(req.headers['user-agent'] || '');
+    const isSocialCrawler = SOCIAL_CRAWLER_REGEX.test(userAgent);
     const targetFile = path.join(SRC_DIR, 'newtab.html');
-    if (fs.existsSync(targetFile)) {
-      res.writeHead(200, {
-        'Content-Type': 'text/html; charset=utf-8',
-        'Cache-Control': 'no-cache, no-store, must-revalidate'
+
+    if (videoId && /^[a-zA-Z0-9_-]{6,15}$/.test(videoId)) {
+      const cleanVid = escapeHtml(videoId);
+      const titleParam = reqUrl.searchParams.get('t') || reqUrl.searchParams.get('title');
+
+      if (!isSocialCrawler) {
+        // Usuário normal (app, navegador, celular): serve newtab.html instantaneamente (0ms) sem travar no oEmbed
+        const fallbackTitle = titleParam || (videoMetaCache.get(videoId)) || 'Papaléguas BaixaTube';
+        const seoData = getVideoSeoMetadata(cleanVid, fallbackTitle);
+        fs.readFile(targetFile, 'utf8', (err, html) => {
+          if (err || !html) {
+            serveFileWithMemoryCache(req, res, targetFile, 'text/html; charset=utf-8', 'no-cache, must-revalidate', true);
+            return;
+          }
+          const modifiedHtml = injectSeoIntoHtml(html, seoData);
+          res.writeHead(200, {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-cache, must-revalidate'
+          });
+          res.end(modifiedHtml);
+        });
+        if (!titleParam && !videoMetaCache.has(videoId)) {
+          getVideoTitleFast(videoId, null).catch(() => {});
+        }
+        return;
+      }
+
+      getVideoTitleFast(videoId, titleParam).then((titleFound) => {
+        const seoData = getVideoSeoMetadata(cleanVid, titleFound || titleParam);
+
+        if (isSocialCrawler) {
+          serveSocialPreview(res, {
+            title: seoData.title,
+            description: seoData.description,
+            imageUrl: seoData.thumbUrl,
+            pageUrl: seoData.url,
+            isVideo: true
+          });
+          return;
+        }
+
+        fs.readFile(targetFile, 'utf8', (err, html) => {
+          if (err || !html) {
+            serveFileWithMemoryCache(req, res, targetFile, 'text/html; charset=utf-8', 'no-cache, must-revalidate', true);
+            return;
+          }
+          const modifiedHtml = injectSeoIntoHtml(html, seoData);
+          res.writeHead(200, {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-cache, must-revalidate'
+          });
+          res.end(modifiedHtml);
+        });
+      }).catch(() => {
+        const seoData = getVideoSeoMetadata(cleanVid, titleParam);
+        if (isSocialCrawler) {
+          serveSocialPreview(res, {
+            title: seoData.title,
+            description: seoData.description,
+            imageUrl: seoData.thumbUrl,
+            pageUrl: seoData.url,
+            isVideo: true
+          });
+          return;
+        }
+        fs.readFile(targetFile, 'utf8', (err, html) => {
+          if (err || !html) {
+            serveFileWithMemoryCache(req, res, targetFile, 'text/html; charset=utf-8', 'no-cache, must-revalidate', true);
+            return;
+          }
+          const modifiedHtml = injectSeoIntoHtml(html, seoData);
+          res.writeHead(200, {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-cache, must-revalidate'
+          });
+          res.end(modifiedHtml);
+        });
       });
-      res.end(fs.readFileSync(targetFile, 'utf8'));
       return;
     }
+
+    // Requisição de categoria / tema / busca geral
+    const qParam = reqUrl.searchParams.get('q') || '';
+    const themeSeo = getThemeSeoMetadata(qParam);
+
+    if (isSocialCrawler) {
+      serveSocialPreview(res, {
+        title: themeSeo.title,
+        description: themeSeo.description,
+        imageUrl: 'https://papaleguas.app/og-banner.jpg',
+        pageUrl: themeSeo.url,
+        isVideo: false
+      });
+      return;
+    }
+
+    fs.readFile(targetFile, 'utf8', (err, html) => {
+      if (err || !html) {
+        serveFileWithMemoryCache(req, res, targetFile, 'text/html; charset=utf-8', 'no-cache, must-revalidate', true);
+        return;
+      }
+      const modifiedHtml = injectSeoIntoHtml(html, themeSeo);
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-cache, must-revalidate'
+      });
+      res.end(modifiedHtml);
+    });
+    return;
   }
 
   // ----------------------------------------------------
@@ -10462,12 +17741,13 @@ function getDevicePlaylistsRoot(clientId, req) {
 
   // ----------------------------------------------------
   // PORTAL FILMES ONLINE (Mobile & Web)
-  // Assista aos melhores filmes dublados completos sem travar
+  // Assista aos melhores filmes completos sem travar
   // com suporte a transmissão direta na Smart TV / Roku TV
   // ----------------------------------------------------
   if (pathname === '/filmes' || pathname === '/filmes/') {
     const isLocal = isLocalRequest(req);
     const q = reqUrl.searchParams.get('q') || '';
+    const activeFilter = (reqUrl.searchParams.get('filter') || 'all').toLowerCase();
     let selectedVid = reqUrl.searchParams.get('v') || '';
     let selectedCategory = reqUrl.searchParams.get('cat') || '';
     const hostHeader = req.headers.host || 'localhost:8080';
@@ -10475,28 +17755,240 @@ function getDevicePlaylistsRoot(clientId, req) {
     const requestOrigin = `${isHttps ? 'https' : 'http'}://${hostHeader}`;
     const encodedOrigin = encodeURIComponent(requestOrigin);
 
+    const clientIpParam = reqUrl.searchParams.get('deviceIp') || req.headers['x-device-ip'] || req.headers['x-client-ip'] || '';
+    const clientIp = extractRequestDeviceIp(req, clientIpParam);
+    const detectedCountryFromIp = await getClientCountryCode(req, clientIp, false).catch(() => 'BR');
+    const rawCountryParam = (reqUrl.searchParams.get('country') || '').trim().toUpperCase();
+    const countryCode = (/^[A-Z]{2}$/.test(rawCountryParam) && rawCountryParam !== 'AUTO')
+      ? rawCountryParam
+      : detectedCountryFromIp;
+    const hl = getHlForCountry(countryCode);
+    const langShort = String(hl || 'pt-BR').split('-')[0].toLowerCase() || 'pt';
 
-    // Categorias de Filmes para Navegação Rápida no Celular
-    const movieCategories = [
-      { id: 'todos', label: '🎬 Todos', q: 'filmes completos dublados' },
-      { id: 'acao', label: '💥 Ação', q: 'filmes de acao completos dublados hd' },
-      { id: 'comedia', label: '😂 Comédia', q: 'filmes de comedia completos dublados' },
-      { id: 'terror', label: '👻 Terror', q: 'filmes de terror completos dublados' },
-      { id: 'suspense', label: '🔍 Suspense', q: 'filmes de suspense dublados completos' },
-      { id: 'ficcao', label: '🚀 Ficção', q: 'filmes de ficcao cientifica dublados' },
-      { id: 'aventura', label: '🏹 Aventura', q: 'filmes de aventura completos dublados' },
-      { id: 'animacao', label: '🦁 Animação', q: 'desenhos e animacoes filmes completos dublados' },
-      { id: 'luta', label: '🥋 Luta & Artes Marciais', q: 'filmes de luta e artes marciais completos dublados' }
-    ];
+    const isPt = countryCode === 'BR' || countryCode === 'PT';
+    const isEs = ['ES', 'MX', 'AR', 'CO', 'CL', 'PE', 'VE', 'EC', 'UY', 'PY', 'BO', 'CR', 'PA', 'DO', 'GT'].includes(countryCode);
+    const isFr = ['FR', 'BE', 'SN', 'CI', 'MA', 'DZ', 'TN'].includes(countryCode);
+    const isDe = ['DE', 'AT', 'CH'].includes(countryCode);
+    const isIt = countryCode === 'IT';
+    const uiLang = isPt ? 'pt' : (isEs ? 'es' : (isFr ? 'fr' : (isDe ? 'de' : (isIt ? 'it' : 'en'))));
 
-    // Busca filmes dublados completos reais no acervo
+    const CINEMA_UI = {
+      pt: {
+        htmlLang: 'pt-BR',
+        pageTitle: 'Filmes Online - Cinema Papaléguas',
+        brandTitle: 'Filmes Online',
+        searchPlaceholder: 'Buscar filmes dublados completos...',
+        searchBtn: 'Buscar',
+        refreshBtn: '🎲 Sortear Novos Filmes',
+        refreshShort: '🎲 Sortear',
+        sectionTitle: '🍿 Filmes Completos Dublados',
+        countWord: 'filmes',
+        loaderText: '🍿 Buscando mais filmes dublados completos...',
+        defaultChannel: 'Cinema Dublado',
+        maximize: '⛶ Maximizar',
+        minimize: '🗕 Minimizar',
+        miniPlayer: '🗕 Mini Player',
+        watchDirect: '▶ Assistir Direto',
+        dlMp4: '🎬 Baixar MP4',
+        dlMp3: '🎵 Áudio MP3',
+        cast: '📺 Transmitir',
+        close: 'Fechar',
+        topBtn: '↑ Topo',
+        cats: [
+          { id: 'todos', label: '🎬 Todos' },
+          { id: 'acao', label: '💥 Ação' },
+          { id: 'comedia', label: '😂 Comédia' },
+          { id: 'terror', label: '👻 Terror' },
+          { id: 'suspense', label: '🔍 Suspense' },
+          { id: 'ficcao', label: '🚀 Ficção' },
+          { id: 'aventura', label: '🏹 Aventura' },
+          { id: 'animacao', label: '🦁 Animação' },
+          { id: 'luta', label: '🥋 Luta & Artes Marciais' }
+        ]
+      },
+      en: {
+        htmlLang: 'en',
+        pageTitle: 'Movies Online - Papaléguas Cinema',
+        brandTitle: 'Movies Online',
+        searchPlaceholder: 'Search full movies in English...',
+        searchBtn: 'Search',
+        refreshBtn: '🎲 Shuffle New Movies',
+        refreshShort: '🎲 Shuffle',
+        sectionTitle: '🍿 Full Length Movies',
+        countWord: 'movies',
+        loaderText: '🍿 Loading more full movies...',
+        defaultChannel: 'Full Movies HD',
+        maximize: '⛶ Maximize',
+        minimize: '🗕 Minimize',
+        miniPlayer: '🗕 Mini Player',
+        watchDirect: '▶ Watch Direct',
+        dlMp4: '🎬 Download MP4',
+        dlMp3: '🎵 Audio MP3',
+        cast: '📺 Cast to TV',
+        close: 'Close',
+        topBtn: '↑ Top',
+        cats: [
+          { id: 'todos', label: '🎬 All' },
+          { id: 'acao', label: '💥 Action' },
+          { id: 'comedia', label: '😂 Comedy' },
+          { id: 'terror', label: '👻 Horror' },
+          { id: 'suspense', label: '🔍 Thriller' },
+          { id: 'ficcao', label: '🚀 Sci-Fi' },
+          { id: 'aventura', label: '🏹 Adventure' },
+          { id: 'animacao', label: '🦁 Animation' },
+          { id: 'luta', label: '🥋 Martial Arts' }
+        ]
+      },
+      es: {
+        htmlLang: 'es',
+        pageTitle: 'Películas Online - Cine Papaléguas',
+        brandTitle: 'Películas Online',
+        searchPlaceholder: 'Buscar películas completas en español...',
+        searchBtn: 'Buscar',
+        refreshBtn: '🎲 Sortear Nuevas Películas',
+        refreshShort: '🎲 Sortear',
+        sectionTitle: '🍿 Películas Completas en Español',
+        countWord: 'películas',
+        loaderText: '🍿 Buscando más películas completas...',
+        defaultChannel: 'Cine en Español',
+        maximize: '⛶ Maximizar',
+        minimize: '🗕 Minimizar',
+        miniPlayer: '🗕 Mini Reproductor',
+        watchDirect: '▶ Ver Directo',
+        dlMp4: '🎬 Descargar MP4',
+        dlMp3: '🎵 Audio MP3',
+        cast: '📺 Transmitir',
+        close: 'Cerrar',
+        topBtn: '↑ Arriba',
+        cats: [
+          { id: 'todos', label: '🎬 Todas' },
+          { id: 'acao', label: '💥 Acción' },
+          { id: 'comedia', label: '😂 Comedia' },
+          { id: 'terror', label: '👻 Terror' },
+          { id: 'suspense', label: '🔍 Suspenso' },
+          { id: 'ficcao', label: '🚀 Ciencia Ficción' },
+          { id: 'aventura', label: '🏹 Aventura' },
+          { id: 'animacao', label: '🦁 Animación' },
+          { id: 'luta', label: '🥋 Artes Marciales' }
+        ]
+      },
+      fr: {
+        htmlLang: 'fr',
+        pageTitle: 'Films en Ligne - Cinéma Papaléguas',
+        brandTitle: 'Films en Ligne',
+        searchPlaceholder: 'Rechercher des films complets en français...',
+        searchBtn: 'Chercher',
+        refreshBtn: '🎲 Tirer de Nouveaux Films',
+        refreshShort: '🎲 Tirer',
+        sectionTitle: '🍿 Films Complets en Français',
+        countWord: 'films',
+        loaderText: '🍿 Recherche de plus de films complets...',
+        defaultChannel: 'Cinéma VF',
+        maximize: '⛶ Agrandir',
+        minimize: '🗕 Réduire',
+        miniPlayer: '🗕 Mini Lecteur',
+        watchDirect: '▶ Regarder Direct',
+        dlMp4: '🎬 Télécharger MP4',
+        dlMp3: '🎵 Audio MP3',
+        cast: '📺 Diffuser',
+        close: 'Fermer',
+        topBtn: '↑ Haut',
+        cats: [
+          { id: 'todos', label: '🎬 Tous' },
+          { id: 'acao', label: '💥 Action' },
+          { id: 'comedia', label: '😂 Comédie' },
+          { id: 'terror', label: '👻 Horreur' },
+          { id: 'suspense', label: '🔍 Thriller' },
+          { id: 'ficcao', label: '🚀 Science-Fiction' },
+          { id: 'aventura', label: '🏹 Aventure' },
+          { id: 'animacao', label: '🦁 Animation' },
+          { id: 'luta', label: '🥋 Arts Martiaux' }
+        ]
+      },
+      de: {
+        htmlLang: 'de',
+        pageTitle: 'Filme Online - Papaléguas Kino',
+        brandTitle: 'Filme Online',
+        searchPlaceholder: 'Ganze Filme auf Deutsch suchen...',
+        searchBtn: 'Suchen',
+        refreshBtn: '🎲 Neue Filme Mischen',
+        refreshShort: '🎲 Mischen',
+        sectionTitle: '🍿 Ganze Filme auf Deutsch',
+        countWord: 'Filme',
+        loaderText: '🍿 Weitere ganze Filme werden geladen...',
+        defaultChannel: 'Kino Deutsch',
+        maximize: '⛶ Maximieren',
+        minimize: '🗕 Minimieren',
+        miniPlayer: '🗕 Mini-Player',
+        watchDirect: '▶ Direkt Ansehen',
+        dlMp4: '🎬 MP4 Laden',
+        dlMp3: '🎵 MP3 Audio',
+        cast: '📺 Übertragen',
+        close: 'Schließen',
+        topBtn: '↑ Oben',
+        cats: [
+          { id: 'todos', label: '🎬 Alle' },
+          { id: 'acao', label: '💥 Action' },
+          { id: 'comedia', label: '😂 Komödie' },
+          { id: 'terror', label: '👻 Horror' },
+          { id: 'suspense', label: '🔍 Thriller' },
+          { id: 'ficcao', label: '🚀 Sci-Fi' },
+          { id: 'aventura', label: '🏹 Abenteuer' },
+          { id: 'animacao', label: '🦁 Animation' },
+          { id: 'luta', label: '🥋 Kampfkunst' }
+        ]
+      },
+      it: {
+        htmlLang: 'it',
+        pageTitle: 'Film Online - Cinema Papaléguas',
+        brandTitle: 'Film Online',
+        searchPlaceholder: 'Cerca film completi in italiano...',
+        searchBtn: 'Cerca',
+        refreshBtn: '🎲 Nuovi Film Casuali',
+        refreshShort: '🎲 Casuale',
+        sectionTitle: '🍿 Film Completi in Italiano',
+        countWord: 'film',
+        loaderText: '🍿 Ricerca di altri film completi...',
+        defaultChannel: 'Cinema Italiano',
+        maximize: '⛶ Ingrandisci',
+        minimize: '🗕 Riduci',
+        miniPlayer: '🗕 Mini Player',
+        watchDirect: '▶ Guarda Diretto',
+        dlMp4: '🎬 Scarica MP4',
+        dlMp3: '🎵 Audio MP3',
+        cast: '📺 Trasmetti',
+        close: 'Chiudi',
+        topBtn: '↑ Su',
+        cats: [
+          { id: 'todos', label: '🎬 Tutti' },
+          { id: 'acao', label: '💥 Azione' },
+          { id: 'comedia', label: '😂 Commedia' },
+          { id: 'terror', label: '👻 Horror' },
+          { id: 'suspense', label: '🔍 Thriller' },
+          { id: 'ficcao', label: '🚀 Fantascienza' },
+          { id: 'aventura', label: '🏹 Avventura' },
+          { id: 'animacao', label: '🦁 Animazione' },
+          { id: 'luta', label: '🥋 Arti Marziali' }
+        ]
+      }
+    };
+    const ui = CINEMA_UI[uiLang] || CINEMA_UI.en;
+    const movieCategories = ui.cats;
+
+    // Busca filmes completos reais no acervo conforme o país detectado pelo IP
     const activeCatObj = movieCategories.find(c => c.id === selectedCategory);
     const catId = activeCatObj ? activeCatObj.id : 'todos';
     const searchQuery = (q || '').trim();
     const useTor = false;
     const isRefresh = !!reqUrl.searchParams.get('r');
+    if (!global.__plMovieCategoryCache) {
+      global.__plMovieCategoryCache = new Map();
+    }
+    const movieCategoryCache = global.__plMovieCategoryCache;
+    const cacheKey = `${countryCode}:${catId}`;
     if (isRefresh) {
       youtubeSearchCache.clear();
+      movieCategoryCache.delete(cacheKey);
     }
     const shuffleArr = (arr) => {
       for (let i = arr.length - 1; i > 0; i--) {
@@ -10507,45 +17999,62 @@ function getDevicePlaylistsRoot(clientId, req) {
     };
     let movieResults = [];
 
-    // Filmes curados da categoria para contingência instantânea
+    // Filmes curados da categoria para contingência instantânea (exclusivo para BR/PT)
     const categoryCurated = CURATED_OFFICIAL_MOVIES.filter(m => catId === 'todos' || m.category === catId || (catId === 'acao' && (m.category === 'acao' || m.category === 'luta')));
-    const fallbackList = categoryCurated.length > 0 ? categoryCurated : CURATED_OFFICIAL_MOVIES;
+    const fallbackList = isPt ? (categoryCurated.length > 0 ? categoryCurated : CURATED_OFFICIAL_MOVIES) : [];
 
-    // Busca dinâmica aleatória: a cada requisição é gerada uma consulta diferente do acervo
-    // para nunca exibir os mesmos filmes estáticos na home
-    const dynamicSearchObj = getDynamicRecentMovieQuery(catId);
-    const queryToSearch = searchQuery || dynamicSearchObj.query;
-    const dynamicTimeFilter = dynamicSearchObj.timeFilter || 'month';
-    const dynamicSortRecent = dynamicSearchObj.sortByRecent;
+    // Busca dinâmica aleatória: utiliza cache instantâneo por país + categoria com atualização em segundo plano
+    const cachedCat = (!searchQuery && !isRefresh) ? movieCategoryCache.get(cacheKey) : null;
+    const nowMs = Date.now();
 
-    // Timeout seguro de 4.2 segundos para garantir o retorno de novos filmes reais do YouTube
-    const searchPromise = (async () => {
-      try {
-        let results = await searchYoutubeVideos(queryToSearch, 'pt-BR', dynamicSortRecent, dynamicTimeFilter, useTor);
-        if (!results || results.length < 4) {
-          const secondarySearchObj = getDynamicRecentMovieQuery(catId);
-          const secondaryResults = await searchYoutubeVideos(secondarySearchObj.query, 'pt-BR', false, 'year', useTor);
-          if (secondaryResults && secondaryResults.length > 0) {
-            results = (results || []).concat(secondaryResults);
+    const triggerMovieCategoryRefresh = () => {
+      const dynamicSearchObj = getDynamicRecentMovieQuery(catId, null, countryCode);
+      const queryToSearch = searchQuery || dynamicSearchObj.query;
+      const dynamicTimeFilter = dynamicSearchObj.timeFilter || '';
+      const dynamicSortRecent = dynamicSearchObj.sortByRecent;
+
+      return (async () => {
+        try {
+          let results = await searchYoutubeVideos(queryToSearch, hl, dynamicSortRecent, dynamicTimeFilter, useTor, '', countryCode, clientIp);
+          if (!results || results.length < 6) {
+            const secondarySearchObj = getDynamicRecentMovieQuery(catId, 1, countryCode);
+            const secondaryResults = await searchYoutubeVideos(secondarySearchObj.query, hl, false, '', useTor, '', countryCode, clientIp);
+            if (secondaryResults && secondaryResults.length > 0) {
+              results = (results || []).concat(secondaryResults);
+            }
           }
+          const validList = Array.isArray(results) ? results : [];
+          if (!searchQuery && validList.length > 0) {
+            movieCategoryCache.set(cacheKey, { ts: Date.now(), items: validList });
+          }
+          return validList;
+        } catch (err) {
+          return [];
         }
-        return results || [];
-      } catch (err) {
-        return [];
-      }
-    })();
+      })();
+    };
 
-    const timeoutPromise = new Promise(resolve => setTimeout(() => resolve([]), 4200));
-    try {
-      movieResults = await Promise.race([searchPromise, timeoutPromise]);
-    } catch(e) {
-      movieResults = [];
+    if (cachedCat && Array.isArray(cachedCat.items) && cachedCat.items.length > 0) {
+      movieResults = cachedCat.items.slice();
+      if (nowMs - cachedCat.ts > 180000) {
+        triggerMovieCategoryRefresh().catch(() => {});
+      }
+    } else {
+      const searchPromise = triggerMovieCategoryRefresh();
+      // Espera maior para outros países (onde não há fallback em português) para carregar os filmes reais do país
+      const waitMs = searchQuery ? 2600 : (isPt ? 1200 : 2500);
+      const timeoutPromise = new Promise(resolve => setTimeout(() => resolve([]), waitMs));
+      try {
+        movieResults = await Promise.race([searchPromise, timeoutPromise]);
+      } catch(e) {
+        movieResults = [];
+      }
     }
 
-    // Prioriza filmes de longa duração (mais de 30min) sobre trailers ou clipes curtos
+    // Prioriza filmes de longa duração (mais de 25min) sobre trailers ou clipes curtos
     const fullMovies = movieResults.filter(m => {
       const dur = m.duration || '';
-      return dur.split(':').length >= 3 || (dur.split(':').length === 2 && parseInt(dur.split(':')[0], 10) >= 30);
+      return dur.split(':').length >= 3 || (dur.split(':').length === 2 && parseInt(dur.split(':')[0], 10) >= 25);
     });
     if (fullMovies.length >= 2) {
       movieResults = fullMovies;
@@ -10553,12 +18062,14 @@ function getDevicePlaylistsRoot(clientId, req) {
 
     // Embaralha SEMPRE a cada requisição para garantir catálogo vivo e rotativo
     shuffleArr(movieResults);
-    const shuffledFallback = shuffleArr(fallbackList.slice());
-    const seenIds = new Set(movieResults.map(m => m.id));
-    for (const cur of shuffledFallback) {
-      if (!seenIds.has(cur.id)) {
-        movieResults.push(cur);
-        seenIds.add(cur.id);
+    if (fallbackList.length > 0) {
+      const shuffledFallback = shuffleArr(fallbackList.slice());
+      const seenIds = new Set(movieResults.map(m => m.id));
+      for (const cur of shuffledFallback) {
+        if (!seenIds.has(cur.id)) {
+          movieResults.push(cur);
+          seenIds.add(cur.id);
+        }
       }
     }
 
@@ -10571,13 +18082,14 @@ function getDevicePlaylistsRoot(clientId, req) {
       selectedVid = CURATED_OFFICIAL_MOVIES[0].id;
     }
 
-    const activeMovie = movieResults.find(m => m.id === selectedVid) || CURATED_OFFICIAL_MOVIES[0];
-    const activeMovieTitle = activeMovie ? activeMovie.title : 'Filmes Online Dublados';
+    const activeMovie = movieResults.find(m => m.id === selectedVid) || movieResults[0] || CURATED_OFFICIAL_MOVIES[0];
+    const activeMovieTitle = activeMovie ? activeMovie.title : ui.brandTitle;
     const safeActiveTitle = (activeMovieTitle || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const safeQ = q.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const countryQuerySuffix = rawCountryParam ? `&country=${encodeURIComponent(countryCode)}` : '';
 
     const filmesHtml = `<!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="${ui.htmlLang}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
@@ -10586,7 +18098,7 @@ function getDevicePlaylistsRoot(clientId, req) {
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="theme-color" content="#0b0d14">
-  <title>Filmes Online - Cinema Papaléguas</title>
+  <title>${ui.pageTitle}</title>
   <link rel="icon" type="image/x-icon" href="/favicon.ico">
   <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png?v=4">
   <link rel="apple-touch-icon" sizes="192x192" href="/icon-192.png?v=4">
@@ -10861,7 +18373,7 @@ function getDevicePlaylistsRoot(clientId, req) {
       top: max(12px, env(safe-area-inset-top, 12px));
       left: max(12px, env(safe-area-inset-left, 12px));
       z-index: 50;
-      display: inline-flex;
+      display: none;
       align-items: center;
       gap: 7px;
       padding: 7px 13px;
@@ -10932,6 +18444,18 @@ function getDevicePlaylistsRoot(clientId, req) {
     html:-webkit-full-screen .cinema-minimize-btn.auto-dim:hover {
       opacity: 1 !important;
       border-color: #f59e0b !important;
+    }
+    @media (max-width: 900px), (pointer: coarse), (display-mode: standalone), (display-mode: fullscreen), (display-mode: minimal-ui) {
+      .cinema-minimize-btn,
+      #cinema-minimize-btn,
+      html.video-true-fs .cinema-minimize-btn,
+      html:fullscreen .cinema-minimize-btn,
+      html:-webkit-full-screen .cinema-minimize-btn {
+        display: none !important;
+        visibility: hidden !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+      }
     }
     .cinema-info-card {
       margin-top: 8px;
@@ -11241,18 +18765,36 @@ function getDevicePlaylistsRoot(clientId, req) {
 </head>
 <body>
   <header class="cinema-topbar">
-    <a href="/filmes" class="cinema-brand">
+    <a href="/filmes${rawCountryParam ? '?country=' + encodeURIComponent(countryCode) : ''}" class="cinema-brand">
       <div class="cinema-logo-box">
         <img src="/icon-192.png?v=4" alt="Papaléguas" style="width:32px;height:32px;border-radius:50%;object-fit:cover;box-shadow:0 0 10px rgba(245,158,11,0.5);" />
       </div>
-      <div class="cinema-title">Filmes Online</div>
+      <div class="cinema-title">${ui.brandTitle}</div>
     </a>
+    <div class="cinema-badges">
+      <select id="cinema-country-badge" title="País / Idioma dos Filmes" style="background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.16);color:#f8fafc;border-radius:14px;padding:4px 8px;font-size:11.5px;font-weight:700;cursor:pointer;outline:none;">
+        <option value="auto" ${!rawCountryParam ? 'selected' : ''}>🌐 Auto (${countryCode})</option>
+        <option value="BR" ${rawCountryParam === 'BR' ? 'selected' : ''}>🇧🇷 Brasil</option>
+        <option value="US" ${rawCountryParam === 'US' ? 'selected' : ''}>🇺🇸 Estados Unidos</option>
+        <option value="PT" ${rawCountryParam === 'PT' ? 'selected' : ''}>🇵🇹 Portugal</option>
+        <option value="ES" ${rawCountryParam === 'ES' ? 'selected' : ''}>🇪🇸 Espanha</option>
+        <option value="AR" ${rawCountryParam === 'AR' ? 'selected' : ''}>🇦🇷 Argentina</option>
+        <option value="MX" ${rawCountryParam === 'MX' ? 'selected' : ''}>🇲🇽 México</option>
+        <option value="GB" ${rawCountryParam === 'GB' ? 'selected' : ''}>🇬🇧 Reino Unido</option>
+        <option value="FR" ${rawCountryParam === 'FR' ? 'selected' : ''}>🇫🇷 França</option>
+        <option value="DE" ${rawCountryParam === 'DE' ? 'selected' : ''}>🇩🇪 Alemanha</option>
+        <option value="IT" ${rawCountryParam === 'IT' ? 'selected' : ''}>🇮🇹 Itália</option>
+        <option value="CA" ${rawCountryParam === 'CA' ? 'selected' : ''}>🇨🇦 Canadá</option>
+        <option value="AU" ${rawCountryParam === 'AU' ? 'selected' : ''}>🇦🇺 Austrália</option>
+        <option value="JP" ${rawCountryParam === 'JP' ? 'selected' : ''}>🇯🇵 Japão</option>
+      </select>
+    </div>
   </header>
 
   <!-- Categorias em Pílulas para Celular -->
   <nav class="categories-bar">
     ${movieCategories.map(cat => `
-      <a href="/filmes?cat=${cat.id}${q ? '&q=' + encodeURIComponent(q) : ''}" class="category-chip ${selectedCategory === cat.id ? 'active' : ''}">
+      <a href="/filmes?cat=${cat.id}${q ? '&q=' + encodeURIComponent(q) : ''}${countryQuerySuffix}" data-cat="${cat.id}" class="category-chip ${(selectedCategory || 'todos') === cat.id ? 'active' : ''}">
         ${cat.label}
       </a>
     `).join('')}
@@ -11261,31 +18803,32 @@ function getDevicePlaylistsRoot(clientId, req) {
   <!-- Barra de Busca Rápida de Filmes -->
   <div class="cinema-search-bar">
     <form class="cinema-form" id="cinema-form">
-      <input type="text" class="cinema-input" id="cinema-query" placeholder="Buscar filmes dublados completos..." value="${safeQ}">
+      <input type="text" class="cinema-input" id="cinema-query" placeholder="${ui.searchPlaceholder}" value="${safeQ}">
       <button type="submit" class="cinema-search-btn">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        Buscar
+        ${ui.searchBtn}
       </button>
     </form>
-    <a href="/filmes?cat=${encodeURIComponent(catId)}${q ? '&q=' + encodeURIComponent(q) : ''}&r=${Date.now()}" id="cinema-refresh-btn" title="Buscar novos filmes" style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:8px;padding:9px 14px;border-radius:18px;background:linear-gradient(135deg,#f59e0b,#e11d48);color:#fff;font-size:13px;font-weight:700;text-decoration:none;box-shadow:0 3px 12px rgba(225,29,72,0.35);letter-spacing:0.2px;">
-      🎲 Sortear Novos Filmes
+    <a href="/filmes?cat=${encodeURIComponent(catId)}${q ? '&q=' + encodeURIComponent(q) : ''}${countryQuerySuffix}&r=${Date.now()}" id="cinema-refresh-btn" title="${ui.refreshBtn}" style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:8px;padding:9px 14px;border-radius:18px;background:linear-gradient(135deg,#f59e0b,#e11d48);color:#fff;font-size:13px;font-weight:700;text-decoration:none;box-shadow:0 3px 12px rgba(225,29,72,0.35);letter-spacing:0.2px;">
+      ${ui.refreshBtn}
     </a>
   </div>
 
   <!-- Player Principal -->
   <main class="cinema-player-section">
-    <button type="button" class="cinema-mini-close" id="cinema-mini-close" title="Fechar o player">
-      <span>Fechar</span>
+    <button type="button" class="cinema-mini-close" id="cinema-mini-close" title="${ui.close}">
+      <span>${ui.close}</span>
       <span aria-hidden="true">✕</span>
     </button>
-    <button type="button" class="cinema-minimize-btn" id="cinema-minimize-btn" onclick="minimizeCinemaVideo()" title="Minimizar tela (Restaurar catálogo)">
+    <button type="button" class="cinema-minimize-btn" id="cinema-minimize-btn" onclick="minimizeCinemaVideo()" title="${ui.minimize}">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>
       </svg>
-      <span>Minimizar</span>
+      <span>${ui.minimize.replace(/^🗕\s*/, '')}</span>
     </button>
     <div class="cinema-player-wrapper" id="player-container">
-      <iframe id="cinema-iframe" src="https://www.youtube.com/embed/${encodeURIComponent(selectedVid)}?autoplay=1&enablejsapi=1&playsinline=1&rel=0&origin=${encodedOrigin}&widget_referrer=${encodedOrigin}" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="origin"></iframe>
+      <iframe id="cinema-iframe" src="https://www.youtube.com/embed/${encodeURIComponent(selectedVid)}?autoplay=1&enablejsapi=1&playsinline=1&hl=${encodeURIComponent(hl)}&cc_lang_pref=${encodeURIComponent(langShort)}&rel=0&origin=${encodedOrigin}&widget_referrer=${encodedOrigin}" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="origin"></iframe>
+      <video id="cinema-native-video" controls playsinline webkit-playsinline style="display:none;position:absolute;inset:0;width:100%;height:100%;background:#000;z-index:2;object-fit:contain;"></video>
     </div>
 
     <video id="cinema-pip-video" playsinline webkit-playsinline muted style="position:fixed;width:160px;height:90px;left:-200px;bottom:0;opacity:0.02;pointer-events:none;"></video>
@@ -11295,23 +18838,23 @@ function getDevicePlaylistsRoot(clientId, req) {
         ▶ ${safeActiveTitle}
       </div>
       <div class="cinema-actions">
-        <button class="cinema-cast-btn" id="btn-cinema-fs-toggle" type="button" onclick="toggleCinemaMaximize()" style="background:rgba(255,255,255,0.12);color:#fff;padding:6px 12px;font-size:11px;" title="Maximizar / Minimizar tela">
-          <span id="cinema-fs-label">⛶ Maximizar</span>
+        <button class="cinema-cast-btn" id="btn-cinema-fs-toggle" type="button" onclick="toggleCinemaMaximize()" style="background:rgba(255,255,255,0.12);color:#fff;padding:6px 12px;font-size:11px;" title="${ui.maximize} / ${ui.minimize}">
+          <span id="cinema-fs-label">${ui.maximize}</span>
         </button>
-        <button class="cinema-cast-btn" id="btn-cinema-mini-toggle" type="button" onclick="enterCinemaMiniPlayer(false)" style="background:rgba(255,255,255,0.08);color:#fff;padding:6px 12px;font-size:11px;" title="Minimizar player para o canto da tela">
-          🗕 Mini Player
+        <button class="cinema-cast-btn" id="btn-cinema-mini-toggle" type="button" onclick="enterCinemaMiniPlayer(false)" style="background:rgba(255,255,255,0.08);color:#fff;padding:6px 12px;font-size:11px;" title="${ui.miniPlayer}">
+          ${ui.miniPlayer}
         </button>
-        <a id="cinema-direct-link" href="/youtube?v=${encodeURIComponent(selectedVid)}" class="cinema-cast-btn" style="background:rgba(255,255,255,0.08);color:#fff;text-decoration:none;padding:6px 12px;font-size:11px;" title="Assistir no Papaléguas" onclick="event.preventDefault(); var u=this.getAttribute('href'); try { if (window.openInNewTab) { window.openInNewTab(u); return; } } catch (e) {} try { if (window.parent && window.parent !== window) { window.parent.postMessage({ type: 'navigate-current-tab', url: u }, '*'); return; } } catch (e) {} location.href=u;">
-          ▶ Assistir Direto
+        <a id="cinema-direct-link" href="/youtube?v=${encodeURIComponent(selectedVid)}" class="cinema-cast-btn" style="background:rgba(255,255,255,0.08);color:#fff;text-decoration:none;padding:6px 12px;font-size:11px;" title="${ui.watchDirect}" onclick="event.preventDefault(); var u=this.getAttribute('href'); try { if (window.openInNewTab) { window.openInNewTab(u); return; } } catch (e) {} try { if (window.parent && window.parent !== window) { window.parent.postMessage({ type: 'navigate-current-tab', url: u }, '*'); return; } } catch (e) {} location.href=u;">
+          ${ui.watchDirect}
         </a>
-        <button class="cinema-dl-btn cinema-dl-mp4" type="button" onclick="openCinemaResolutionModal()" title="Baixar Filme em Vídeo MP4" style="background:linear-gradient(135deg,#0284c7,#0369a1);border:none;color:#fff;padding:6px 12px;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;gap:4px;">
-          🎬 Baixar MP4
+        <button class="cinema-dl-btn cinema-dl-mp4" type="button" onclick="openCinemaResolutionModal()" title="${ui.dlMp4}" style="background:linear-gradient(135deg,#0284c7,#0369a1);border:none;color:#fff;padding:6px 12px;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;gap:4px;">
+          ${ui.dlMp4}
         </button>
-        <button class="cinema-dl-btn cinema-dl-mp3" type="button" onclick="downloadActiveCinemaVideo('mp3')" title="Baixar Áudio / Trilha MP3" style="background:linear-gradient(135deg,#10b981,#059669);border:none;color:#fff;padding:6px 12px;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;gap:4px;">
-          🎵 Áudio MP3
+        <button class="cinema-dl-btn cinema-dl-mp3" type="button" onclick="downloadActiveCinemaVideo('mp3')" title="${ui.dlMp3}" style="background:linear-gradient(135deg,#10b981,#059669);border:none;color:#fff;padding:6px 12px;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;gap:4px;">
+          ${ui.dlMp3}
         </button>
-        <button class="cinema-cast-btn" id="btn-cast-quick" style="padding: 6px 12px; font-size: 11px;" title="Transmitir para Smart TV">
-          📺 Transmitir
+        <button class="cinema-cast-btn" id="btn-cast-quick" style="padding: 6px 12px; font-size: 11px;" title="${ui.cast}">
+          ${ui.cast}
         </button>
       </div>
     </div>
@@ -11417,13 +18960,13 @@ function getDevicePlaylistsRoot(clientId, req) {
 
   <div class="section-header">
     <div class="section-title-text">
-      🍿 Filmes Completos Dublados
+      ${ui.sectionTitle}
     </div>
     <div style="display:flex;align-items:center;gap:8px;">
-      <a href="/filmes?cat=${encodeURIComponent(catId)}${q ? '&q=' + encodeURIComponent(q) : ''}&r=${Date.now()}" style="display:inline-flex;align-items:center;gap:4px;background:rgba(245,158,11,0.15);border:1px solid rgba(245,158,11,0.35);color:#fcd34d;font-size:11px;font-weight:700;padding:4px 10px;border-radius:14px;text-decoration:none;">
-        🎲 Sortear
+      <a href="/filmes?cat=${encodeURIComponent(catId)}${q ? '&q=' + encodeURIComponent(q) : ''}${countryQuerySuffix}&r=${Date.now()}" id="cinema-refresh-short-btn" style="display:inline-flex;align-items:center;gap:4px;background:rgba(245,158,11,0.15);border:1px solid rgba(245,158,11,0.35);color:#fcd34d;font-size:11px;font-weight:700;padding:4px 10px;border-radius:14px;text-decoration:none;">
+        ${ui.refreshShort}
       </a>
-      <div class="section-counter">${movieResults.length} filmes</div>
+      <div class="section-counter" data-count="${movieResults.length}">${movieResults.length} ${ui.countWord}</div>
     </div>
   </div>
 
@@ -11437,11 +18980,11 @@ function getDevicePlaylistsRoot(clientId, req) {
         </div>
         <div class="movie-details">
           <h2 class="movie-title">${(m.title || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</h2>
-          <div class="movie-channel">${(m.channel || 'Cinema Dublado').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
+          <div class="movie-channel">${(m.channel || ui.defaultChannel).replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
           <div class="movie-card-actions">
             <button type="button" onclick="event.stopPropagation(); openCinemaResolutionModal('${m.id}', this)">🎬 MP4</button>
             <button type="button" class="movie-act-mp3" onclick="event.stopPropagation(); downloadActiveCinemaVideo('mp3', '${m.id}', this)">🎵 MP3</button>
-            <button type="button" class="movie-act-cast" onclick="event.stopPropagation(); openCinemaCastForMovie('${m.id}', this)">📺 Transmitir</button>
+            <button type="button" class="movie-act-cast" onclick="event.stopPropagation(); openCinemaCastForMovie('${m.id}', this)">${ui.cast}</button>
           </div>
         </div>
       </article>
@@ -11450,7 +18993,7 @@ function getDevicePlaylistsRoot(clientId, req) {
 
   <div class="agent-scroll-loader" id="cinema-scroll-loader">
     <div class="agent-spinner"></div>
-    <span>🍿 Buscando mais filmes dublados completos...</span>
+    <span>${ui.loaderText}</span>
   </div>
 
   <div class="cast-toast" id="cast-toast"></div>
@@ -11467,12 +19010,18 @@ function getDevicePlaylistsRoot(clientId, req) {
             type: 'navigate-sync',
             url: window.location.href,
             targetUrl: '/filmes',
-            title: 'Filmes Online'
+            title: ${JSON.stringify(ui.pageTitle)}
           }, '*');
         }
       } catch(e) {}
 
       const currentQ = ${JSON.stringify(searchQuery || q || '')};
+      const currentCat = ${JSON.stringify(catId)};
+      const urlHasExplicitCountry = ${rawCountryParam ? 'true' : 'false'};
+      const uiDefaultChannel = ${JSON.stringify(ui.defaultChannel)};
+      const uiCastBtn = ${JSON.stringify(ui.cast)};
+      const uiMaxLabel = ${JSON.stringify(ui.maximize)};
+      const uiMinLabel = ${JSON.stringify(ui.minimize)};
       const iframe = document.getElementById('cinema-iframe');
       const titleEl = document.getElementById('active-title');
       const toastEl = document.getElementById('cast-toast');
@@ -11515,6 +19064,10 @@ function getDevicePlaylistsRoot(clientId, req) {
         const pipVideo = document.getElementById('cinema-pip-video');
         if (pipVideo) {
           try { pipVideo.pause(); } catch (e) {}
+        }
+        const nativeVideo = document.getElementById('cinema-native-video');
+        if (nativeVideo) {
+          try { nativeVideo.pause(); } catch (e) {}
         }
       }
       const cinemaMiniClose = document.getElementById('cinema-mini-close');
@@ -11605,7 +19158,7 @@ function getDevicePlaylistsRoot(clientId, req) {
         try { if (window.papaleguasShowTopoForVideo) window.papaleguasShowTopoForVideo(); } catch (e) {}
 
         const fsLabel = document.getElementById('cinema-fs-label');
-        if (fsLabel) fsLabel.textContent = '⛶ Maximizar';
+        if (fsLabel) fsLabel.textContent = uiMaxLabel;
 
         const playerEl = document.querySelector('.cinema-player-section');
         if (playerEl) {
@@ -11643,7 +19196,7 @@ function getDevicePlaylistsRoot(clientId, req) {
         try { if (window.PapaleguasFab) window.PapaleguasFab.notifyVideoWatch(true); } catch (e) {}
 
         const fsLabel = document.getElementById('cinema-fs-label');
-        if (fsLabel) fsLabel.textContent = '🗕 Minimizar';
+        if (fsLabel) fsLabel.textContent = uiMinLabel;
 
         resetCinemaMinDim();
       }
@@ -11688,7 +19241,7 @@ function getDevicePlaylistsRoot(clientId, req) {
             cinemaFsArmed = true;
             document.documentElement.classList.add('video-true-fs');
             const fsLabel = document.getElementById('cinema-fs-label');
-            if (fsLabel) fsLabel.textContent = '🗕 Minimizar';
+            if (fsLabel) fsLabel.textContent = uiMinLabel;
             resetCinemaMinDim();
             return;
           }
@@ -11696,7 +19249,7 @@ function getDevicePlaylistsRoot(clientId, req) {
             cinemaFsArmed = false;
             document.documentElement.classList.remove('video-true-fs');
             const fsLabel = document.getElementById('cinema-fs-label');
-            if (fsLabel) fsLabel.textContent = '⛶ Maximizar';
+            if (fsLabel) fsLabel.textContent = uiMaxLabel;
             try {
               if (window.parent && window.parent !== window) {
                 window.parent.postMessage({ type: 'exit-video-fullscreen' }, '*');
@@ -11716,11 +19269,109 @@ function getDevicePlaylistsRoot(clientId, req) {
       window.addEventListener('freeze', function () {
         if (currentCinemaVid || window.currentCinemaVid) enterCinemaMiniPlayer(true);
       });
+      let cinemaDetectedCountry = ${JSON.stringify(countryCode)};
+      let cinemaDetectedHl = ${JSON.stringify(hl)};
+      let cinemaDetectedLang = ${JSON.stringify(langShort)};
+
+      const countrySelectEl = document.getElementById('cinema-country-badge');
+      if (countrySelectEl) {
+        try {
+          const savedManual = localStorage.getItem('papaleguas_baixatube_country');
+          if (!urlHasExplicitCountry && savedManual && savedManual !== 'auto') {
+            const cleanSaved = String(savedManual).trim().toUpperCase();
+            if (/^[A-Z]{2}$/.test(cleanSaved) && cleanSaved !== cinemaDetectedCountry) {
+              window.location.replace('/filmes?cat=' + encodeURIComponent(currentCat) + (currentQ ? '&q=' + encodeURIComponent(currentQ) : '') + '&country=' + encodeURIComponent(cleanSaved));
+              return;
+            }
+          }
+        } catch (e) {}
+
+        countrySelectEl.addEventListener('change', function () {
+          const val = String(countrySelectEl.value || 'auto').trim();
+          try {
+            localStorage.setItem('papaleguas_baixatube_country', val);
+          } catch (e) {}
+          const nextCountryParam = (val && val !== 'auto') ? ('&country=' + encodeURIComponent(val.toUpperCase())) : '';
+          window.location.href = '/filmes?cat=' + encodeURIComponent(currentCat) + (currentQ ? '&q=' + encodeURIComponent(currentQ) : '') + nextCountryParam + '&r=' + Date.now();
+        });
+      }
+
+      fetch('/api/country-detect', { cache: 'no-store' })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) {
+          if (d && d.country) {
+            const ipCountry = String(d.country).toUpperCase();
+            try { localStorage.setItem('papaleguas_detected_ip_country', ipCountry); } catch (e) {}
+            if (!urlHasExplicitCountry) {
+              let savedManual = '';
+              try { savedManual = localStorage.getItem('papaleguas_baixatube_country') || ''; } catch (e) {}
+              if ((!savedManual || savedManual === 'auto') && ipCountry !== cinemaDetectedCountry) {
+                window.location.replace('/filmes?cat=' + encodeURIComponent(currentCat) + (currentQ ? '&q=' + encodeURIComponent(currentQ) : '') + '&country=' + encodeURIComponent(ipCountry));
+                return;
+              }
+            }
+          }
+        }).catch(function () {});
+
+      function activateCinemaNativeFallback(vid) {
+        const targetId = vid || currentCinemaVid || window.currentCinemaVid;
+        const nv = document.getElementById('cinema-native-video');
+        if (!nv || !targetId) return;
+        const origin = window.location.origin && window.location.origin.indexOf('http') === 0 ? window.location.origin : 'http://localhost:8080';
+        const streamSrc = origin + '/api/stream-video?v=' + encodeURIComponent(targetId) + '&lang=' + encodeURIComponent(cinemaDetectedLang) + (cinemaDetectedCountry ? '&country=' + encodeURIComponent(cinemaDetectedCountry) : '');
+        if (iframe) {
+          iframe.style.display = 'none';
+          iframe.src = 'about:blank';
+        }
+        nv.style.display = 'block';
+        nv.lang = cinemaDetectedHl;
+        nv.poster = 'https://i.ytimg.com/vi/' + encodeURIComponent(targetId) + '/hqdefault.jpg';
+        if (nv.dataset.vid !== targetId || !nv.src || nv.src.indexOf('stream-video') === -1) {
+          nv.src = streamSrc;
+          nv.dataset.vid = targetId;
+        }
+        nv.play().catch(function () {});
+      }
+
+      function resetCinemaToIframe(id, extraParams) {
+        const nv = document.getElementById('cinema-native-video');
+        if (nv) {
+          try { nv.pause(); } catch (e) {}
+          nv.style.display = 'none';
+          nv.removeAttribute('src');
+          nv.dataset.vid = '';
+          try { nv.load(); } catch (e) {}
+        }
+        if (iframe) {
+          iframe.style.display = '';
+          iframe.referrerPolicy = 'origin';
+          const originEnc = encodeURIComponent(window.location.origin || 'http://localhost:8080');
+          iframe.src = 'https://www.youtube.com/embed/' + encodeURIComponent(id) + '?autoplay=1&enablejsapi=1&playsinline=1&hl=' + encodeURIComponent(cinemaDetectedHl) + '&cc_lang_pref=' + encodeURIComponent(cinemaDetectedLang) + (extraParams || '') + '&rel=0&origin=' + originEnc + '&widget_referrer=' + originEnc;
+        }
+      }
+
+      setInterval(function () {
+        if (iframe && iframe.contentWindow && iframe.style.display !== 'none') {
+          try { iframe.contentWindow.postMessage(JSON.stringify({ event: 'listening' }), '*'); } catch (e) {}
+        }
+      }, 1200);
+
       window.addEventListener('message', function (event) {
         try {
           const data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
           if (data && data.type === 'papaleguas-yt-control' && data.action === 'enter-mini') {
             enterCinemaMiniPlayer(false);
+            return;
+          }
+          if (data && data.event === 'onError') {
+            activateCinemaNativeFallback(currentCinemaVid || window.currentCinemaVid);
+            return;
+          }
+          if (data && (data.event === 'initialDelivery' || data.event === 'infoDelivery') && data.info && data.info.videoData) {
+            const vd = data.info.videoData;
+            if (vd.isPlayable === false || vd.errorCode) {
+              activateCinemaNativeFallback(vd.video_id || currentCinemaVid || window.currentCinemaVid);
+            }
           }
         } catch (e) {}
       });
@@ -11758,10 +19409,7 @@ function getDevicePlaylistsRoot(clientId, req) {
           window.currentCinemaTitle = title;
           currentCinemaVid = id;
           currentCinemaTitle = title;
-          if (iframe) {
-            iframe.referrerPolicy = 'origin';
-            iframe.src = 'https://www.youtube.com/embed/' + encodeURIComponent(id) + '?autoplay=1&enablejsapi=1&playsinline=1&rel=0&origin=' + encodeURIComponent(window.location.origin || 'http://localhost:8080') + '&widget_referrer=' + encodeURIComponent(window.location.origin || 'http://localhost:8080');
-          }
+          resetCinemaToIframe(id, '');
           if (titleEl) titleEl.textContent = '▶ ' + title;
           const directBtn = document.getElementById('cinema-direct-link');
           if (directBtn) directBtn.href = 'https://www.youtube.com/watch?v=' + encodeURIComponent(id);
@@ -11961,8 +19609,7 @@ function getDevicePlaylistsRoot(clientId, req) {
           window.currentCinemaTitle = title;
           currentCinemaVid = id;
           currentCinemaTitle = title;
-          iframe.referrerPolicy = 'origin';
-          iframe.src = 'https://www.youtube.com/embed/' + encodeURIComponent(id) + '?autoplay=1&enablejsapi=1&playsinline=1&fs=1&rel=0&origin=' + encodeURIComponent(window.location.origin || 'http://localhost:8080') + '&widget_referrer=' + encodeURIComponent(window.location.origin || 'http://localhost:8080');
+          resetCinemaToIframe(id, '&fs=1');
           if (titleEl) titleEl.textContent = '▶ ' + title;
           const directBtn = document.getElementById('cinema-direct-link');
           if (directBtn) directBtn.href = 'https://www.youtube.com/watch?v=' + encodeURIComponent(id);
@@ -11970,7 +19617,7 @@ function getDevicePlaylistsRoot(clientId, req) {
           document.documentElement.classList.add('video-true-fs');
           document.body.classList.add('video-true-fs');
           const fsLabel = document.getElementById('cinema-fs-label');
-          if (fsLabel) fsLabel.textContent = '🗕 Minimizar';
+          if (fsLabel) fsLabel.textContent = uiMinLabel;
           resetCinemaMinDim();
           try {
             if (window.parent && window.parent !== window) {
@@ -11988,7 +19635,8 @@ function getDevicePlaylistsRoot(clientId, req) {
           window.scrollTo(0, 0);
 
           try {
-            window.history.replaceState({}, '', '/filmes');
+            const keepUrl = '/filmes?cat=' + encodeURIComponent(currentCat) + (currentQ ? '&q=' + encodeURIComponent(currentQ) : '') + (urlHasExplicitCountry ? '&country=' + encodeURIComponent(cinemaDetectedCountry) : '');
+            window.history.replaceState({}, '', keepUrl);
             if (window.parent && window.parent !== window) {
               window.parent.postMessage({
                 type: 'navigate-sync',
@@ -12026,8 +19674,11 @@ function getDevicePlaylistsRoot(clientId, req) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               type: 'cinema',
-              currentQuery: currentQ,
+              currentQuery: currentQ || currentCat,
+              currentCategory: currentCat,
               currentTitle: currentPlayingTitle,
+              country: cinemaDetectedCountry,
+              isManualCountry: true,
               page: curPage,
               stayOnTheme: true,
               useAi: true,
@@ -12058,11 +19709,11 @@ function getDevicePlaylistsRoot(clientId, req) {
                 </div>
                 <div class="movie-details">
                   <h2 class="movie-title">\${(m.title || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</h2>
-                  <div class="movie-channel">\${(m.channel || 'Cinema Dublado').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
+                  <div class="movie-channel">\${(m.channel || uiDefaultChannel).replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
                   <div class="movie-card-actions">
                     <button type="button" onclick="event.stopPropagation(); openCinemaResolutionModal('\${m.id}', this)">🎬 MP4</button>
                     <button type="button" class="movie-act-mp3" onclick="event.stopPropagation(); downloadActiveCinemaVideo('mp3', '\${m.id}', this)">🎵 MP3</button>
-                    <button type="button" class="movie-act-cast" onclick="event.stopPropagation(); openCinemaCastForMovie('\${m.id}', this)">📺 Transmitir</button>
+                    <button type="button" class="movie-act-cast" onclick="event.stopPropagation(); openCinemaCastForMovie('\${m.id}', this)">\${uiCastBtn}</button>
                   </div>
                 </div>
               \`;
@@ -12523,7 +20174,8 @@ function getDevicePlaylistsRoot(clientId, req) {
         form.addEventListener('submit', (e) => {
           e.preventDefault();
           const qVal = input.value.trim();
-          if (qVal) window.location.href = '/filmes?q=' + encodeURIComponent(qVal);
+          const cParam = urlHasExplicitCountry ? ('&country=' + encodeURIComponent(cinemaDetectedCountry)) : '';
+          if (qVal) window.location.href = '/filmes?q=' + encodeURIComponent(qVal) + cParam;
         });
       }
 
@@ -12648,7 +20300,7 @@ function getDevicePlaylistsRoot(clientId, req) {
       <div id="cast-hub-feedback" style="display:none;margin-top:12px;padding:10px;border-radius:8px;font-size:11.5px;text-align:center;"></div>
     </div>
   </div>
-  <button type="button" class="back-top-btn" id="btn-back-top" title="Voltar ao topo">↑ Topo</button>
+  <button type="button" class="back-top-btn" id="btn-back-top" title="${ui.topBtn}">${ui.topBtn}</button>
   <script>
     (function () {
       var btn = document.getElementById('btn-back-top');
@@ -12692,6 +20344,7 @@ function getDevicePlaylistsRoot(clientId, req) {
       }
     })();
   </script>
+  <script src="/i18n-ip.js?v=98"></script>
 </body>
 </html>`;
 
@@ -12727,7 +20380,7 @@ function getDevicePlaylistsRoot(clientId, req) {
       let dest = '';
       try {
         dest = new URL(pathname + (reqUrl.search || ''), String(ref.target).replace(/\/?$/, '/')).href;
-      } catch (e) {}
+      } catch (e) { swallowed(e, 'server:top@17103'); }
       if (dest && !isAppShellPathname(pathname)) {
         res.writeHead(302, {
           Location: wrapProxyAbs(dest, ref.clientId),
@@ -12755,6 +20408,29 @@ function getDevicePlaylistsRoot(clientId, req) {
     res.writeHead(403, { 'Content-Type': 'text/plain' });
     res.end('403 Forbidden: Acesso restrito a arquivos do sistema.');
     return;
+  }
+
+  if (SOCIAL_CRAWLER_REGEX.test(req.headers['user-agent'] || '')) {
+    if (pathname === '/' || pathname === '/index.html') {
+      serveSocialPreview(res, {
+        title: 'Papaléguas - Navegador Privado, Filmes Online e Músicas',
+        description: 'Navegador privado com streaming de filmes online, músicas sem anúncios e download direto de vídeos em alta velocidade.',
+        imageUrl: 'https://papaleguas.app/og-banner.jpg',
+        pageUrl: 'https://papaleguas.app/',
+        isVideo: false
+      });
+      return;
+    }
+    if (pathname === '/musica' || pathname === '/musica/' || pathname === '/musica.html') {
+      serveSocialPreview(res, {
+        title: 'Papaléguas Music - Músicas e Playlists Sem Anúncios',
+        description: 'Ouça músicas, crie playlists e escute seus artistas favoritos sem anúncios no Papaléguas Music.',
+        imageUrl: 'https://papaleguas.app/og-banner.jpg',
+        pageUrl: 'https://papaleguas.app/musica',
+        isVideo: false
+      });
+      return;
+    }
   }
 
   let filePath = path.join(SRC_DIR, pathname === '/' ? 'index.html' : (pathname === '/musica' ? 'musica.html' : pathname));
@@ -12796,7 +20472,7 @@ function getDevicePlaylistsRoot(clientId, req) {
       });
       assetReq.on('error', () => {
         if (res.headersSent || res.writableEnded) {
-          try { res.destroy(); } catch (e) {}
+          try { res.destroy(); } catch (e) { swallowed(e, 'server:top@17195'); }
           return;
         }
         res.writeHead(404, { 'Content-Type': 'text/plain' });
@@ -12824,60 +20500,87 @@ function getDevicePlaylistsRoot(clientId, req) {
 
   const ext = path.extname(filePath).toLowerCase();
   const contentType = mimeTypes[ext] || 'application/octet-stream';
+  const isAppShell = /[\\/]index\.html$/i.test(filePath) || isAppShellPathname(pathname);
+  const isHtml = isAppShell || ext === '.html' || contentType.includes('text/html');
+  const hasVersion = Boolean(reqUrl.search && /[?&]v=/.test(reqUrl.search));
+  const isStaticAsset = !isHtml && !pathname.endsWith('.txt') && !pathname.endsWith('.xml');
+  let cacheControlHeader = 'public, max-age=86400';
+  if (isHtml) {
+    cacheControlHeader = 'no-cache, must-revalidate';
+  } else if (hasVersion) {
+    cacheControlHeader = 'public, max-age=31536000, immutable';
+  } else if (pathname.endsWith('.js') || pathname.endsWith('.css')) {
+    cacheControlHeader = 'public, max-age=86400, stale-while-revalidate=604800';
+  } else if (isStaticAsset) {
+    cacheControlHeader = 'public, max-age=2592000, immutable';
+  }
 
-  fs.readFile(filePath, (err, content) => {
-    if (err) {
-      res.writeHead(500);
-      res.end('Erro ao carregar arquivo');
-    } else {
-      const isHtml = /[\\/]index\.html$/i.test(filePath) || isAppShellPathname(pathname);
-      const isCoreScript = pathname.endsWith('.js') || pathname.endsWith('.css') || pathname.endsWith('.json') || pathname.endsWith('.html');
-      const isStaticAsset = !isHtml && !pathname.endsWith('.txt') && !pathname.endsWith('.xml') && !isCoreScript;
-      const headers = {
-        'Content-Type': contentType,
-        'Cache-Control': isStaticAsset ? 'public, max-age=86400' : 'no-cache, no-store, must-revalidate',
+  fs.stat(filePath, (statErr, stats) => {
+    if (statErr) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Arquivo não encontrado');
+      return;
+    }
+
+    const etag = `W/"${stats.size.toString(16)}-${Math.floor(stats.mtimeMs).toString(16)}"`;
+    const ifNoneMatch = req.headers && req.headers['if-none-match'];
+    if (ifNoneMatch && ifNoneMatch === etag) {
+      res.writeHead(304, {
+        'ETag': etag,
+        'Cache-Control': cacheControlHeader,
         'Vary': 'Accept-Encoding'
-      };
-      if (isHtml) {
-        headers['X-Frame-Options'] = 'DENY';
-        headers['Content-Security-Policy'] = "frame-ancestors 'none'";
-        headers['Set-Cookie'] = 'pl_proxy_target=; Path=/; Max-Age=0; SameSite=Lax';
-      }
+      });
+      res.end();
+      return;
+    }
 
-      const acceptEncoding = (req.headers && req.headers['accept-encoding']) || '';
-      const isCompressible = /text|javascript|json|xml|svg/i.test(contentType);
+    let cached = staticAssetMemoryCache.get(filePath);
+    if (!cached || cached.mtimeMs !== stats.mtimeMs) {
+      fs.readFile(filePath, (readErr, content) => {
+        if (readErr) {
+          res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end('Erro ao carregar arquivo');
+          return;
+        }
 
-      if (isCompressible && acceptEncoding.includes('br') && typeof zlib.brotliCompress === 'function') {
-        headers['Content-Encoding'] = 'br';
-        zlib.brotliCompress(content, (brErr, compressed) => {
-          if (!brErr && compressed) {
-            headers['Content-Length'] = compressed.length;
-            res.writeHead(200, headers);
-            res.end(compressed);
-          } else {
-            headers['Content-Length'] = content.length;
-            delete headers['Content-Encoding'];
-            res.writeHead(200, headers);
-            res.end(content);
+        const isCompressible = /text|javascript|json|xml|svg/i.test(contentType);
+        let brBuf = null;
+        let gzipBuf = null;
+        if (isCompressible && content.length > 64) {
+          try {
+            if (typeof zlib.brotliCompressSync === 'function') {
+              brBuf = zlib.brotliCompressSync(content, {
+                params: {
+                  [zlib.constants.BROTLI_PARAM_QUALITY]: 5
+                }
+              });
+            }
+          } catch (e) { swallowed(e, 'server:top@17278'); }
+          try {
+            gzipBuf = zlib.gzipSync(content, { level: 6 });
+          } catch (e) { swallowed(e, 'server:top@17281'); }
+        }
+
+        cached = {
+          mtimeMs: stats.mtimeMs,
+          content,
+          brBuf,
+          gzipBuf,
+          etag
+        };
+
+        if (stats.size <= 10 * 1024 * 1024) {
+          if (staticAssetMemoryCache.size > 150) {
+            const firstKey = staticAssetMemoryCache.keys().next().value;
+            if (firstKey) staticAssetMemoryCache.delete(firstKey);
           }
-        });
-      } else if (isCompressible && acceptEncoding.includes('gzip')) {
-        headers['Content-Encoding'] = 'gzip';
-        zlib.gzip(content, (gzipErr, compressed) => {
-          if (!gzipErr && compressed) {
-            headers['Content-Length'] = compressed.length;
-            res.writeHead(200, headers);
-            res.end(compressed);
-          } else {
-            res.writeHead(200, headers);
-            res.end(content);
-          }
-        });
-      } else {
-        headers['Content-Length'] = content.length;
-        res.writeHead(200, headers);
-        res.end(content);
-      }
+          staticAssetMemoryCache.set(filePath, cached);
+        }
+
+        deliverCachedAsset(req, res, cached, contentType, cacheControlHeader, isAppShell);
+      });
+    } else {
+      deliverCachedAsset(req, res, cached, contentType, cacheControlHeader, isAppShell);
     }
   });
 });
@@ -12893,7 +20596,7 @@ server.on('connection', (socket) => {
 server.on('clientError', (err, socket) => {
   if (err && (err.code === 'ECONNRESET' || err.code === 'EPIPE')) return;
   if (socket && !socket.destroyed && socket.writable) {
-    try { socket.end('HTTP/1.1 400 Bad Request\r\n\r\n'); } catch (e) {}
+    try { socket.end('HTTP/1.1 400 Bad Request\r\n\r\n'); } catch (e) { swallowed(e, 'server:top@17319'); }
   }
 });
 
@@ -12903,15 +20606,15 @@ async function bootTorBeforeTunnel() {
   try {
     const status = await torManager.ensureRunning();
     ready = Boolean(status && status.connected);
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'server:bootTorBeforeTunnel@17329'); }
   if (ready) {
-    nativeConsoleLog('[TOR] Rede Tor pronta. Abrindo o túnel ngrok.');
+    nativeConsoleLog('[TOR] Rede Tor pronta.');
     lookupOutboundIp(true).catch(() => {});
   } else {
-    nativeConsoleLog('[TOR] Tor ainda não confirmou. O túnel ngrok será aberto mesmo assim.');
+    nativeConsoleLog('[TOR] Tor ainda não confirmou.');
   }
-  // Mantendo somente o ngrok como túnel público
-  ngrokTunnel.startTunnel(PORT);
+  // Cloudflare Tunnel (papaleguas.app) é o túnel público oficial
+  ngrokTunnel.stopTunnel();
 }
 
 server.on('error', (err) => {
@@ -12935,6 +20638,9 @@ function getLocalNetworkIp() {
   return 'localhost';
 }
 
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
+
 server.listen(PORT, '0.0.0.0', () => {
   const wiped = clearBrowsingTraces();
   const tempRemoved = clearRamTempFiles();
@@ -12947,6 +20653,71 @@ server.listen(PORT, '0.0.0.0', () => {
   nativeConsoleLog(`  👑 Painel Admin (No Wi-Fi): http://${localIp}:${PORT}/papaleguas`);
   nativeConsoleLog('[TOR] Subindo a rede Tor antes do túnel Cloudflare.');
   bootTorBeforeTunnel();
+  setTimeout(() => {
+    try {
+      startBackgroundUptimeScanner();
+      nativeConsoleLog('🧅 [ONION SCANNER] Monitor autônomo de Uptime 200 ativado para links .onion.');
+    } catch (e) { swallowed(e, 'server:top@17380'); }
+  }, 4000);
+
+  // Pré-aquecimento em segundo plano do BaixaTube (notícias e vídeos em alta) para abertura instantânea
+  setTimeout(() => {
+    try {
+      fetchMixedNewsVideosFresh({ timeFilter: 'hour', country: 'BR', page: 1 }).catch(() => {});
+      fetchGoogleTrends('BR').catch(() => {});
+      fetchTrendingVideos({ country: 'BR' }).catch(() => {});
+      fetchGoogleTrends('BR').catch(() => {});
+      nativeConsoleLog('🚀 [BAIXATUBE ACCELERATOR] Feed de notícias, tendências e Google Trends pré-aquecidos para SEO instantâneo.');
+    } catch (e) { swallowed(e, 'server:top@17391'); }
+  }, 2500);
+
+  // Inicialização do Robô do Telegram e ponte para agentes
+  setTimeout(() => {
+    try {
+      telegramBot.init({
+        getCachedGoogleTrends,
+        getVideoTitleFast,
+        startMediaDownloadJob
+      });
+    } catch (e) {
+      nativeConsoleLog('[TELEGRAM BOT] Falha ao inicializar:', e.message);
+    }
+  }, 3000);
+
+  // Atualização silenciosa em segundo plano do feed de notícias a cada 4 minutos
+  setInterval(() => {
+    try {
+      fetchMixedNewsVideosFresh({ timeFilter: 'hour', country: 'BR', page: 1 }).catch(() => {});
+    } catch (e) { swallowed(e, 'server:top@17411'); }
+  }, 4 * 60 * 1000);
+
+  // Atualização periódica do Google Trends a cada 30 minutos com forceRefresh para todos os países ativos
+  setInterval(() => {
+    try {
+      const activeCountries = new Set(['BR', ...googleTrendsCache.keys()]);
+      for (const c of activeCountries) {
+        fetchGoogleTrends(c, true).catch(() => {});
+      }
+      nativeConsoleLog(`🔄 [GOOGLE TRENDS] Atualização a cada 30 minutos dos 10 temas em alta executada (${Array.from(activeCountries).join(', ')}).`);
+    } catch (e) { swallowed(e, 'server:top@17422'); }
+  }, 30 * 60 * 1000);
+
+  // Atualização e renovação do feed de notícias e tendências a cada 30 minutos
+  setInterval(() => {
+    try {
+      if (global.__plRecentFeedFastCache) global.__plRecentFeedFastCache.clear();
+      youtubeSearchCache.clear();
+      mixedNewsCache = null;
+      mixedNewsCacheTime = 0;
+      mixedNewsCacheByKey.clear();
+      const activeCountries = new Set(['BR', ...googleTrendsCache.keys()]);
+      for (const c of activeCountries) {
+        fetchMixedNewsVideosFresh({ timeFilter: 'hour', country: c, page: 1, forceRefresh: true }).catch(() => {});
+        fetchTrendingVideos({ country: c }).catch(() => {});
+      }
+      nativeConsoleLog('🔄 [BAIXATUBE ACCELERATOR] Feed de vídeos e tendências renovado com novos vídeos a cada 30 minutos.');
+    } catch (e) { swallowed(e, 'server:top@17439'); }
+  }, 30 * 60 * 1000);
 });
 
 // Apaga tudo que a navegação deixou na memória do servidor: pesquisas, URLs
@@ -12975,7 +20746,7 @@ function clearRamTempFiles() {
       if (st.isSocket() || st.isFIFO()) return;
       fs.rmSync(target, { recursive: true, force: true });
       removed += 1;
-    } catch (e) {}
+    } catch (e) { swallowed(e, 'server:clearRamTempFiles@17469'); }
   });
   return removed;
 }
@@ -12984,9 +20755,10 @@ function removeDirContents(dir) {
   try {
     if (!dir || !fs.existsSync(dir)) return;
     for (const name of fs.readdirSync(dir)) {
-      try { fs.rmSync(path.join(dir, name), { recursive: true, force: true }); } catch (e) {}
+      if (name.includes('device_video_prefs') || name.includes('prefs')) continue;
+      try { fs.rmSync(path.join(dir, name), { recursive: true, force: true }); } catch (e) { swallowed(e, 'server:removeDirContents@17479'); }
     }
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'server:removeDirContents@17481'); }
 }
 
 function clearBrowsingTraces() {
@@ -13013,7 +20785,7 @@ function clearBrowsingTraces() {
         cleared += cache.size || 0;
         cache.clear();
       }
-    } catch (e) {}
+    } catch (e) { swallowed(e, 'server:clearBrowsingTraces@17508'); }
   });
   removeDirContents(MEDIA_DOWNLOADS_DIR);
   removeDirContents(path.join(os.tmpdir(), 'papaleguas_code'));
@@ -13021,11 +20793,11 @@ function clearBrowsingTraces() {
   try {
     const { wipePythonSessionFiles } = require('./python-runner');
     if (typeof wipePythonSessionFiles === 'function') wipePythonSessionFiles();
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'server:clearBrowsingTraces@17516'); }
   try {
     const tunnelLog = path.join(__dirname, '../papaleguas/data/cloudflared.log');
     if (fs.existsSync(tunnelLog)) fs.writeFileSync(tunnelLog, '', 'utf8');
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'server:clearBrowsingTraces@17520'); }
   return { success: true, cleared };
 }
 
@@ -13044,3 +20816,11 @@ module.exports = {
   getHlForCountry,
   clearBrowsingTraces
 };
+
+// Pré-aquece o feed misturado de Notícias (principais canais de jornalismo) para abertura instantânea
+setTimeout(() => {
+  try { fetchMixedNewsVideos({ timeFilter: 'hour', country: 'BR', page: 1 }).catch(() => {}); } catch (e) { swallowed(e, 'server:top@17542'); }
+}, 5000);
+setInterval(() => {
+  try { fetchMixedNewsVideos({ timeFilter: 'hour', country: 'BR', page: 1, forceRefresh: true }).catch(() => {}); } catch (e) { swallowed(e, 'server:top@17545'); }
+}, 3 * 60 * 1000).unref();

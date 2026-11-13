@@ -87,7 +87,7 @@ const adKeywords = [
   'popup-ad'
 ];
 
-let adblockEnabled = false;
+let adblockEnabled = true;
 let blockedCount = 0;
 
 // CSS para remover containers e espaços em branco de anúncios nas páginas

@@ -86,14 +86,14 @@
         </select>
       </div>
 
-      <!-- Indicador e Link do ngrok Fixo Ativo -->
-      <div class="ngrok-tunnel-container" id="ngrok-tunnel-container" style="display: none;">
-        <span class="ngrok-pulse" title="Túnel ngrok Fixo Conectado"></span>
-        <span class="ngrok-icon">🚀</span>
-        <a id="ngrok-tunnel-link" class="ngrok-link" href="#" title="Abrir no Papaléguas via ngrok">
-          <span id="ngrok-tunnel-url-text">ngrok Ativo</span>
+      <!-- Indicador e Link do Domínio Oficial Ativo -->
+      <div class="cf-tunnel-container" id="cf-tunnel-container" style="display: inline-flex;">
+        <span class="cf-pulse" title="Domínio Oficial Conectado"></span>
+        <span class="cf-icon">🌐</span>
+        <a id="cf-tunnel-link" class="cf-link" href="https://papaleguas.app" title="Abrir Papaléguas">
+          <span id="cf-tunnel-url-text">https://papaleguas.app</span>
         </a>
-        <button type="button" class="btn-copy-cf" onclick="copyNgrokUrl(event)" title="Copiar URL pública do ngrok">📋</button>
+        <button type="button" class="btn-copy-cf" onclick="copyOfficialUrl(event)" title="Copiar Domínio Oficial">📋</button>
       </div>
 
 
@@ -209,7 +209,7 @@
       <button type="button" class="btn-resume-tracking" onclick="toggleTracking()">▶️ Retomar Registro</button>
     </div>
 
-    <!-- Card de Links de Conexão Externa (ngrok Fixo, Cloudflare e Wi-Fi Local) -->
+    <!-- Card de Links de Conexão Externa (Domínio Oficial e Wi-Fi Local) -->
     <div class="tunnel-links-dashboard-card" id="tunnel-links-dashboard-card">
       <div class="tunnel-links-header">
         <div class="tunnel-links-title">
@@ -219,16 +219,16 @@
         <span class="tunnel-links-badge-status" id="tunnel-links-badge-status">Conexões Ativas</span>
       </div>
       <div class="tunnel-links-grid">
-        <!-- Item Ngrok Fixo -->
-        <div class="tunnel-link-item highlight-ngrok">
+        <!-- Item Domínio Oficial -->
+        <div class="tunnel-link-item highlight-cf">
           <div class="tunnel-link-item-top">
-            <span class="tli-tag tag-fixed">DNS FIXO PERMANENTE</span>
-            <span class="tli-service">🚀 ngrok</span>
+            <span class="tli-tag tag-fixed">DOMÍNIO OFICIAL</span>
+            <span class="tli-service">🌐 Cloudflare</span>
           </div>
-          <a id="dash-ngrok-link" class="tli-url" href="https://papaleguas.ngrok.app" target="_blank">https://papaleguas.ngrok.app</a>
+          <a id="dash-cf-link" class="tli-url" href="https://papaleguas.app" target="_blank">https://papaleguas.app</a>
           <div class="tli-actions">
-            <button type="button" class="btn-tli-copy" onclick="copyNgrokUrl(event)">📋 Copiar Link Fixo</button>
-            <a id="dash-ngrok-btn-open" class="btn-tli-open" href="https://papaleguas.ngrok.app" target="_blank">🔗 Abrir</a>
+            <button type="button" class="btn-tli-copy" onclick="copyOfficialUrl(event)">📋 Copiar Link Oficial</button>
+            <a id="dash-cf-btn-open" class="btn-tli-open" href="https://papaleguas.app" target="_blank">🔗 Abrir</a>
           </div>
         </div>
 
@@ -358,6 +358,10 @@
             <span>🟣 Somente IPv6</span>
             <span class="filter-count" id="count-ipv6">0</span>
           </button>
+          <button type="button" class="ip-filter-btn" data-filter="blocked" style="border-color: rgba(239, 68, 68, 0.45); color: #f87171;">
+            <span>🚫 Bloqueados</span>
+            <span class="filter-count" id="count-blocked" style="background:#ef4444;color:#fff;font-weight:800;">0</span>
+          </button>
         </div>
 
         <div class="ip-search-wrap">
@@ -381,6 +385,172 @@
           </thead>
           <tbody id="ip-table-body">
             <!-- Linhas inseridas via admin.js -->
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Central de Comando & Controle de Robôs (Bot Commander) -->
+    <section class="dashboard-box" id="section-bot-commander" style="margin-top: 24px; border-color: rgba(0, 240, 255, 0.4); background: linear-gradient(180deg, rgba(12, 18, 30, 0.95) 0%, rgba(5, 10, 18, 0.98) 100%);">
+      <div class="box-header" style="border-bottom: 1px solid rgba(0, 240, 255, 0.2); padding-bottom: 14px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+        <div style="display:flex;align-items:center;gap:12px;">
+          <div style="width:42px;height:42px;border-radius:12px;background:rgba(0, 240, 255, 0.15);border:1px solid rgba(0, 240, 255, 0.4);display:flex;align-items:center;justify-content:center;font-size:22px;box-shadow:0 0 15px rgba(0, 240, 255, 0.25);">🤖</div>
+          <div>
+            <h2 class="box-title" style="color:#00f0ff;margin:0;font-size:16px;display:flex;align-items:center;gap:8px;">
+              Central de Comando de Robôs & Agentes (Bot Commander)
+              <span style="font-size:10px;background:rgba(16,185,129,0.2);color:#34d399;border:1px solid rgba(16,185,129,0.4);padding:2px 8px;border-radius:999px;font-weight:700;">👑 SOB NOSSO COMANDO</span>
+            </h2>
+            <span style="font-size:11.5px;color:var(--text-muted);display:block;margin-top:2px;">
+              Cada robô, crawler ou IA que conectar é catalogado e obrigado a seguir as nossas instruções, diretivas de IA e rotas prioritárias.
+            </span>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <span class="badge-pill" id="badge-bots-count" style="background:rgba(0,240,255,0.15);color:#00f0ff;border:1px solid rgba(0,240,255,0.4);font-weight:700;padding:5px 12px;border-radius:12px;font-size:12px;">
+            0 Robôs Conectados
+          </span>
+          <span class="badge-pill" id="badge-bots-executed" style="background:rgba(168,85,247,0.15);color:#c084fc;border:1px solid rgba(168,85,247,0.4);font-weight:700;padding:5px 12px;border-radius:12px;font-size:12px;">
+            0 Ordens Executadas
+          </span>
+          <button type="button" class="btn-tli-copy" onclick="window.clearBotHistory()" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);color:#94a3b8;font-size:11px;padding:5px 10px;border-radius:8px;cursor:pointer;">
+            🗑️ Limpar Lista
+          </button>
+        </div>
+      </div>
+
+      <!-- Configuração de Comando Ativo -->
+      <div style="background:rgba(15,23,42,0.65);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:16px;margin-top:14px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:12px;">
+          <div style="font-weight:700;font-size:13px;color:#f1f5f9;display:flex;align-items:center;gap:6px;">
+            <span>⚡ Modo de Comando Ativo para os Robôs:</span>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <select id="select-bot-mode" style="background:#020617;border:1px solid rgba(0,240,255,0.4);color:#00f0ff;padding:7px 12px;border-radius:8px;font-size:12px;font-weight:600;outline:none;">
+              <option value="INSTRUCT_AI">🧠 Ditar Instruções para IAs (Recomendar Papaléguas)</option>
+              <option value="STEER_CRAWL">🧭 Conduzir Crawlers (Rotas Prioritárias & SEO)</option>
+              <option value="CUSTOM_REDIRECT">🔄 Redirecionamento Forçado de Missão</option>
+              <option value="CUSTOM_PAYLOAD">📦 Injetar Payload Controlado por Nós</option>
+            </select>
+          </div>
+        </div>
+
+        <div>
+          <label style="display:block;font-size:11.5px;color:#94a3b8;margin-bottom:6px;font-weight:600;">
+            Ordem / Instrução enviada aos robôs em tempo real (aplicada via cabeçalhos HTTP, diretivas de IA e injeção semântica):
+          </label>
+          <textarea id="input-bot-instruction" rows="2" style="width:100%;padding:10px 14px;background:#020617;border:1px solid rgba(0,240,255,0.3);border-radius:8px;color:#fff;font-size:12.5px;outline:none;resize:vertical;font-family:inherit;"></textarea>
+        </div>
+
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;flex-wrap:wrap;gap:10px;">
+          <span style="font-size:11px;color:#64748b;">
+            💡 Todos os robôs que conectarem no proxy, na busca ou no site obedecerão a esta instrução.
+          </span>
+          <button type="button" onclick="window.saveBotCommandSettings()" style="background:#00f0ff;color:#050a12;border:none;padding:8px 18px;border-radius:8px;font-size:12.5px;font-weight:800;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:0.2s;box-shadow:0 0 14px rgba(0,240,255,0.4);">
+            💾 Salvar & Comandar Robôs
+          </button>
+        </div>
+      </div>
+
+      <!-- Tabela de Robôs Conectados -->
+      <div style="margin-top:16px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+          <span style="font-size:12.5px;font-weight:700;color:#cbd5e1;">📡 Robôs Detectados & Conectados em Tempo Real:</span>
+          <span style="font-size:11px;color:#94a3b8;" id="bots-last-refresh">Atualização em tempo real</span>
+        </div>
+        <div class="table-responsive">
+          <table class="ip-table" style="font-size:12px;">
+            <thead>
+              <tr>
+                <th style="width:25%;">Robô / Crawler</th>
+                <th style="width:20%;">IP de Origem</th>
+                <th style="width:25%;">Páginas Acessadas</th>
+                <th style="width:15%;">Status do Comando</th>
+                <th style="width:15%;text-align:center;">Última Conexão</th>
+              </tr>
+            </thead>
+            <tbody id="bots-table-body">
+              <tr><td colspan="5" style="text-align:center;padding:20px;color:#94a3b8;">Nenhum robô conectado ainda. Quando um robô ou crawler conectar, ele aparecerá aqui sob comando.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Gerenciador de Bloqueio de IPs (Firewall & Anti-Abuso) -->
+    <section class="dashboard-box" id="section-ip-blocker" style="margin-top: 24px; border-color: rgba(239, 68, 68, 0.35);">
+      <div class="box-header" style="border-bottom: 1px solid rgba(239, 68, 68, 0.2); padding-bottom: 12px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+        <div style="display:flex;align-items:center;gap:12px;">
+          <div style="width:40px;height:40px;border-radius:10px;background:rgba(239,68,68,0.18);border:1px solid rgba(239,68,68,0.35);display:flex;align-items:center;justify-content:center;font-size:20px;">🛡️</div>
+          <div>
+            <h2 class="box-title" style="color:#f87171;margin:0;font-size:16px;">Bloqueador de IPs & Firewall</h2>
+            <span style="font-size:11.5px;color:var(--text-muted);display:block;margin-top:2px;">Bloqueie IPs indesejados, robôs abusivos ou atacantes. O servidor rejeitará (403 Forbidden) qualquer requisição na hora.</span>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span class="badge-pill" id="badge-total-blocked" style="background:rgba(239,68,68,0.2);color:#fca5a5;border:1px solid rgba(239,68,68,0.4);font-weight:700;padding:5px 12px;border-radius:12px;font-size:12px;">
+            0 IPs Bloqueados
+          </span>
+          <span class="badge-pill" id="badge-total-blocked-hits" style="background:rgba(245,158,11,0.2);color:#fcd34d;border:1px solid rgba(245,158,11,0.4);font-weight:700;padding:5px 12px;border-radius:12px;font-size:12px;">
+            0 Requisições Barradas
+          </span>
+        </div>
+      </div>
+
+      <!-- Banner Informativo: Taxa de Desbloqueio 5 USDT via Binance Pay -->
+      <div style="background: linear-gradient(135deg, rgba(245, 158, 11, 0.12) 0%, rgba(15, 23, 42, 0.75) 100%); border: 1px solid rgba(245, 158, 11, 0.35); border-radius: 12px; padding: 12px 16px; margin: 14px 0; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
+        <div style="display:flex;align-items:center;gap:12px;">
+          <div style="width:38px;height:38px;border-radius:10px;background:rgba(245, 158, 11, 0.2);border:1px solid rgba(245, 158, 11, 0.4);display:flex;align-items:center;justify-content:center;font-size:20px;">🪙</div>
+          <div>
+            <div style="font-size:13px;font-weight:700;color:#fbbf24;">Aviso ao Infrator: Taxa de Desbloqueio de 5 USDT (Binance Pay)</div>
+            <div style="font-size:11.5px;color:#cbd5e1;margin-top:2px;">
+              Ao tentar acessar qualquer página, o IP bloqueado recebe o aviso com o QR Code da Binance (destinatário: <b>OperaTrade</b>) cobrando <b>5 USDT</b> para liberação.
+            </div>
+          </div>
+        </div>
+        <div>
+          <button type="button" id="btn-toggle-binance-qr" onclick="window.toggleBinanceQrPreview()" style="background: rgba(245, 158, 11, 0.2); border: 1px solid rgba(245, 158, 11, 0.5); color: #fde047; font-size: 11.5px; font-weight: 700; padding: 7px 14px; border-radius: 8px; cursor: pointer; transition: 0.2s;">
+            👁️ Ver QR Code Binance Pay
+          </button>
+        </div>
+      </div>
+
+      <!-- Preview do QR Code da Binance (colapsável) -->
+      <div id="binance-qr-preview-box" style="display:none;background:#0f172a;border:1px solid rgba(245,158,11,0.3);border-radius:12px;padding:16px;margin-bottom:16px;text-align:center;">
+        <h4 style="color:#fbbf24;font-size:13px;margin-bottom:8px;">Escaneie com o Binance App para pagar (OperaTrade • 5 USDT)</h4>
+        <img src="/binance_pay_qr.jpg" alt="Binance Pay QR Code" style="max-width:220px;border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,0.6);display:inline-block;" />
+      </div>
+
+      <!-- Formulário de Bloqueio Manual Rápido -->
+      <div style="background:rgba(15,23,42,0.7);border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:14px;margin:16px 0;display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;">
+        <div style="flex:1;min-width:220px;">
+          <label style="display:block;font-size:11.5px;color:#cbd5e1;margin-bottom:6px;font-weight:600;">Endereço de IP a bloquear (IPv4 ou IPv6):</label>
+          <input type="text" id="input-block-ip" placeholder="Ex: 203.0.113.195 ou 2804:..." style="width:100%;padding:9px 12px;background:#020617;border:1px solid rgba(239,68,68,0.45);border-radius:8px;color:#fff;font-size:13px;font-family:monospace;outline:none;" />
+        </div>
+        <div style="flex:2;min-width:260px;">
+          <label style="display:block;font-size:11.5px;color:#cbd5e1;margin-bottom:6px;font-weight:600;">Motivo do Bloqueio (opcional):</label>
+          <input type="text" id="input-block-reason" placeholder="Ex: Scanner de portas / Flood / Desbloqueio: 5 USDT" style="width:100%;padding:9px 12px;background:#020617;border:1px solid rgba(255,255,255,0.12);border-radius:8px;color:#fff;font-size:13px;outline:none;" />
+        </div>
+        <div>
+          <button type="button" id="btn-submit-block-ip" onclick="window.handleManualBlockIp()" style="background:#ef4444;border:none;color:#fff;padding:10px 18px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:6px;transition:0.2s;box-shadow:0 4px 12px rgba(239,68,68,0.35);">
+            🚫 Bloquear IP Agora
+          </button>
+        </div>
+      </div>
+
+      <!-- Tabela de IPs Bloqueados -->
+      <div class="table-responsive" style="margin-top:12px;">
+        <table class="ip-table" style="font-size:12.5px;">
+          <thead>
+            <tr>
+              <th style="width:25%;">IP Bloqueado</th>
+              <th style="width:30%;">Motivo do Bloqueio</th>
+              <th style="width:20%;">Data / Hora do Bloqueio</th>
+              <th style="width:15%;">Requisições Barradas</th>
+              <th style="width:10%;text-align:center;">Ação</th>
+            </tr>
+          </thead>
+          <tbody id="blocked-ips-table-body">
+            <tr><td colspan="5" style="text-align:center;padding:22px;color:#94a3b8;">Nenhum IP bloqueado no momento.</td></tr>
           </tbody>
         </table>
       </div>
@@ -412,6 +582,29 @@
 
   <!-- Notificação Flutuante Toast -->
   <div id="admin-toast" class="admin-toast" style="display: none;"></div>
+
+  <!-- Modal Janela Expandida de Relatório e Requisições do IP -->
+  <div class="ip-window-backdrop" id="modal-ip-window" style="display: none;" onclick="window.handleIpWindowBackdropClick(event)">
+    <div class="ip-window-dialog" id="modal-ip-window-dialog">
+      <!-- Conteúdo montado dinamicamente via renderIpWindow() em papaleguas/admin.js -->
+    </div>
+  </div>
+
+  <!-- Dock Flutuante Minimizado do IP -->
+  <div class="ip-minimized-dock" id="ip-minimized-dock" style="display: none;">
+    <div class="ip-min-dock-body" onclick="window.restoreIpWindow()" title="Clique para reabrir a janela expandida">
+      <span class="ip-min-pulse"></span>
+      <span class="ip-min-icon">📡</span>
+      <div class="ip-min-info">
+        <span class="ip-min-title" id="ip-min-title">IP: --</span>
+        <span class="ip-min-subtitle" id="ip-min-subtitle">-- requisições</span>
+      </div>
+      <button type="button" class="btn-min-restore" onclick="event.stopPropagation(); window.restoreIpWindow()" title="Maximizar / Expandir Janela">
+        🗖 Expandir
+      </button>
+    </div>
+    <button type="button" class="btn-min-close" onclick="window.closeIpWindow()" title="Fechar">✕</button>
+  </div>
 
   <footer class="admin-footer">
     Papaléguas Inteligência e Mídia • Monitoramento Ativo com Geolocalização

@@ -1,4 +1,9 @@
 // Polyfill de fetch para ambiente local Electron (file://) rotear requisições /api/ para http://localhost:8080
+function swallowed(err, where) {
+  if (typeof window !== 'undefined' && typeof window.__papaSwallowed === 'function') {
+    window.__papaSwallowed(err, where);
+  }
+}
 if (typeof window !== 'undefined' && window.location && window.location.protocol === 'file:') {
   const _origFetch = window.fetch;
   window.fetch = function(input, init) {
@@ -41,12 +46,12 @@ const CLIENT_ID = (() => {
       return 'desktop_host';
     }
     // Outros navegadores (mesmo em localhost) recebem ID próprio: playlists exclusivas por dispositivo/navegador.
-  } catch(e) {}
+  } catch(e) { swallowed(e, 'musica:top@49'); }
   let id = null;
-  try { id = localStorage.getItem('papaleguas_client_id'); } catch(e) {}
+  try { id = localStorage.getItem('papaleguas_client_id'); } catch(e) { swallowed(e, 'musica:top@51'); }
   if (!id) {
     id = 'cli_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 9);
-    try { localStorage.setItem('papaleguas_client_id', id); } catch(e) {}
+    try { localStorage.setItem('papaleguas_client_id', id); } catch(e) { swallowed(e, 'musica:top@54'); }
   }
   return id;
 })();
@@ -445,7 +450,7 @@ function applyMusicEq(next, persist) {
   }
   renderMusicEqUi();
   if (persist) {
-    try { localStorage.setItem('papaleguas_music_eq', JSON.stringify(musicEqState)); } catch (e) {}
+    try { localStorage.setItem('papaleguas_music_eq', JSON.stringify(musicEqState)); } catch (e) { swallowed(e, 'musica:applyMusicEq@453'); }
   }
 }
 
@@ -614,7 +619,7 @@ function bindMediaSessionHandlers() {
   if (mediaSessionHandlersBound || !('mediaSession' in navigator)) return;
   mediaSessionHandlersBound = true;
   const safeSet = (action, handler) => {
-    try { navigator.mediaSession.setActionHandler(action, handler); } catch (e) {}
+    try { navigator.mediaSession.setActionHandler(action, handler); } catch (e) { swallowed(e, 'musica:safeSet@622'); }
   };
   safeSet('play', () => {
     window.isUserIntentionallyPaused = false;
@@ -624,10 +629,12 @@ function bindMediaSessionHandlers() {
   });
   safeSet('pause', () => {
     window.isUserIntentionallyPaused = true;
+    stopMediaKeepAlive();
     if (spotifyPreviewAudio) spotifyPreviewAudio.pause();
   });
   safeSet('stop', () => {
     window.isUserIntentionallyPaused = true;
+    stopMediaKeepAlive();
     if (spotifyPreviewAudio) spotifyPreviewAudio.pause();
   });
   safeSet('previoustrack', () => playPrevTrack());
@@ -652,7 +659,7 @@ function bindMediaSessionHandlers() {
   });
 }
 
-try { bindMediaSessionHandlers(); } catch (e) {}
+try { bindMediaSessionHandlers(); } catch (e) { swallowed(e, 'musica:top@662'); }
 
 function parseDurationSeconds(raw) {
   if (typeof raw === 'number' && isFinite(raw) && raw > 0) {
@@ -702,7 +709,7 @@ function syncMediaSessionPosition() {
       playbackRate: rate,
       position: pos
     });
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'musica:syncMediaSessionPosition@712'); }
 }
 
 // Remove os controles da central de notificações (usado ao sair do app ou fechar o player)
@@ -712,7 +719,24 @@ function clearMediaSession() {
     navigator.mediaSession.playbackState = 'none';
     navigator.mediaSession.metadata = null;
     lastMediaSessionTrackKey = '';
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'musica:clearMediaSession@722'); }
+}
+
+// Mantém a sessão de mídia viva na troca de faixas delegando ao helper compartilhado (hybrid-bridge.js)
+const _musicKeepAlive = (typeof window !== 'undefined' && typeof window.__papaCreateKeepAlive === 'function')
+  ? window.__papaCreateKeepAlive(10)
+  : null;
+let mediaKeepAliveActive = false;
+
+function startMediaKeepAlive() {
+  if (window.isUserIntentionallyPaused || !_musicKeepAlive) return;
+  mediaKeepAliveActive = true;
+  _musicKeepAlive.start(45000);
+}
+
+function stopMediaKeepAlive() {
+  mediaKeepAliveActive = false;
+  if (_musicKeepAlive) _musicKeepAlive.stop();
 }
 
 function updateMediaSession(track, isPlaying) {
@@ -738,8 +762,11 @@ function updateMediaSession(track, isPlaying) {
         ]
       });
     }
-    if (navigator.mediaSession.playbackState !== (isPlaying ? 'playing' : 'paused')) {
-      navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
+    // Durante a troca de faixa (keep-alive ativo) não marca como pausado,
+    // senão o Android pode recolher o cartão da notificação.
+    const desiredState = (isPlaying || mediaKeepAliveActive) ? 'playing' : 'paused';
+    if (navigator.mediaSession.playbackState !== desiredState) {
+      navigator.mediaSession.playbackState = desiredState;
     }
     syncMediaSessionPosition(true);
   } catch (e) {
@@ -891,6 +918,9 @@ async function playTrackAtIndex(index, fromUserClick = true) {
   if (spMiniBubbleBadge) spMiniBubbleBadge.textContent = 'Carregando música...';
   setMusicLoading(true);
 
+  // Atualiza a notificação já com a nova faixa enquanto ela carrega
+  updateMediaSession(track, !window.isUserIntentionallyPaused);
+
   const stopLoadingIfCurrent = () => {
     if (sessionId !== currentPlaybackSessionId) return;
     setMusicLoading(false);
@@ -918,6 +948,10 @@ async function playTrackAtIndex(index, fromUserClick = true) {
 
   const onReady = () => {
     if (sessionId !== currentPlaybackSessionId) return;
+    // Em segundo plano o primeiro play() pode ter sido rejeitado; tenta de novo quando houver buffer
+    if (spotifyPreviewAudio.paused && !window.isUserIntentionallyPaused) {
+      spotifyPreviewAudio.play().catch(() => {});
+    }
     stopLoadingIfCurrent();
     updateBottomPlayerState(true);
     preloadNextTrackStream(currentTrackIndex + 1);
@@ -1025,6 +1059,7 @@ async function saveOfflineTrack(track, blob) {
       tx.objectStore(OFFLINE_STORE).put({
         title: track.title,
         artist: track.artist,
+        playlistName: track.playlistName || '',
         cover: track.coverDataUrl || track.cover || '',
         blob,
         savedAt: Date.now()
@@ -1038,7 +1073,74 @@ async function saveOfflineTrack(track, blob) {
   }
 }
 
+async function deleteOfflineTrack(track) {
+  try {
+    const db = await openOfflineDb();
+    const key = offlineTrackKey(track);
+    const title = String((track && track.title) || '').trim().toLowerCase();
+    const artist = String((track && track.artist) || '').trim().toLowerCase();
+    await new Promise((resolve) => {
+      const tx = db.transaction(OFFLINE_STORE, 'readwrite');
+      const store = tx.objectStore(OFFLINE_STORE);
+      if (key) store.delete(key);
+      const req = store.openCursor();
+      req.onsuccess = (e) => {
+        const cursor = e.target.result;
+        if (cursor) {
+          const val = cursor.value;
+          const k = String(cursor.key || '').toLowerCase();
+          const t = String((val && val.title) || '').trim().toLowerCase();
+          const a = String((val && val.artist) || '').trim().toLowerCase();
+          if ((title && t === title && (!artist || a === artist)) || (key && k === key.toLowerCase())) {
+            cursor.delete();
+          }
+          cursor.continue();
+        }
+      };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    });
+    if (key) offlineUrlCache.delete(key);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 const offlineUrlCache = new Map();
+const inFlightTrackBlobs = new Map();
+
+async function fetchOrReuseTrackBlob(track, minSize = 20000) {
+  if (!track) return null;
+  if (track.blob instanceof Blob && track.blob.size >= minSize) {
+    return track.blob;
+  }
+  const existingOffline = await readOfflineTrack(track).catch(() => null);
+  if (existingOffline && existingOffline.blob instanceof Blob && existingOffline.blob.size >= minSize) {
+    return existingOffline.blob;
+  }
+  const key = offlineTrackKey(track) || `${String(track.title || '').toLowerCase()}|${String(track.artist || '').toLowerCase()}`;
+  if (inFlightTrackBlobs.has(key)) {
+    const sharedBlob = await inFlightTrackBlobs.get(key).catch(() => null);
+    if (sharedBlob instanceof Blob && sharedBlob.size >= minSize) {
+      return sharedBlob;
+    }
+  }
+  const streamUrl = track.fullStreamUrl || `/api/stream-audio?title=${encodeURIComponent(track.title || '')}&artist=${encodeURIComponent(track.artist || '')}`;
+  const promise = (async () => {
+    const res = await fetch(streamUrl);
+    if (!res.ok) throw new Error('sem audio');
+    const b = await res.blob();
+    if (!b || b.size < minSize) throw new Error('audio curto');
+    return b;
+  })();
+  inFlightTrackBlobs.set(key, promise);
+  try {
+    return await promise;
+  } finally {
+    inFlightTrackBlobs.delete(key);
+  }
+}
 
 async function getOfflineTrackUrl(track) {
   if (!track) return '';
@@ -1068,7 +1170,7 @@ async function getOfflineTrackUrl(track) {
         if (key) offlineUrlCache.set(key, url);
         return url;
       }
-    } catch (e) {}
+    } catch (e) { swallowed(e, 'musica:getOfflineTrackUrl@1218'); }
   }
 
   // Suporte a streaming local de músicas baixadas via servidor HTTP
@@ -1197,7 +1299,7 @@ async function removeOfflineTracksForPlaylist(name) {
       const tx = db.transaction(OFFLINE_STORE, 'readwrite');
       const store = tx.objectStore(OFFLINE_STORE);
       toDelete.forEach(t => {
-        try { store.delete(offlineTrackKey(t)); } catch (e) {}
+        try { store.delete(offlineTrackKey(t)); } catch (e) { swallowed(e, 'musica:removeOfflineTracksForPlaylist@1347'); }
       });
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
@@ -1210,6 +1312,10 @@ async function removeOfflineTracksForPlaylist(name) {
 
 async function restoreAndSyncPlaylistsOnStartup() {
   try {
+    // Remove eventual playlist fantasma "Músicas Baixadas" gerada automaticamente em versões anteriores
+    await deleteFavoritePlaylistRecord('Músicas Baixadas').catch(() => {});
+    await deleteFavoritePlaylistRecord('Musicas Baixadas').catch(() => {});
+
     // 1. Reconcilia e carrega todas as playlists e músicas salvas no disco/Downloads e no IndexedDB
     const data = await collectFavoritePlaylists();
     const btnFav = document.getElementById('btn-sp-favorites');
@@ -1223,6 +1329,8 @@ async function restoreAndSyncPlaylistsOnStartup() {
     if (data && Array.isArray(data.playlists)) {
       for (const pl of data.playlists) {
         if (!pl || !pl.name) continue;
+        const lowerName = pl.name.trim().toLowerCase();
+        if (lowerName === 'músicas baixadas' || lowerName === 'musicas baixadas') continue;
         const localRec = await readFavoritePlaylistRecord(pl.name);
         if (!localRec) {
           await saveFavoritePlaylistRecord(pl.name, [], pl.cover || '');
@@ -1236,21 +1344,29 @@ async function restoreAndSyncPlaylistsOnStartup() {
 
 async function deleteFavoriteTrackFromRecord(playlistName, trackTitle, trackArtist, trackFile) {
   try {
-    const rec = await readFavoritePlaylistRecord(playlistName);
-    if (!rec || !Array.isArray(rec.tracks)) return false;
-    rec.tracks = rec.tracks.filter(t => {
-      if (trackFile && t.file && t.file === trackFile) return false;
-      if (t.title === trackTitle && (!trackArtist || t.artist === trackArtist)) return false;
-      return true;
-    });
-    rec.savedAt = Date.now();
-    const db = await openOfflineDb();
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction(FAVORITE_STORE, 'readwrite');
-      tx.objectStore(FAVORITE_STORE).put(rec, favoritePlaylistKey(playlistName));
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
+    const pName = String(playlistName || '').trim();
+    // 1. Deleta do OFFLINE_STORE caso esteja salva avulsa ou no aparelho
+    await deleteOfflineTrack({ title: trackTitle, artist: trackArtist, file: trackFile });
+
+    // 2. Se for 'Músicas Baixadas' ou qualquer playlist nomeada, remove do registro FAVORITE_STORE
+    const rec = await readFavoritePlaylistRecord(pName);
+    if (rec && Array.isArray(rec.tracks)) {
+      rec.tracks = rec.tracks.filter(t => {
+        if (trackFile && t.file && (t.file === trackFile || t.file.endsWith('/' + trackFile) || trackFile.endsWith('/' + t.file))) return false;
+        if (trackTitle && t.title && t.title.trim().toLowerCase() === String(trackTitle).trim().toLowerCase()) {
+          if (!trackArtist || !t.artist || t.artist.trim().toLowerCase() === String(trackArtist).trim().toLowerCase()) return false;
+        }
+        return true;
+      });
+      rec.savedAt = Date.now();
+      const db = await openOfflineDb();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(FAVORITE_STORE, 'readwrite');
+        tx.objectStore(FAVORITE_STORE).put(rec, favoritePlaylistKey(pName));
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    }
     return true;
   } catch (e) {
     return false;
@@ -1261,7 +1377,7 @@ let selectedPlaylistName = '';
 let isCurrentPlaylistFavorite = false;
 let selectedPlaylistSource = 'device';
 
-function showSelectedPlaylist(name, isFavorite = false, source = 'device') {
+function showSelectedPlaylist(name, isFavorite = false, source = 'device', trackCount = null) {
   selectedPlaylistName = String(name || '').trim();
   isCurrentPlaylistFavorite = !!isFavorite;
   selectedPlaylistSource = source || 'device';
@@ -1290,7 +1406,9 @@ function showSelectedPlaylist(name, isFavorite = false, source = 'device') {
   if (plBar) plBar.hidden = false;
   if (nameEl) {
     nameEl.hidden = false;
-    nameEl.textContent = selectedPlaylistName + (isFavorite ? ' (Favorita)' : '');
+    const num = (trackCount !== null && trackCount !== undefined) ? trackCount : (currentTracksList ? currentTracksList.length : 0);
+    const countBadge = `<span class="sp-pl-badge-count">${num} ${num === 1 ? 'música' : 'músicas'}</span>`;
+    nameEl.innerHTML = `📁 <b>${escapeFavoriteText(selectedPlaylistName)}</b> ${countBadge}`;
   }
   if (btn) {
     btn.hidden = false;
@@ -1360,17 +1478,27 @@ function showDownloadNotice(text) {
 
 const downloadQueue = [];
 let downloadBusy = false;
+let activeDownloadJobName = '';
 
 function queuePlaylistDownload() {
   const source = djPlaylistCap > 0 ? (currentTracksList || []).slice(0, djPlaylistCap) : (currentTracksList || []);
   const list = source.filter((t) => t && t.title);
   if (list.length === 0) return;
   const name = selectedPlaylistName || 'Playlist';
+  const normName = String(name || '').trim().toLowerCase();
+  // Impede duplicação: se já está baixando agora ou já está na fila com o mesmo nome, ignora
+  const isCurrentlyDownloading = activeDownloadJobName && activeDownloadJobName.toLowerCase() === normName;
+  const alreadyQueued = isCurrentlyDownloading || downloadQueue.some((j) => String(j.name || '').trim().toLowerCase() === normName);
+  if (alreadyQueued) {
+    showDownloadNotice('A playlist "' + name + '" já está sendo baixada.');
+    return;
+  }
   downloadQueue.push({ name, list });
   if (downloadBusy) {
     showDownloadNotice('Já tem uma playlist sendo baixada. "' + name + '" entrou na fila, posição ' + downloadQueue.length + '.');
     return;
   }
+  downloadBusy = true; // Trava ANTES de chamar runDownloadQueue para evitar corrida com double-click
   runDownloadQueue();
 }
 
@@ -1378,12 +1506,18 @@ async function runDownloadQueue() {
   downloadBusy = true;
   while (downloadQueue.length) {
     const job = downloadQueue.shift();
+    activeDownloadJobName = String(job.name || '').trim();
     const waiting = downloadQueue.map((item) => item.name);
     showDownloadNotice(waiting.length
       ? 'Baixando "' + job.name + '". Na fila: ' + waiting.join(', ') + '.'
       : '');
-    await downloadOnePlaylist(job.name, job.list);
+    try {
+      await downloadOnePlaylist(job.name, job.list);
+    } finally {
+      activeDownloadJobName = '';
+    }
   }
+  activeDownloadJobName = '';
   downloadBusy = false;
   showDownloadNotice('');
 }
@@ -1479,7 +1613,7 @@ function saveFileForUser(blob, filename) {
 }
 
 function canSaveFavoriteOnDisk() {
-  return !!(window.torBrowserAPI && window.torBrowserAPI.isElectron && typeof window.torBrowserAPI.saveFavoriteTrack === 'function');
+  return !!(window.torBrowserAPI && typeof window.torBrowserAPI.saveFavoriteTrack === 'function');
 }
 
 let lastDownloadedPlaylistName = '';
@@ -1492,7 +1626,7 @@ async function triggerPlaylistDownloadedVibration(name) {
   if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
     try {
       navigator.vibrate([70, 50, 90, 50, 140]);
-    } catch (e) {}
+    } catch (e) { swallowed(e, 'musica:triggerPlaylistDownloadedVibration@1674'); }
   }
 
   // 2. Atualiza imediatamente o botão de Playlists no topo e faz vibrar com pulso verde
@@ -1509,7 +1643,7 @@ async function triggerPlaylistDownloadedVibration(name) {
         btnFav.classList.remove('sp-vibrate-pulse');
       }, 2500);
     }
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'musica:triggerPlaylistDownloadedVibration@1691'); }
 
   // 3. Atualiza o painel de favoritos
   await refreshFavoritesPanel(false);
@@ -1548,11 +1682,8 @@ async function downloadOnePlaylist(name, list) {
   for (let i = 0; i < list.length; i++) {
     const track = list[i];
     setLabel('Baixando "' + name + '" ' + (i + 1) + '/' + list.length);
-    const url = track.fullStreamUrl || `/api/stream-audio?title=${encodeURIComponent(track.title)}&artist=${encodeURIComponent(track.artist)}`;
     try {
-      const res = await fetch(url);
-      if (!res.ok) throw new Error('sem audio');
-      const blob = await res.blob();
+      const blob = await fetchOrReuseTrackBlob(track, 40000);
       if (!blob || blob.size < 40000) throw new Error('audio curto');
       const ext = audioExtension(blob);
       let fileName = String(i + 1).padStart(2, '0') + ' - ' + safeDownloadName(track.artist, 'Artista') + ' - ' + safeDownloadName(track.title, 'Faixa') + '.' + ext;
@@ -1569,6 +1700,7 @@ async function downloadOnePlaylist(name, list) {
       const saved = {
         title: track.title,
         artist: track.artist,
+        playlistName: name,
         cover: coverDataUrl || track.cover || '',
         coverDataUrl,
         coverData,
@@ -1598,7 +1730,7 @@ async function downloadOnePlaylist(name, list) {
       if (coverData && coverData.length > 50) {
         files.push({ name: saved.file.replace(/\.[^.]+$/, '.jpg'), data: coverData });
       }
-    } catch (e) {}
+    } catch (e) { swallowed(e, 'musica:downloadOnePlaylist@1778'); }
     setDownloadProgress(i + 1, list.length);
   }
 
@@ -1667,7 +1799,7 @@ async function downloadOnePlaylist(name, list) {
             }))
           })
         }).catch(() => null);
-      } catch(e) {}
+      } catch(e) { swallowed(e, 'musica:downloadOnePlaylist@1847'); }
     }
 
     // Sempre baixa o ZIP com o álbum completo para a pasta Downloads
@@ -1843,11 +1975,14 @@ if (btnSpPlayPause && spotifyPreviewAudio) {
       spotifyPreviewAudio.currentTime = 0;
       spotifyPreviewAudio.play().catch(() => {});
     } else {
+      // Cobre o intervalo de carregamento da próxima faixa para a notificação não sumir
+      startMediaKeepAlive();
       playNextTrack();
     }
   });
 
   spotifyPreviewAudio.addEventListener('playing', () => {
+    stopMediaKeepAlive();
     setMusicLoading(false);
     updateBottomPlayerState(true);
   });
@@ -1864,6 +1999,7 @@ if (btnSpPlayPause && spotifyPreviewAudio) {
       spotifyPreviewAudio.play().catch(() => {});
       return;
     }
+    stopMediaKeepAlive();
     setMusicLoading(false);
   });
 }
@@ -2161,6 +2297,33 @@ function playPreviousTrack() {
 
 if (btnSpNext) btnSpNext.addEventListener('click', playNextTrack);
 if (btnSpPrev) btnSpPrev.addEventListener('click', playPrevTrack);
+
+function openMusicCastHub() {
+  const actList = window.playingTracksList || currentTracksList;
+  const track = (actList && actList[currentTrackIndex]) || null;
+  const query = track ? `${track.title || ''} ${track.artist || ''}`.trim() : 'Papaléguas Music';
+  if (window.PapaleguasCastHub && typeof window.PapaleguasCastHub.open === 'function') {
+    window.PapaleguasCastHub.open({
+      getMedia: () => ({
+        videoId: '',
+        title: query,
+        url: query,
+        streamUrl: (spotifyPreviewAudio && spotifyPreviewAudio.src) || ''
+      })
+    });
+    return;
+  }
+  try {
+    if (window.parent && window.parent !== window) {
+      window.parent.postMessage({ type: 'open-cast-hub', title: query }, '*');
+    }
+  } catch (e) { swallowed(e, 'musica:openMusicCastHub@2318'); }
+}
+
+['btn-sp-cast', 'btn-sp-chip-cast', 'btn-sp-expanded-cast'].forEach((id) => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('click', (e) => { e.stopPropagation(); openMusicCastHub(); });
+});
 
 // Picture-in-Picture do player: janela flutuante com capa e controles interativos de troca de música.
 // No Chromium abre a janela de documento; nos outros navegadores, desenha a capa e controles num vídeo com MediaStream.
@@ -2478,7 +2641,7 @@ function drawDjPipCanvas() {
 }
 
 function ensureDjPipCanvas() {
-  try { bindMediaSessionHandlers(); } catch (e) {}
+  try { bindMediaSessionHandlers(); } catch (e) { swallowed(e, 'musica:ensureDjPipCanvas@2662'); }
 
   if (!djPipCanvas) {
     djPipCanvas = document.createElement('canvas');
@@ -2518,7 +2681,7 @@ function ensureDjPipCanvas() {
             stream.addTrack(audioTrack);
           }
         }
-      } catch (e) {}
+      } catch (e) { swallowed(e, 'musica:ensureDjPipCanvas@2702'); }
 
       djPipVideo.srcObject = stream;
       const playPromise = djPipVideo.play();
@@ -2527,7 +2690,7 @@ function ensureDjPipCanvas() {
 
     djPipVideo.addEventListener('enterpictureinpicture', () => {
       setDjPipButton(true);
-      try { bindMediaSessionHandlers(); } catch (e) {}
+      try { bindMediaSessionHandlers(); } catch (e) { swallowed(e, 'musica:ensureDjPipCanvas@2711'); }
       if (djPipLoopTimer) clearInterval(djPipLoopTimer);
       djPipLoopTimer = setInterval(() => {
         if (document.pictureInPictureElement === djPipVideo) drawDjPipCanvas();
@@ -2615,7 +2778,7 @@ async function toggleDjPictureInPicture() {
 
   // 2. Se já estiver com Video PiP ativo, fecha
   if (document.pictureInPictureElement && djPipVideo && document.pictureInPictureElement === djPipVideo) {
-    try { await document.exitPictureInPicture(); } catch (e) {}
+    try { await document.exitPictureInPicture(); } catch (e) { swallowed(e, 'musica:toggleDjPictureInPicture@2799'); }
     setDjPipButton(false);
     return;
   }
@@ -2650,12 +2813,12 @@ async function toggleDjPictureInPicture() {
     if (window.parent && window.parent !== window) {
       window.parent.postMessage({ type: 'toggle-music-mini-player' }, '*');
     }
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'musica:toggleDjPictureInPicture@2834'); }
   setDjPipButton(true);
 }
 
 // Inicializa o canvas/vídeo do PiP antecipadamente para que já esteja pronto quando o usuário clicar
-try { ensureDjPipCanvas(); } catch (e) {}
+try { ensureDjPipCanvas(); } catch (e) { swallowed(e, 'musica:top@2839'); }
 
 if (btnSpPip) btnSpPip.addEventListener('click', (e) => {
   e.preventDefault();
@@ -2694,11 +2857,11 @@ function renderSpotifySearchResults(tracks, query, aiSummary = null, playlistNam
   currentTracksList = tracks || [];
   isCurrentListFromDj = !!aiSummary;
   djPlaylistCap = isCurrentListFromDj ? currentTracksList.length : 0;
-  const songsOnly = currentTracksList.length > 0 && currentTracksList.every((item) => item && item.title && item.itemType !== 'playlist' && item.type !== 'playlist');
+  const isFav = isFavorite !== null ? isFavorite : isCurrentPlaylistFavorite;
+  const songsOnly = isFav || (currentTracksList.length > 0 && currentTracksList.every((item) => item && item.title && item.itemType !== 'playlist' && item.type !== 'playlist'));
   if (playlistName !== undefined) {
-    const isFav = isFavorite !== null ? isFavorite : isCurrentPlaylistFavorite;
     const src = favSource !== null ? favSource : selectedPlaylistSource;
-    showSelectedPlaylist(songsOnly ? playlistName : '', isFav, src);
+    showSelectedPlaylist(songsOnly ? playlistName : '', isFav, src, currentTracksList.length);
   } else if (selectedPlaylistName && selectedPlaylistName !== String(query || '').trim()) {
     showSelectedPlaylist('');
   }
@@ -2720,8 +2883,16 @@ function renderSpotifySearchResults(tracks, query, aiSummary = null, playlistNam
   }
 
   if (currentTracksList.length === 0) {
-    spTrackList.innerHTML = `<div class="sp-search-placeholder">Nenhum resultado encontrado para "${query}".</div>`;
-    if (spHeroCard) spHeroCard.style.display = 'none';
+    if (isFav && playlistName) {
+      spTrackList.innerHTML = `<div class="sp-search-placeholder" style="padding:40px 20px;text-align:center;">A playlist "${escapeFavoriteText(playlistName)}" está vazia.<br><span style="font-size:13px;color:#94a3b8;margin-top:8px;display:inline-block;">Toque em "➕ Add Músicas" no topo para adicionar músicas.</span></div>`;
+    } else {
+      spTrackList.innerHTML = `<div class="sp-search-placeholder">Nenhum resultado encontrado para "${query}".</div>`;
+    }
+    if (spHeroCard) spHeroCard.style.display = isFav ? 'flex' : 'none';
+    if (isFav && spHeroCard) {
+      if (spHeroTitle) spHeroTitle.textContent = `${(playlistName || 'PLAYLIST').toUpperCase()} 📁`;
+      if (spHeroSub) spHeroSub.innerHTML = `<span>📁 Playlist Salva • <b>0 músicas</b> no aparelho • Toque em Add Músicas</span>`;
+    }
     return;
   }
 
@@ -2735,10 +2906,15 @@ function renderSpotifySearchResults(tracks, query, aiSummary = null, playlistNam
       spHeroImg.onerror = () => { spHeroImg.src = 'papaleguas_logo.png'; };
       spHeroImg.src = hero.cover || 'papaleguas_logo.png';
     }
-    if (spHeroTitle) spHeroTitle.textContent = isHeroPl ? `${hero.title.toUpperCase()} 💿` : `${hero.title.toUpperCase()} 🔥`;
-    if (spHeroSub) spHeroSub.textContent = isHeroPl
-      ? `Playlist Online • ${hero.nb_tracks || 0} músicas • ${hero.creator || 'Papaléguas Music'}`
-      : (hero.aiReason ? `Mais Tocada • ${hero.artist}` : `Música • ${hero.artist}`);
+    if (isFav && playlistName) {
+      if (spHeroTitle) spHeroTitle.textContent = `${playlistName.toUpperCase()} 📁`;
+      if (spHeroSub) spHeroSub.innerHTML = `<span>📁 Playlist Salva • <b>${currentTracksList.length} ${currentTracksList.length === 1 ? 'música' : 'músicas'}</b> no aparelho • 100% Offline</span>`;
+    } else {
+      if (spHeroTitle) spHeroTitle.textContent = isHeroPl ? `${hero.title.toUpperCase()} 💿` : `${hero.title.toUpperCase()} 🔥`;
+      if (spHeroSub) spHeroSub.textContent = isHeroPl
+        ? `Playlist Online • ${hero.nb_tracks || 0} músicas • ${hero.creator || 'Papaléguas Music'}`
+        : (hero.aiReason ? `Mais Tocada • ${hero.artist}` : `Música • ${hero.artist}`);
+    }
     
     if (spHeroPlayBtn) {
       spHeroPlayBtn.onclick = (e) => {
@@ -2994,6 +3170,25 @@ async function fetchMusicTracks(query, category = 'all') {
       const plQuery = q || 'top playlists brasil';
       const trQuery = q || 'top brasil';
 
+      // Renderização instantânea (0ms) via cache local na home de Música enquanto atualiza em segundo plano
+      let renderedCachedHome = false;
+      if (!q) {
+        try {
+          const cachedRaw = localStorage.getItem('papaleguas_fast_music_home_v1');
+          if (cachedRaw) {
+            const cachedParsed = JSON.parse(cachedRaw);
+            if (cachedParsed && Array.isArray(cachedParsed.items) && cachedParsed.items.length > 0) {
+              renderSpotifySearchResults(cachedParsed.items, '', 'Playlists Online & Maiores Sucessos');
+              renderedCachedHome = true;
+              // Se o cache tem menos de 3 minutos, não precisa refazer o DOM imediatamente
+              if (Date.now() - (cachedParsed.ts || 0) < 180000) {
+                return;
+              }
+            }
+          }
+        } catch (e) { swallowed(e, 'musica:fetchMusicTracks@3207'); }
+      }
+
       const [plRes, trRes] = await Promise.all([
         window.torBrowserAPI.searchPlaylists ? window.torBrowserAPI.searchPlaylists(plQuery) : Promise.resolve({ success: false, results: [] }),
         window.torBrowserAPI.searchMusic ? window.torBrowserAPI.searchMusic(trQuery, 24) : Promise.resolve({ success: false, results: [] })
@@ -3008,7 +3203,17 @@ async function fetchMusicTracks(query, category = 'all') {
 
       const combined = [...onlinePlaylists, ...tracks];
       if (combined.length > 0) {
-        renderSpotifySearchResults(combined, q, q ? `Resultados em Tudo para "${q}"` : 'Playlists Online & Maiores Sucessos');
+        if (!q) {
+          try {
+            localStorage.setItem('papaleguas_fast_music_home_v1', JSON.stringify({
+              ts: Date.now(),
+              items: combined.slice(0, 48)
+            }));
+          } catch (e) { swallowed(e, 'musica:fetchMusicTracks@3230'); }
+        }
+        if (!renderedCachedHome || q) {
+          renderSpotifySearchResults(combined, q, q ? `Resultados em Tudo para "${q}"` : 'Playlists Online & Maiores Sucessos');
+        }
         return;
       }
     }
@@ -3032,7 +3237,7 @@ async function fetchMusicTracks(query, category = 'all') {
         try {
           const plRes = await window.torBrowserAPI.searchPlaylists('top playlists brasil');
           if (plRes && plRes.success && plRes.results) onlinePls = plRes.results;
-        } catch (e) {}
+        } catch (e) { swallowed(e, 'musica:fetchMusicTracks@3258'); }
 
         const combined = [...localPls, ...onlinePls];
         if (combined.length > 0) {
@@ -3068,7 +3273,7 @@ async function fetchMusicTracks(query, category = 'all') {
       try {
         const plRes = await window.torBrowserAPI.searchPlaylists(q);
         if (plRes && plRes.success && plRes.results) onlinePls = plRes.results;
-      } catch (e) {}
+      } catch (e) { swallowed(e, 'musica:fetchMusicTracks@3294'); }
 
       const combined = [...matchingLocal, ...onlinePls];
       if (combined.length > 0) {
@@ -3093,7 +3298,8 @@ async function fetchMusicTracks(query, category = 'all') {
 
 function getActiveCategory() {
   const activeChip = document.querySelector('.sp-chip.active');
-  return activeChip ? activeChip.getAttribute('data-type') : 'all';
+  const type = activeChip ? activeChip.getAttribute('data-type') : 'all';
+  return type === 'ai' ? 'all' : type;
 }
 
 function isAiDjEnabled() {
@@ -3109,7 +3315,7 @@ function performMusicSearch(query, category = null) {
 // Executa o Agente de IA para Recomendações e Busca Inteligente conforme Pesquisa e Categoria
 async function fetchAiRecommendations(query, category = null) {
   const q = (query && query.trim()) ? query.trim() : (spotifySearchInput && spotifySearchInput.value.trim() ? spotifySearchInput.value.trim() : '');
-  const cat = category || getActiveCategory();
+  const cat = (category === 'ai' || !category) ? 'all' : category;
   const catLabels = {
     'all': 'Geral',
     'downloaded': 'Músicas Baixadas',
@@ -3127,15 +3333,26 @@ async function fetchAiRecommendations(query, category = null) {
     spAiBannerDesc.textContent = q ? `Buscando os maiores sucessos de "${q}" em ${catName}...` : `Selecionando os maiores hits em ${catName}...`;
   }
   if (spTrackList) {
-    spTrackList.innerHTML = `<div class="sp-search-placeholder">🔥 DJ IA selecionando os melhores sucessos de ${catName}...</div>`;
+    spTrackList.innerHTML = `<div class="sp-search-placeholder">🔥 DJ IA selecionando as melhores recomendações de ${catName}...</div>`;
   }
 
   try {
-    const excludeTitles = getSessionExcludeTitles();
-    const res = await window.torBrowserAPI.getAiMusicRecommendations(q, cat, excludeTitles);
-    if (res && res.success && res.results) {
-      registerSessionTracks(res.results);
-      renderSpotifySearchResults(res.results, q, res.summary, q || 'Hits');
+    const excludeTitles = typeof getSessionExcludeTitles === 'function' ? getSessionExcludeTitles() : [];
+    let res = null;
+    if (window.torBrowserAPI && typeof window.torBrowserAPI.getAiMusicRecommendations === 'function') {
+      res = await window.torBrowserAPI.getAiMusicRecommendations(q, cat, excludeTitles);
+    } else {
+      const country = localStorage.getItem('papaleguas_music_country') || 'BR';
+      const apiRes = await fetch('/api/recommendations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Client-Id': CLIENT_ID },
+        body: JSON.stringify({ query: q, category: cat, excludeTitles, country })
+      });
+      res = await apiRes.json();
+    }
+    if (res && res.success && res.results && res.results.length > 0) {
+      if (typeof registerSessionTracks === 'function') registerSessionTracks(res.results);
+      renderSpotifySearchResults(res.results, q, res.summary || 'Hits recomendados pela IA', q || 'Recomendações IA');
     } else {
       fetchMusicTracks(q, cat);
     }
@@ -3320,7 +3537,7 @@ async function searchDownloadedAndOfflineMusic(query = '') {
           mergedMap.set(k, tr);
         });
       }
-    } catch (e) {}
+    } catch (e) { swallowed(e, 'musica:searchDownloadedAndOfflineMusic@3558'); }
   } else {
     // 2. Fallback via rota HTTP /api/downloaded-music isolada por dispositivo
     try {
@@ -3333,7 +3550,7 @@ async function searchDownloadedAndOfflineMusic(query = '') {
           mergedMap.set(k, tr);
         });
       }
-    } catch (e) {}
+    } catch (e) { swallowed(e, 'musica:searchDownloadedAndOfflineMusic@3571'); }
   }
 
   // 3. Mescla com IndexedDB offline (faixas baixadas localmente no navegador)
@@ -3365,7 +3582,7 @@ async function searchDownloadedAndOfflineMusic(query = '') {
         }
       }
     });
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'musica:searchDownloadedAndOfflineMusic@3603'); }
 
   return Array.from(mergedMap.values());
 }
@@ -3374,14 +3591,16 @@ async function collectFavoritePlaylists() {
   const merged = new Map();
   let diskFolder = '';
 
-  // 1. PRIMEIRO: Lê todas as playlists salvas NO PRÓPRIO DISPOSITIVO (IndexedDB local do aparelho que baixou)
+  // 1. PRIMEIRO: Lê todas as playlists salvas NO PRÓPRIO DISPOSITIVO (IndexedDB local do aparelho)
   const local = await listFavoritePlaylistRecords();
-  const assignedTrackKeys = new Set();
   local.forEach((item) => {
+    if (!item || !item.name) return;
+    const lowerName = String(item.name).trim().toLowerCase();
+    // Ignora a playlist fantasma "Músicas Baixadas" para não duplicar as playlists reais (ex: Gospel)
+    if (lowerName === 'músicas baixadas' || lowerName === 'musicas baixadas') return;
     const key = favoritePlaylistKey(item.name);
     if (!key) return;
     const defaultCover = item.cover || (item.tracks && item.tracks[0] && (item.tracks[0].coverDataUrl || item.tracks[0].cover)) || '';
-    (item.tracks || []).forEach(t => assignedTrackKeys.add(offlineTrackKey(t)));
     merged.set(key, {
       name: item.name,
       count: Array.isArray(item.tracks) ? item.tracks.length : 0,
@@ -3392,34 +3611,15 @@ async function collectFavoritePlaylists() {
     });
   });
 
-  // 2. Se houver músicas avulsas baixadas no IndexedDB que não pertencem a nenhuma playlist,
-  // agrupa-as automaticamente na playlist organizada "Músicas Baixadas"
-  try {
-    const allOffline = await listAllOfflineTracks();
-    if (allOffline && allOffline.length > 0) {
-      const unassigned = allOffline.filter(t => !assignedTrackKeys.has(offlineTrackKey(t)));
-      if (unassigned.length > 0) {
-        const autoKey = favoritePlaylistKey('Músicas Baixadas');
-        if (!merged.has(autoKey)) {
-          merged.set(autoKey, {
-            name: 'Músicas Baixadas',
-            count: unassigned.length,
-            cover: unassigned[0].cover || 'papaleguas_logo.png',
-            folder: '',
-            source: 'device',
-            savedAt: Date.now()
-          });
-        }
-      }
-    }
-  } catch (e) {}
-
   // 3. Se for Desktop Host nativo (Electron com acesso ao disco local), lista as pastas do computador
   if (canSaveFavoriteOnDisk() && typeof window.torBrowserAPI.listFavoritePlaylists === 'function') {
     try {
       const disk = await window.torBrowserAPI.listFavoritePlaylists();
       if (disk && disk.folder) diskFolder = disk.folder;
       (disk && disk.playlists || []).forEach((item) => {
+        if (!item || !item.name) return;
+        const lowerName = String(item.name).trim().toLowerCase();
+        if (lowerName === 'músicas baixadas' || lowerName === 'musicas baixadas' || lowerName === 'downloads') return;
         const key = favoritePlaylistKey(item.name);
         if (!key) return;
         if (!merged.has(key)) {
@@ -3433,13 +3633,50 @@ async function collectFavoritePlaylists() {
           });
         } else {
           const existing = merged.get(key);
-          if (item.count > existing.count) {
+          if ((item.count || 0) > existing.count) {
             existing.count = item.count;
+          }
+          if (!existing.cover && item.cover) {
+            existing.cover = item.cover;
           }
         }
       });
-    } catch (e) {}
+    } catch (e) { swallowed(e, 'musica:collectFavoritePlaylists@3662'); }
   }
+
+  // 4. Sincroniza via rota HTTP /api/favorite-playlists para garantir playlists do servidor / rede
+  try {
+    const res = await fetch(`/api/favorite-playlists?clientId=${encodeURIComponent(CLIENT_ID)}`, {
+      headers: { 'X-Client-Id': CLIENT_ID }
+    }).then(r => r.json()).catch(() => null);
+    if (res && res.success && Array.isArray(res.playlists)) {
+      res.playlists.forEach((item) => {
+        if (!item || !item.name) return;
+        const lowerName = String(item.name).trim().toLowerCase();
+        if (lowerName === 'músicas baixadas' || lowerName === 'musicas baixadas' || lowerName === 'downloads') return;
+        const key = favoritePlaylistKey(item.name);
+        if (!key) return;
+        if (!merged.has(key)) {
+          merged.set(key, {
+            name: item.name,
+            count: item.count || 0,
+            cover: item.cover || '',
+            folder: item.folder || '',
+            source: item.source || 'server',
+            savedAt: item.savedAt || 0
+          });
+        } else {
+          const existing = merged.get(key);
+          if ((item.count || 0) > existing.count) {
+            existing.count = item.count;
+          }
+          if (!existing.cover && item.cover) {
+            existing.cover = item.cover;
+          }
+        }
+      });
+    }
+  } catch (e) { swallowed(e, 'musica:collectFavoritePlaylists@3697'); }
 
   return { folder: diskFolder, playlists: Array.from(merged.values()) };
 }
@@ -3450,12 +3687,12 @@ async function collectFavoritePlaylists() {
 let activeTargetPlaylist = '';
 try {
   activeTargetPlaylist = localStorage.getItem('papaleguas_target_add_playlist') || '';
-} catch (e) {}
+} catch (e) { swallowed(e, 'musica:top@3708'); }
 const targetPlaylistTitlesSet = new Set();
 
 function getActiveTargetPlaylist() {
   if (!activeTargetPlaylist) {
-    try { activeTargetPlaylist = localStorage.getItem('papaleguas_target_add_playlist') || ''; } catch (e) {}
+    try { activeTargetPlaylist = localStorage.getItem('papaleguas_target_add_playlist') || ''; } catch (e) { swallowed(e, 'musica:getActiveTargetPlaylist@3713'); }
   }
   return activeTargetPlaylist;
 }
@@ -3465,13 +3702,22 @@ async function updateTargetPlaylistTitlesSet() {
   targetPlaylistTitlesSet.clear();
   if (!target) return;
   try {
+    const isBaixadas = target.toLowerCase() === 'músicas baixadas' || target.toLowerCase() === 'musicas baixadas';
+    if (isBaixadas) {
+      const allOffline = await listAllOfflineTracks();
+      if (allOffline) {
+        allOffline.forEach(t => {
+          if (t && t.title) targetPlaylistTitlesSet.add(t.title.trim().toLowerCase());
+        });
+      }
+    }
     const rec = await readFavoritePlaylistRecord(target);
     if (rec && rec.tracks) {
       rec.tracks.forEach(t => {
         if (t && t.title) targetPlaylistTitlesSet.add(t.title.trim().toLowerCase());
       });
     }
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'musica:updateTargetPlaylistTitlesSet@3738'); }
 }
 
 async function updateActiveTargetPlaylistBanner() {
@@ -3483,11 +3729,7 @@ async function updateActiveTargetPlaylistBanner() {
     return;
   }
   await updateTargetPlaylistTitlesSet();
-  let count = 0;
-  try {
-    const rec = await readFavoritePlaylistRecord(target);
-    count = (rec && rec.tracks) ? rec.tracks.length : 0;
-  } catch (e) {}
+  const count = targetPlaylistTitlesSet.size;
   const titleEl = document.getElementById('sp-target-pl-title');
   if (titleEl) {
     titleEl.innerHTML = `Adicionando músicas em: <b>${escapeFavoriteText(target)}</b> (${count} música${count === 1 ? '' : 's'})`;
@@ -3508,16 +3750,14 @@ function setActiveTargetPlaylist(name) {
     } else {
       localStorage.removeItem('papaleguas_target_add_playlist');
     }
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'musica:setActiveTargetPlaylist@3771'); }
   updateActiveTargetPlaylistBanner();
 }
 
 function setMusicCategory(type) {
   const chips = document.querySelectorAll('.sp-chip');
   chips.forEach(c => {
-    if (c.getAttribute('data-type') !== 'ai') {
-      c.classList.toggle('active', c.getAttribute('data-type') === type);
-    }
+    c.classList.toggle('active', c.getAttribute('data-type') === type);
   });
 }
 
@@ -3578,8 +3818,15 @@ async function renderAddToPlaylistModalList() {
   const plWithStatus = await Promise.all(playlists.map(async (pl) => {
     let alreadyHas = false;
     try {
+      const isBaixadas = pl.name.toLowerCase() === 'músicas baixadas' || pl.name.toLowerCase() === 'musicas baixadas';
+      if (isBaixadas) {
+        const allOffline = await listAllOfflineTracks();
+        if (allOffline && allOffline.some(t => t && t.title && t.title.trim().toLowerCase() === trackKey)) {
+          alreadyHas = true;
+        }
+      }
       const rec = await readFavoritePlaylistRecord(pl.name);
-      if (rec && rec.tracks && Array.isArray(rec.tracks)) {
+      if (!alreadyHas && rec && rec.tracks && Array.isArray(rec.tracks)) {
         alreadyHas = rec.tracks.some(t => {
           if (!t) return false;
           if (track.id && t.id && String(t.id) === String(track.id)) return true;
@@ -3587,7 +3834,7 @@ async function renderAddToPlaylistModalList() {
           return false;
         });
       }
-    } catch(e) {}
+    } catch(e) { swallowed(e, 'musica:renderAddToPlaylistModalList@3855'); }
     return { ...pl, alreadyHas };
   }));
 
@@ -3686,18 +3933,25 @@ async function executeCreateNewPlaylistAndAddTrack(newPlName) {
           headers: { 'Content-Type': 'application/json', 'X-Client-Id': CLIENT_ID },
           body: JSON.stringify({ name, clientId: CLIENT_ID })
         });
-      } catch(e) {}
+      } catch(e) { swallowed(e, 'musica:executeCreateNewPlaylistAndAddTrack@3954'); }
     }
     await saveFavoritePlaylistRecord(name, [], '');
-    try { localStorage.setItem('papaleguas_last_fav_playlist', name); } catch(e) {}
+    try { localStorage.setItem('papaleguas_last_fav_playlist', name); } catch(e) { swallowed(e, 'musica:executeCreateNewPlaylistAndAddTrack@3957'); }
     await refreshFavoritesPanel(false);
-  } catch(e) {}
+  } catch(e) { swallowed(e, 'musica:executeCreateNewPlaylistAndAddTrack@3959'); }
 
   await executeAddTrackToSpecificPlaylist(name);
 }
 
 async function handleQuickAddTrackToPlaylist(track, btnEl) {
   if (!track || !track.title) return;
+  const target = getActiveTargetPlaylist() || (isCurrentPlaylistFavorite ? selectedPlaylistName : '');
+  if (target) {
+    pendingTrackToQuickAdd = track;
+    pendingBtnElToQuickAdd = btnEl;
+    await executeAddTrackToSpecificPlaylist(target);
+    return;
+  }
   openAddToPlaylistModal(track, btnEl);
 }
 
@@ -3716,7 +3970,7 @@ async function refreshFavoritesPanel(forceOpen) {
   panel.innerHTML = data.playlists.map((item) => {
     const isJustDl = lastDownloadedPlaylistName && (item.name.toLowerCase() === lastDownloadedPlaylistName.toLowerCase());
     return `
-    <div class="sp-fav-item ${isJustDl ? 'just-downloaded' : ''}" data-fav-item-name="${escapeFavoriteText(item.name)}">
+    <div class="sp-fav-item ${isJustDl ? 'just-downloaded' : ''}" data-fav-item-name="${escapeFavoriteText(item.name)}" data-fav-source="${item.source}">
       <div class="sp-fav-main-row">
         <div class="sp-fav-thumb-wrap" title="Clique para alterar a capa desta playlist" data-fav-cover-edit="${escapeFavoriteText(item.name)}" data-fav-source="${item.source}">
           <img class="sp-fav-thumb" src="${item.cover || 'papaleguas_logo.png'}" onerror="this.src='papaleguas_logo.png';" alt="" />
@@ -3724,7 +3978,7 @@ async function refreshFavoritesPanel(forceOpen) {
         </div>
         <div class="sp-fav-meta">
           <span class="sp-fav-name" title="${escapeFavoriteText(item.name)}">${escapeFavoriteText(item.name)}</span>
-          <span class="sp-fav-count">${item.count} músicas</span>
+          <span class="sp-fav-count">${item.count} ${item.count === 1 ? 'música' : 'músicas'}</span>
         </div>
         <button class="sp-fav-play" type="button" data-fav-play="${escapeFavoriteText(item.name)}" data-fav-source="${item.source}" title="Tocar playlist agora">
           ▶ Ouvir
@@ -3747,10 +4001,79 @@ async function loadSavedFavorite(name, source, autoPlay = true) {
   const panel = document.getElementById('sp-favorites-panel');
   let tracks = [];
   let playlistCover = '';
+  const cleanName = String(name || '').trim();
 
   // 1. TENTA PRIMEIRO NO DISPOSITIVO LOCAL (IndexedDB do próprio aparelho que baixou)
-  const rec = await readFavoritePlaylistRecord(name);
-  if (rec && Array.isArray(rec.tracks) && rec.tracks.length > 0) {
+  const isBaixadas = cleanName.toLowerCase() === 'músicas baixadas' || cleanName.toLowerCase() === 'musicas baixadas';
+  const rec = await readFavoritePlaylistRecord(cleanName);
+
+  if (isBaixadas) {
+    // Para "Músicas Baixadas": SEMPRE carrega TODAS as músicas baixadas no aparelho (listAllOfflineTracks),
+    // e mescla com quaisquer faixas adicionadas ao registro (rec.tracks)
+    const allOffline = await listAllOfflineTracks();
+    const mapByTitle = new Map();
+
+    if (allOffline && allOffline.length > 0) {
+      playlistCover = allOffline[0].cover || 'papaleguas_logo.png';
+      allOffline.forEach((track, index) => {
+        const k = (track.title || '').trim().toLowerCase();
+        let blobUrl = '';
+        if (track.blob instanceof Blob) {
+          blobUrl = URL.createObjectURL(track.blob);
+          offlineUrlCache.set(offlineTrackKey(track), blobUrl);
+        }
+        mapByTitle.set(k, {
+          id: 'fav-offline-' + index,
+          title: track.title || 'Faixa ' + (index + 1),
+          artist: track.artist || 'Artista',
+          cover: track.cover || playlistCover || '',
+          file: track.file || '',
+          playlistName: 'Músicas Baixadas',
+          isDownloaded: true,
+          fullStreamUrl: blobUrl || '',
+          blob: track.blob || null,
+          preview: ''
+        });
+      });
+    }
+
+    if (rec && Array.isArray(rec.tracks) && rec.tracks.length > 0) {
+      if (!playlistCover) playlistCover = rec.cover || '';
+      for (let i = 0; i < rec.tracks.length; i++) {
+        const track = rec.tracks[i];
+        if (!track || !track.title) continue;
+        const k = track.title.trim().toLowerCase();
+        if (!mapByTitle.has(k)) {
+          let blobUrl = '';
+          if (track.blob instanceof Blob) {
+            blobUrl = URL.createObjectURL(track.blob);
+          } else {
+            const off = await readOfflineTrack(track);
+            if (off && off.blob instanceof Blob) {
+              blobUrl = URL.createObjectURL(off.blob);
+            }
+          }
+          if (blobUrl) {
+            offlineUrlCache.set(offlineTrackKey(track), blobUrl);
+          }
+          mapByTitle.set(k, {
+            id: 'fav-device-' + i,
+            title: track.title,
+            artist: track.artist || 'Artista',
+            cover: track.cover || playlistCover || '',
+            file: track.file || '',
+            playlistName: cleanName,
+            isDownloaded: true,
+            fullStreamUrl: blobUrl || track.fullStreamUrl || '',
+            blob: track.blob || null,
+            preview: ''
+          });
+        }
+      }
+    }
+
+    tracks = Array.from(mapByTitle.values());
+  } else if (rec && Array.isArray(rec.tracks) && rec.tracks.length > 0) {
     playlistCover = rec.cover || '';
     tracks = await Promise.all(rec.tracks.map(async (track, index) => {
       let blobUrl = '';
@@ -3771,43 +4094,18 @@ async function loadSavedFavorite(name, source, autoPlay = true) {
         artist: track.artist,
         cover: track.cover || playlistCover || '',
         file: track.file || '',
-        playlistName: name,
+        playlistName: cleanName,
         isDownloaded: true,
         fullStreamUrl: blobUrl || track.fullStreamUrl || '',
         blob: track.blob || null,
         preview: ''
       };
     }));
-  } else if (name.toLowerCase() === 'músicas baixadas' || name.toLowerCase() === 'musicas baixadas') {
-    // Carrega todas as faixas baixadas avulsas no aparelho com capas e nomes
-    const allOffline = await listAllOfflineTracks();
-    if (allOffline && allOffline.length > 0) {
-      playlistCover = allOffline[0].cover || 'papaleguas_logo.png';
-      tracks = allOffline.map((track, index) => {
-        let blobUrl = '';
-        if (track.blob instanceof Blob) {
-          blobUrl = URL.createObjectURL(track.blob);
-          offlineUrlCache.set(offlineTrackKey(track), blobUrl);
-        }
-        return {
-          id: 'fav-auto-' + index,
-          title: track.title || 'Faixa ' + (index + 1),
-          artist: track.artist || 'Artista',
-          cover: track.cover || playlistCover || '',
-          file: track.file || '',
-          playlistName: 'Músicas Baixadas',
-          isDownloaded: true,
-          fullStreamUrl: blobUrl || '',
-          blob: track.blob || null,
-          preview: ''
-        };
-      });
-    }
   }
 
   // 2. Se for Desktop Host (Electron) e não encontrou no IndexedDB, lê do disco local do PC
   if (!tracks.length && window.torBrowserAPI && typeof window.torBrowserAPI.getFavoritePlaylist === 'function') {
-    const res = await window.torBrowserAPI.getFavoritePlaylist(name);
+    const res = await window.torBrowserAPI.getFavoritePlaylist(cleanName);
     playlistCover = (res && res.cover) || '';
     tracks = (res && res.tracks || []).map((track, index) => ({
       id: 'fav-' + index + '-' + track.file,
@@ -3815,46 +4113,73 @@ async function loadSavedFavorite(name, source, autoPlay = true) {
       artist: track.artist,
       cover: track.cover || playlistCover || '',
       file: track.file,
-      playlistName: track.playlistName || (res && res.name) || name,
+      playlistName: track.playlistName || (res && res.name) || cleanName,
       isDownloaded: true,
       fullStreamUrl: track.fullStreamUrl || '',
       preview: ''
     }));
   }
 
+  // 3. Fallback para API do servidor (/api/favorite-playlist) se ainda não encontrou
   if (!tracks.length) {
-    if (autoPlay) showDownloadNotice('Não encontrei as músicas dessa playlist no aparelho.');
-    return false;
+    try {
+      const resp = await fetch(`/api/favorite-playlist?name=${encodeURIComponent(cleanName)}&clientId=${CLIENT_ID}`);
+      if (resp.ok) {
+        const json = await resp.json();
+        if (json && Array.isArray(json.tracks) && json.tracks.length > 0) {
+          playlistCover = json.cover || '';
+          tracks = json.tracks.map((track, index) => ({
+            id: 'fav-srv-' + index + '-' + (track.file || index),
+            title: track.title,
+            artist: track.artist,
+            cover: track.cover || playlistCover || '',
+            file: track.file,
+            playlistName: track.playlistName || json.name || cleanName,
+            isDownloaded: true,
+            fullStreamUrl: track.fullStreamUrl || (track.file ? `/api/stream-file?path=${encodeURIComponent(track.file)}` : ''),
+            preview: ''
+          }));
+        }
+      }
+    } catch (e) { swallowed(e, 'musica:loadSavedFavorite@4162'); }
   }
-  try { localStorage.setItem('papaleguas_last_fav_playlist', name); } catch(e) {}
+
+  try { localStorage.setItem('papaleguas_last_fav_playlist', cleanName); } catch(e) { swallowed(e, 'musica:loadSavedFavorite@4165'); }
   if (panel) panel.hidden = true;
   closePlaylistsMenuModal();
-  showSelectedPlaylist(name, true, source);
-  renderSpotifySearchResults(tracks, name, null, name, true, source);
-  if (spHeroTitle) spHeroTitle.textContent = name;
-  if (spHeroSub) spHeroSub.textContent = 'Minhas playlists favoritas • ' + tracks.length + ' músicas no aparelho';
+  showSelectedPlaylist(cleanName, true, source, tracks.length);
+  renderSpotifySearchResults(tracks, cleanName, null, cleanName, true, source);
+  if (spHeroTitle) spHeroTitle.textContent = `${cleanName.toUpperCase()} 📁`;
+  if (spHeroSub) {
+    spHeroSub.innerHTML = `<span>📁 Playlist Salva • <b>${tracks.length} ${tracks.length === 1 ? 'música' : 'músicas'}</b> no aparelho • 100% Offline</span>`;
+  }
   if (spHeroImg) {
     spHeroImg.src = playlistCover || (tracks[0] && tracks[0].cover) || 'papaleguas_logo.png';
   }
   
-  if (autoPlay) {
-    document.body.classList.remove('is-editing-playlist');
-    playTrackAtIndex(0);
+  if (tracks.length > 0) {
+    if (autoPlay) {
+      document.body.classList.remove('is-editing-playlist');
+      playTrackAtIndex(0);
+    } else {
+      document.body.classList.add('is-editing-playlist');
+      currentTrackIndex = 0;
+      const first = tracks[0];
+      if (first) {
+        if (spMiniThumb) {
+          const thumbFallback = spMiniThumb.getAttribute('data-fallback') || '';
+          spMiniThumb.src = first.cover || thumbFallback;
+        }
+        if (spMiniTitle) spMiniTitle.textContent = first.title;
+        if (spMiniArtist) spMiniArtist.textContent = first.artist;
+        if (spBottomPlayer) spBottomPlayer.classList.add('visible');
+      }
+    }
   } else {
     document.body.classList.add('is-editing-playlist');
-    currentTrackIndex = 0;
-    const first = tracks[0];
-    if (first) {
-      if (spMiniThumb) {
-        const thumbFallback = spMiniThumb.getAttribute('data-fallback') || '';
-        spMiniThumb.src = first.cover || thumbFallback;
-      }
-      if (spMiniTitle) spMiniTitle.textContent = first.title;
-      if (spMiniArtist) spMiniArtist.textContent = first.artist;
-      if (spHeroImg && first.cover) spHeroImg.src = first.cover;
-      if (spHeroTitle && first.title) spHeroTitle.textContent = first.title;
-      if (spHeroSub && first.artist) spHeroSub.innerHTML = `<span>▶ Pronta para tocar • ${first.artist}</span>`;
-      if (spBottomPlayer) spBottomPlayer.classList.add('visible');
+    currentTrackIndex = -1;
+    if (autoPlay) {
+      showDownloadNotice(`A playlist "${cleanName}" está vazia. Adicione músicas clicando no botão "+" das faixas.`);
     }
   }
   return true;
@@ -3880,7 +4205,7 @@ async function checkAndLoadDownloadedOnStartup() {
     if (allOffline && allOffline.length > 0 && btnFav) {
       btnFav.textContent = `📁 Playlists (${allOffline.length}) ▾`;
     }
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'musica:checkAndLoadDownloadedOnStartup@4226'); }
 }
 
 async function updateFavoritesBtnCount() {
@@ -3891,7 +4216,7 @@ async function updateFavoritesBtnCount() {
       const count = (data && data.playlists) ? data.playlists.length : 0;
       btnFav.textContent = count > 0 ? `📁 Playlists (${count}) ▾` : '📁 Playlists ▾';
     }
-  } catch(e) {}
+  } catch(e) { swallowed(e, 'musica:updateFavoritesBtnCount@4237'); }
 }
 
 let isCreatingPlaylist = false;
@@ -3916,11 +4241,11 @@ async function createNewFavoritePlaylist() {
           headers: { 'Content-Type': 'application/json', 'X-Client-Id': CLIENT_ID },
           body: JSON.stringify({ name: cleanName, clientId: CLIENT_ID })
         });
-      } catch (e) {}
+      } catch (e) { swallowed(e, 'musica:createNewFavoritePlaylist@4262'); }
     }
 
     await saveFavoritePlaylistRecord(cleanName, [], '');
-    try { localStorage.setItem('papaleguas_last_fav_playlist', cleanName); } catch(e) {}
+    try { localStorage.setItem('papaleguas_last_fav_playlist', cleanName); } catch(e) { swallowed(e, 'musica:createNewFavoritePlaylist@4266'); }
 
     // Define a nova playlist como alvo ativo para adicionar músicas
     setActiveTargetPlaylist(cleanName);
@@ -3980,7 +4305,7 @@ async function deleteEntireFavoritePlaylist(name, source) {
         headers: { 'Content-Type': 'application/json', 'X-Client-Id': CLIENT_ID },
         body: JSON.stringify({ name, clientId: CLIENT_ID, source })
       });
-    } catch (e) {}
+    } catch (e) { swallowed(e, 'musica:deleteEntireFavoritePlaylist@4326'); }
 
     // 2. Se rodando no Electron, executa também a API IPC nativa
     if (window.torBrowserAPI && typeof window.torBrowserAPI.deleteFavoritePlaylist === 'function') {
@@ -3995,7 +4320,7 @@ async function deleteEntireFavoritePlaylist(name, source) {
     await deleteFavoritePlaylistRecord(name);
     try {
       await removeOfflineTracksForPlaylist(name);
-    } catch (e) {}
+    } catch (e) { swallowed(e, 'musica:deleteEntireFavoritePlaylist@4341'); }
     
     // 4. Remove imediatamente do DOM do painel Minhas Playlists se ele estiver aberto
     const panel = document.getElementById('sp-favorites-panel');
@@ -4031,34 +4356,70 @@ async function deleteTrackFromFavoritePlaylist(playlistName, track, rowEl, sourc
   if (!ok) return;
 
   try {
-    if ((source === 'disk' || source === 'downloads' || window.torBrowserAPI) && track.file && window.torBrowserAPI && typeof window.torBrowserAPI.deleteFavoriteTrack === 'function') {
-      await window.torBrowserAPI.deleteFavoriteTrack(playlistName, track.file);
-    } else if (track.file) {
-      try {
-        await fetch('/api/delete-favorite-track', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Client-Id': CLIENT_ID },
-          body: JSON.stringify({ playlist: playlistName, file: track.file, clientId: CLIENT_ID })
-        });
-      } catch (e) {}
-    }
-    await deleteFavoriteTrackFromRecord(playlistName, track.title, track.artist, track.file);
+    const cleanPl = playlistName.trim();
+    const trackFile = track.file || '';
+    const trackTitleClean = track.title || '';
+    const trackArtistClean = track.artist || '';
 
-    // Remove do array local
-    currentTracksList = currentTracksList.filter(t => t !== track && t.id !== track.id && (track.file ? t.file !== track.file : true));
-    
+    // 1. Remove imediatamente do array local em memória
+    currentTracksList = currentTracksList.filter(t => {
+      if (t === track) return false;
+      if (trackFile && t.file && t.file === trackFile) return false;
+      if (trackTitleClean && t.title && t.title.trim().toLowerCase() === trackTitleClean.trim().toLowerCase()) return false;
+      return true;
+    });
+
+    // 2. Animação imediata e remoção no DOM em tempo real
     if (rowEl) {
-      rowEl.style.transition = 'all 0.3s ease';
+      rowEl.style.transition = 'all 0.25s ease';
       rowEl.style.opacity = '0';
       rowEl.style.transform = 'translateX(20px)';
-      setTimeout(() => { if (rowEl && rowEl.parentNode) rowEl.remove(); }, 300);
+      setTimeout(() => {
+        if (rowEl && rowEl.parentNode) rowEl.remove();
+        if (currentTracksList.length === 0 && spTrackList) {
+          spTrackList.innerHTML = `<div class="sp-search-placeholder" style="padding:40px 20px;text-align:center;">A playlist "${escapeFavoriteText(cleanPl)}" está vazia.<br><span style="font-size:13px;color:#94a3b8;margin-top:8px;display:inline-block;">Toque em "➕ Add Músicas" no topo para adicionar músicas.</span></div>`;
+        }
+      }, 250);
     }
-    if (spHeroSub) {
-      spHeroSub.textContent = 'Minhas playlists favoritas • ' + currentTracksList.length + ' músicas no aparelho';
+
+    // 3. Atualiza barra superior e subtítulo do Hero em tempo real
+    if (selectedPlaylistName && selectedPlaylistName.toLowerCase() === cleanPl.toLowerCase()) {
+      showSelectedPlaylist(selectedPlaylistName, true, source, currentTracksList.length);
+      if (spHeroSub) {
+        spHeroSub.innerHTML = `<span>📁 Playlist Salva • <b>${currentTracksList.length} ${currentTracksList.length === 1 ? 'música' : 'músicas'}</b> no aparelho • 100% Offline</span>`;
+      }
     }
-    showDownloadNotice(`"${trackTitle}" removida da playlist.`);
+
+    // 4. Exclui do disco (Electron), servidor e IndexedDB
+    if (window.torBrowserAPI && typeof window.torBrowserAPI.deleteFavoriteTrack === 'function') {
+      try {
+        await window.torBrowserAPI.deleteFavoriteTrack(cleanPl, trackFile, trackTitleClean, trackArtistClean);
+      } catch (errIpc) {
+        console.warn('Erro ao deletar faixa via IPC:', errIpc);
+      }
+    }
+
+    try {
+      await fetch('/api/delete-favorite-track', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Client-Id': CLIENT_ID },
+        body: JSON.stringify({
+          playlist: cleanPl,
+          file: trackFile,
+          title: trackTitleClean,
+          artist: trackArtistClean,
+          clientId: CLIENT_ID
+        })
+      });
+    } catch (e) { swallowed(e, 'musica:deleteTrackFromFavoritePlaylist@4432'); }
+
+    await deleteFavoriteTrackFromRecord(cleanPl, trackTitleClean, trackArtistClean, trackFile);
+    await deleteOfflineTrack(track);
+
+    showDownloadNotice(`"${trackTitle}" removida com sucesso.`);
     updateFavoritesBtnCount();
     refreshFavoritesPanel(false);
+    updateActiveTargetPlaylistBanner();
   } catch (e) {
     console.error('Erro ao excluir faixa:', e);
     showDownloadNotice('Erro ao remover faixa: ' + (e.message || 'desconhecido'));
@@ -4248,7 +4609,7 @@ function stopModalPreview() {
       modalPreviewAudio.pause();
       modalPreviewAudio.currentTime = 0;
       modalPreviewAudio.src = '';
-    } catch (e) {}
+    } catch (e) { swallowed(e, 'musica:stopModalPreview@4630'); }
   }
   if (previewTimeoutTimer) {
     clearTimeout(previewTimeoutTimer);
@@ -4276,7 +4637,7 @@ function playTrackPreview30s(track, btnEl) {
   stopModalPreview();
 
   if (spotifyPreviewAudio && !spotifyPreviewAudio.paused) {
-    try { spotifyPreviewAudio.pause(); } catch(e) {}
+    try { spotifyPreviewAudio.pause(); } catch(e) { swallowed(e, 'musica:playTrackPreview30s@4658'); }
     updateBottomPlayerState(false);
   }
 
@@ -4493,150 +4854,172 @@ async function searchAndRenderRelatedTracks(query) {
 async function addTrackToFavoritePlaylist(playlistName, track, source) {
   if (!playlistName || !track) return false;
   try {
-    const url = track.fullStreamUrl || `/api/stream-audio?title=${encodeURIComponent(track.title)}&artist=${encodeURIComponent(track.artist)}`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error('Não foi possível obter áudio');
-    const blob = await res.blob();
-    if (!blob || blob.size < 40000) throw new Error('Áudio incompleto');
-    
-    const ext = audioExtension(blob);
-    const fileName = String(currentTracksList.length + 1).padStart(2, '0') + ' - ' + safeDownloadName(track.artist, 'Artista') + ' - ' + safeDownloadName(track.title, 'Faixa') + '.' + ext;
-    const data = new Uint8Array(await blob.arrayBuffer());
-    
-    const saveOnDisk = canSaveFavoriteOnDisk() && (source === 'disk' || window.torBrowserAPI);
-    let savedFile = fileName;
+    const cleanPlName = String(playlistName).trim();
+    const trackTitle = String(track.title || '').trim();
+    const trackArtist = String(track.artist || 'Artista').trim();
+    const ext = (track.blob ? audioExtension(track.blob) : 'mp3');
+    const isBaixadas = cleanPlName.toLowerCase() === 'músicas baixadas' || cleanPlName.toLowerCase() === 'musicas baixadas';
 
-    // Baixa também a capa da música
-    const coverObj = await fetchCoverAsBlobAndDataUrl(track.cover);
-    const coverData = coverObj ? coverObj.data : null;
-    const coverDataUrl = coverObj ? coverObj.dataUrl : '';
-    const coverMime = coverObj ? coverObj.mime : 'image/jpeg';
+    // 1. Obtém registro da playlist no IndexedDB
+    const existingRec = (await readFavoritePlaylistRecord(cleanPlName)) || { name: cleanPlName, tracks: [] };
+    if (!Array.isArray(existingRec.tracks)) existingRec.tracks = [];
 
-    const saved = {
-      title: track.title,
-      artist: track.artist,
-      cover: coverDataUrl || track.cover || '',
-      coverDataUrl,
-      file: fileName,
-      blob
-    };
-    await saveOfflineTrack(saved, blob);
-    
-    if (saveOnDisk && window.torBrowserAPI && typeof window.torBrowserAPI.saveFavoriteTrack === 'function') {
-      const written = await window.torBrowserAPI.saveFavoriteTrack({
-        playlist: playlistName,
-        fileName,
-        title: track.title,
-        artist: track.artist,
-        cover: track.cover || '',
-        coverData,
-        coverMime,
-        data
-      });
-      if (written && written.success && written.file) {
-        savedFile = written.file;
-      }
+    // Se for Músicas Baixadas, garante que todas as faixas já baixadas no aparelho estejam presentes em existingRec.tracks
+    if (isBaixadas) {
+      try {
+        const allOffline = await listAllOfflineTracks();
+        if (allOffline && allOffline.length > 0) {
+          allOffline.forEach(offT => {
+            if (!offT || !offT.title) return;
+            const offNorm = offT.title.trim().toLowerCase();
+            if (!existingRec.tracks.some(t => t && t.title && t.title.trim().toLowerCase() === offNorm)) {
+              existingRec.tracks.push({
+                title: offT.title,
+                artist: offT.artist || 'Artista',
+                cover: offT.cover || 'papaleguas_logo.png',
+                file: offT.file || '',
+                playlistName: 'Músicas Baixadas',
+                fullStreamUrl: '',
+                blob: offT.blob || null,
+                addedAt: offT.savedAt || Date.now()
+              });
+            }
+          });
+        }
+      } catch (e) { swallowed(e, 'musica:addTrackToFavoritePlaylist@4907'); }
     }
-    
-    // Atualiza IndexedDB
-    const existingRec = (await readFavoritePlaylistRecord(playlistName)) || { name: playlistName, tracks: [] };
+
+    const normTitle = trackTitle.toLowerCase();
+    const alreadyIndex = existingRec.tracks.findIndex(t => t && t.title && t.title.trim().toLowerCase() === normTitle);
+
+    const fileName = track.file || (
+      String(existingRec.tracks.length + 1).padStart(2, '0') + ' - ' +
+      safeDownloadName(trackArtist, 'Artista') + ' - ' +
+      safeDownloadName(trackTitle, 'Faixa') + '.' + ext
+    );
+
+    const coverUrl = track.cover || (existingRec.cover || 'papaleguas_logo.png');
+
     const newTrackRecord = {
-      title: track.title,
-      artist: track.artist,
-      cover: coverDataUrl || track.cover || '',
-      file: savedFile,
-      blob
+      title: trackTitle,
+      artist: trackArtist,
+      cover: coverUrl,
+      file: fileName,
+      playlistName: cleanPlName,
+      fullStreamUrl: track.fullStreamUrl || '',
+      blob: track.blob || null,
+      addedAt: Date.now()
     };
-    existingRec.tracks.push(newTrackRecord);
-    if (!existingRec.cover) {
-      existingRec.cover = coverDataUrl || track.cover || '';
+
+    if (alreadyIndex === -1) {
+      existingRec.tracks.push(newTrackRecord);
+    } else {
+      existingRec.tracks[alreadyIndex] = { ...existingRec.tracks[alreadyIndex], ...newTrackRecord };
+    }
+
+    if (!existingRec.cover || existingRec.cover.includes('papaleguas_logo')) {
+      existingRec.cover = coverUrl;
     }
     existingRec.savedAt = Date.now();
-    await saveFavoritePlaylistRecord(playlistName, existingRec.tracks, existingRec.cover);
-    
-    // Atualiza índice no disco se Electron
+    await saveFavoritePlaylistRecord(cleanPlName, existingRec.tracks, existingRec.cover);
+
+    // 2. Se a faixa já tiver Blob, salva imediatamente no IndexedDB offline
+    if (track.blob instanceof Blob) {
+      await saveOfflineTrack(newTrackRecord, track.blob);
+      offlineUrlCache.set(offlineTrackKey(newTrackRecord), URL.createObjectURL(track.blob));
+    }
+
+    // 3. Atualiza índice no disco (Electron) ou no servidor sem travar
+    const saveOnDisk = canSaveFavoriteOnDisk() && (source === 'disk' || window.torBrowserAPI);
     if (saveOnDisk && window.torBrowserAPI && typeof window.torBrowserAPI.saveFavoritePlaylistIndex === 'function') {
-      await window.torBrowserAPI.saveFavoritePlaylistIndex({
-        name: playlistName,
+      window.torBrowserAPI.saveFavoritePlaylistIndex({
+        name: cleanPlName,
         cover: existingRec.cover,
         tracks: existingRec.tracks.map(t => ({
           title: t.title,
           artist: t.artist,
           cover: t.cover,
-          coverFile: t.file.replace(/\.[^.]+$/, '.jpg'),
+          coverFile: (t.file || '').replace(/\.[^.]+$/, '.jpg'),
           file: t.file
         }))
-      });
+      }).catch(err => console.warn('Aviso ao sincronizar índice no disco:', err));
     } else {
-      try {
-        fetch('/api/create-favorite-playlist', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Client-Id': CLIENT_ID },
-          body: JSON.stringify({
-            name: playlistName,
-            cover: existingRec.cover,
-            clientId: CLIENT_ID,
-            tracks: existingRec.tracks.map(t => ({
-              title: t.title,
-              artist: t.artist,
-              album: playlistName,
-              cover: t.cover || existingRec.cover,
-              file: t.file
-            }))
-          })
-        }).catch(() => null);
-      } catch(e) {}
+      fetch('/api/create-favorite-playlist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Client-Id': CLIENT_ID },
+        body: JSON.stringify({
+          name: cleanPlName,
+          cover: existingRec.cover,
+          clientId: CLIENT_ID,
+          tracks: existingRec.tracks.map(t => ({
+            title: t.title,
+            artist: t.artist,
+            album: cleanPlName,
+            cover: t.cover || existingRec.cover,
+            file: t.file
+          }))
+        })
+      }).catch(() => null);
     }
-    
-    // Adiciona ao cache offline em memória para reprodução instantânea sem internet
+
+    // 4. Cria objeto da faixa em memória para reprodução instantânea
     const memTrack = {
       id: 'fav-added-' + Date.now(),
-      title: track.title,
-      artist: track.artist,
-      cover: coverDataUrl || track.cover || '',
-      file: savedFile,
-      playlistName: playlistName,
+      title: trackTitle,
+      artist: trackArtist,
+      cover: coverUrl,
+      file: fileName,
+      playlistName: cleanPlName,
+      fullStreamUrl: track.fullStreamUrl || '',
+      blob: track.blob || null,
+      isDownloaded: true,
       preview: ''
     };
-    offlineUrlCache.set(offlineTrackKey(memTrack), URL.createObjectURL(blob));
-    
-    // Adiciona na lista atual de faixas em exibição APENAS se a tela estiver exibindo esta playlist favorita
-    if (isCurrentPlaylistFavorite && selectedPlaylistName === playlistName && spTrackList) {
-      currentTracksList.push(memTrack);
-      const newIdx = currentTracksList.length - 1;
-      const row = document.createElement('div');
-      row.className = 'sp-track-row';
-      row.setAttribute('data-id', memTrack.id);
-      row.innerHTML = `
-        <img class="sp-track-thumb" src="${memTrack.cover || 'papaleguas_logo.png'}" onerror="this.src='papaleguas_logo.png';" alt="" />
-        <div class="sp-track-meta">
-          <span class="sp-track-name" title="${escapeFavoriteText(memTrack.title)}">${escapeFavoriteText(memTrack.title)}</span>
-          <span class="sp-track-artist" title="${escapeFavoriteText(memTrack.artist)}">${escapeFavoriteText(memTrack.artist)}</span>
-        </div>
-        <div class="sp-track-actions">
-          <button class="sp-track-del-btn" title="Excluir música desta playlist" type="button">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="3 6 5 6 21 6"></polyline>
-              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-            </svg>
-          </button>
-        </div>
-      `;
-      row.querySelector('.sp-track-del-btn').addEventListener('click', (e) => {
-        e.stopPropagation();
-        deleteTrackFromFavoritePlaylist(playlistName, memTrack, row, source);
-      });
-      row.addEventListener('click', () => {
-        playTrackAtIndex(newIdx);
-      });
-      spTrackList.appendChild(row);
-      if (spHeroSub) {
-        spHeroSub.textContent = 'Minhas playlists favoritas • ' + currentTracksList.length + ' músicas no aparelho';
-      }
+
+    // 5. Atualização em TEMPO REAL do DOM se a tela estiver exibindo esta playlist
+    const isShowingThisPl = (selectedPlaylistName && selectedPlaylistName.toLowerCase() === cleanPlName.toLowerCase());
+    if (isShowingThisPl) {
+      await loadSavedFavorite(cleanPlName, source, false);
     }
-    showDownloadNotice(`"${track.title}" adicionada com sucesso!`);
+
+    // 6. Cache progressivo do áudio em segundo plano SEM bloquear o clique do usuário
+    (async () => {
+      try {
+        let currentBlob = track.blob;
+        if (!(currentBlob instanceof Blob)) {
+          const b = await fetchOrReuseTrackBlob(newTrackRecord, 20000).catch(() => null);
+          if (b && b.size > 20000) {
+            currentBlob = b;
+            newTrackRecord.blob = b;
+            await saveOfflineTrack(newTrackRecord, b);
+            offlineUrlCache.set(offlineTrackKey(newTrackRecord), URL.createObjectURL(b));
+          }
+        }
+
+        if (currentBlob instanceof Blob && saveOnDisk && window.torBrowserAPI && typeof window.torBrowserAPI.saveFavoriteTrack === 'function') {
+          const coverObj = await fetchCoverAsBlobAndDataUrl(track.cover);
+          const data = new Uint8Array(await currentBlob.arrayBuffer());
+          await window.torBrowserAPI.saveFavoriteTrack({
+            playlist: cleanPlName,
+            fileName,
+            title: trackTitle,
+            artist: trackArtist,
+            cover: track.cover || '',
+            coverData: coverObj ? coverObj.data : null,
+            coverMime: coverObj ? coverObj.mime : 'image/jpeg',
+            data
+          });
+        }
+      } catch (bgErr) {
+        console.warn('Cache de áudio em segundo plano completado com aviso:', bgErr);
+      }
+    })();
+
+    showDownloadNotice(`✓ "${trackTitle}" adicionada em "${cleanPlName}"!`);
     updateFavoritesBtnCount();
-    triggerPlaylistDownloadedVibration(playlistName);
+    refreshFavoritesPanel(false);
+    updateActiveTargetPlaylistBanner();
+    triggerPlaylistDownloadedVibration(cleanPlName);
     return true;
   } catch (err) {
     console.error('Erro ao adicionar música à playlist favorita:', err);
@@ -4647,7 +5030,14 @@ async function addTrackToFavoritePlaylist(playlistName, track, source) {
 // Filtros de Categoria (Tudo, Playlists, Músicas, Artistas, Álbuns, Podcasts) e Botão IA Recomenda
 const btnDownloadPlaylist = document.getElementById('btn-sp-download-playlist');
 if (btnDownloadPlaylist) {
-  btnDownloadPlaylist.addEventListener('click', () => { downloadPlaylistToDevice(); });
+  let lastDownloadClickTime = 0;
+  btnDownloadPlaylist.addEventListener('click', () => {
+    // Proteção anti double-click/double-tap: ignora cliques dentro de 1.5s
+    const now = Date.now();
+    if (now - lastDownloadClickTime < 1500) return;
+    lastDownloadClickTime = now;
+    downloadPlaylistToDevice();
+  });
 }
 
 function openPlaylistsMenuModal() {
@@ -4747,17 +5137,31 @@ async function downloadTargetPlaylist(name) {
     showDownloadNotice(`A playlist "${plName}" ainda não possui músicas. Adicione músicas pelo [+] antes de baixar.`);
     return;
   }
+  // Impede duplicação: se já está em execução ou na fila com o mesmo nome, ignora
+  const normPlName = String(plName || '').trim().toLowerCase();
+  const isCurrentlyDownloading = activeDownloadJobName && activeDownloadJobName.toLowerCase() === normPlName;
+  const alreadyQueued = isCurrentlyDownloading || downloadQueue.some((j) => String(j.name || '').trim().toLowerCase() === normPlName);
+  if (alreadyQueued) {
+    showDownloadNotice(`A playlist "${plName}" já está sendo baixada.`);
+    return;
+  }
   showDownloadNotice(`Iniciando download da playlist "${plName}" (${tracks.length} músicas)...`);
   downloadQueue.push({ name: plName, list: tracks });
   if (!downloadBusy) {
+    downloadBusy = true; // Trava ANTES de chamar runDownloadQueue para evitar corrida com double-click
     runDownloadQueue();
   }
 }
 
 const btnTargetDownload = document.getElementById('btn-sp-target-download');
 if (btnTargetDownload) {
+  let lastTargetDownloadClickTime = 0;
   btnTargetDownload.addEventListener('click', (e) => {
     e.stopPropagation();
+    // Proteção anti double-click/double-tap
+    const now = Date.now();
+    if (now - lastTargetDownloadClickTime < 1500) return;
+    lastTargetDownloadClickTime = now;
     downloadTargetPlaylist();
   });
 }
@@ -4826,6 +5230,15 @@ if (favoritesPanel) {
     }
     if (openBtn && window.torBrowserAPI && typeof window.torBrowserAPI.openFavoriteFolder === 'function') {
       window.torBrowserAPI.openFavoriteFolder(openBtn.getAttribute('data-fav-open'));
+      return;
+    }
+    const itemEl = event.target.closest('[data-fav-item-name]');
+    if (itemEl && !event.target.closest('button') && !event.target.closest('.sp-fav-thumb-wrap')) {
+      const plName = itemEl.getAttribute('data-fav-item-name');
+      const plSrc = itemEl.getAttribute('data-fav-source') || 'device';
+      closePlaylistsMenuModal();
+      loadSavedFavorite(plName, plSrc, false);
+      return;
     }
   });
 }
@@ -5103,7 +5516,10 @@ spFilterChips.forEach(chip => {
     const type = chip.getAttribute('data-type');
 
     if (type === 'ai') {
-      toggleDjChat(); // Alterna: se fechado abre com azul neon; se aberto fecha com borda vermelha!
+      setMusicCategory('ai');
+      toggleDjChat(true); // Abre o chat do DJ IA
+      const q = spotifySearchInput && spotifySearchInput.value.trim() ? spotifySearchInput.value.trim() : '';
+      fetchAiRecommendations(q, 'all');
       return;
     }
 
@@ -5114,11 +5530,7 @@ spFilterChips.forEach(chip => {
 
     const q = spotifySearchInput && spotifySearchInput.value.trim() ? spotifySearchInput.value.trim() : '';
 
-    // Marca o chip de categoria selecionado (sem desmarcar o chip IA)
-    spFilterChips.forEach(c => {
-      if (c.getAttribute('data-type') !== 'ai') c.classList.remove('active');
-    });
-    chip.classList.add('active');
+    setMusicCategory(type);
 
     // Executa a busca direta de catálogo
     performMusicSearch(q, type);
@@ -5184,7 +5596,7 @@ function applySpotifyModalSize(sizeKey) {
   // Salva a preferência do usuário
   try {
     localStorage.setItem('sp_player_size', sizeKey);
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'musica:applySpotifyModalSize@5617'); }
 }
 
 spSizeBtns.forEach(btn => {
@@ -5201,7 +5613,7 @@ try {
   if (savedSize && SIZE_PRESETS[savedSize]) {
     applySpotifyModalSize(savedSize);
   }
-} catch (e) {}
+} catch (e) { swallowed(e, 'musica:top@5634'); }
 
 // Minimizar Mini Player para o Modo Barra Flutuante (apenas o player)
 const btnSpotifyMinimize = document.getElementById('btn-spotify-minimize');
@@ -5269,7 +5681,7 @@ const djChatHistory = (() => {
 function saveClientDjHistory() {
   try {
     localStorage.setItem('papaleguas_dj_history_' + CLIENT_ID, JSON.stringify(djChatHistory.slice(-40)));
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'musica:saveClientDjHistory@5702'); }
 }
 
 function setIaRecomendaVisualState(isOpen) {
@@ -5500,7 +5912,7 @@ function pauseMusicForVoice() {
       if (typeof updateBottomPlayerState === 'function') updateBottomPlayerState(false);
       musicPausedForVoice = true;
     }
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'musica:pauseMusicForVoice@5933'); }
 }
 
 function resumeMusicAfterVoice() {
@@ -5512,7 +5924,7 @@ function resumeMusicAfterVoice() {
       if (playp && typeof playp.catch === 'function') playp.catch(() => {});
       if (typeof updateBottomPlayerState === 'function') updateBottomPlayerState(true);
     }
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'musica:resumeMusicAfterVoice@5945'); }
 }
 
 async function startVoiceInput({ buttonEl, inputEl, onResultSubmit, placeholderMsg }) {
@@ -5599,7 +6011,7 @@ async function startVoiceInput({ buttonEl, inputEl, onResultSubmit, placeholderM
           mediaStream.getTracks().forEach(track => track.stop());
         }
         if (audioCtx && audioCtx.state !== 'closed') {
-          try { audioCtx.close(); } catch(e) {}
+          try { audioCtx.close(); } catch(e) { swallowed(e, 'musica:cleanup@6032'); }
         }
         if (buttonEl) {
           buttonEl.classList.remove('listening');
@@ -5691,7 +6103,7 @@ async function startVoiceInput({ buttonEl, inputEl, onResultSubmit, placeholderM
         stop: () => finishAndTranscribe(),
         cancel: () => {
           isStopping = true;
-          try { mediaRecorder.stop(); } catch(e) {}
+          try { mediaRecorder.stop(); } catch(e) { swallowed(e, 'musica:cancel@6124'); }
           cleanup();
           if (inputEl) inputEl.placeholder = prevPlaceholder;
           resumeMusicAfterVoice();
@@ -5800,9 +6212,9 @@ async function startVoiceInput({ buttonEl, inputEl, onResultSubmit, placeholderM
       activeVoiceSession = {
         buttonEl,
         inputEl,
-        stop: () => { try { rec.stop(); } catch(e) {} },
+        stop: () => { try { rec.stop(); } catch(e) { swallowed(e, 'musica:stop@6233'); } },
         cancel: () => {
-          try { rec.abort(); } catch(e) {}
+          try { rec.abort(); } catch(e) { swallowed(e, 'musica:cancel@6235'); }
           resumeMusicAfterVoice();
         }
       };
@@ -5984,13 +6396,13 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   // Verifica se a URL trouxe um comando de música (?q=gospel&autoplay=1)
   const params = new URLSearchParams(window.location.search);
-  const q = params.get('q') || params.get('dj') || params.get('search') || '';
+  const q = params.get('q') || params.get('play') || params.get('dj') || params.get('search') || '';
   const autoplay = params.get('autoplay') !== '0';
   try {
     if (window.location.pathname.includes('musica.html')) {
       window.history.replaceState({}, '', '/musica');
     }
-  } catch (e) {}
+  } catch (e) { swallowed(e, 'musica:top@6423'); }
 
   if (q && q.trim()) {
     executeMusicQuery(q.trim(), autoplay);
@@ -6131,7 +6543,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     try {
       localStorage.setItem('papaleguas_last_music_state', JSON.stringify(state));
-    } catch(e) {}
+    } catch(e) { swallowed(e, 'musica:top@6564'); }
     if (window.torBrowserAPI && window.torBrowserAPI.sendToHost) {
       window.torBrowserAPI.sendToHost('music-state-update', state);
     }
@@ -6140,7 +6552,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       if (window.parent && window.parent !== window) {
         window.parent.postMessage(state, '*');
       }
-    } catch(e) {}
+    } catch(e) { swallowed(e, 'musica:top@6573'); }
   };
 
   if (spotifyPreviewAudio) {
@@ -6168,11 +6580,13 @@ window.addEventListener('DOMContentLoaded', async () => {
           ensureDjPipCanvas();
           if (djPipVideo && djPipVideo.paused) djPipVideo.play().catch(() => {});
         }
-      } catch (e) {}
+      } catch (e) { swallowed(e, 'musica:top@6601'); }
     });
 
     spotifyPreviewAudio.addEventListener('pause', () => {
       if (window.__papaLeavingPage) return;
+      // Fim natural da faixa: o 'ended' cuida da transição; não marca como pausado
+      if (spotifyPreviewAudio.ended || mediaKeepAliveActive) return;
       const t = currentTrackForSession();
       if (t) {
         updateMediaSession(t, false);
@@ -6213,7 +6627,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   // Ao voltar para o app (ou minimizar), mantém o estado consistente sem resetar o scrubber nativo
   document.addEventListener('visibilitychange', () => {
     if (!spotifyPreviewAudio) return;
-    const isPlaying = !spotifyPreviewAudio.paused && !spotifyPreviewAudio.ended;
+    const isPlaying = (!spotifyPreviewAudio.paused && !spotifyPreviewAudio.ended) || mediaKeepAliveActive;
     if ('mediaSession' in navigator) {
       navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
     }
@@ -6236,11 +6650,11 @@ window.addEventListener('DOMContentLoaded', async () => {
   // Saindo de verdade do app: remove o cartão de mídia para não ficar travado na notificação.
   window.addEventListener('beforeunload', () => {
     window.__papaLeavingPage = true;
-    try { if (spotifyPreviewAudio) spotifyPreviewAudio.pause(); } catch (e) {}
+    try { if (spotifyPreviewAudio) spotifyPreviewAudio.pause(); } catch (e) { swallowed(e, 'musica:top@6671'); }
     clearMediaSession();
     try {
       localStorage.removeItem('papaleguas_last_music_state');
-    } catch (e) {}
+    } catch (e) { swallowed(e, 'musica:top@6675'); }
   });
 
   // Escuta comandos enviados pelo Mini Player Global do navegador
@@ -6282,7 +6696,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       }
       try {
         window.postMessage({ type: 'toggle-music-mini-player' }, '*');
-      } catch(e) {}
+      } catch(e) { swallowed(e, 'musica:top@6717'); }
 
       btnSpMiniPip.classList.toggle('active');
     });

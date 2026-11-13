@@ -113,6 +113,7 @@ class CastManager {
   }
 
   async discoverRokuOnThisMachine() {
+    this.startDiscovery();
     const priorityHosts = [
       1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
       21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 32, 35, 40, 45, 50, 55, 60, 70,
@@ -148,35 +149,62 @@ class CastManager {
         while (idx < ips.length) {
           const ip = ips[idx++];
           if (!ip || found.has(ip)) continue;
-          const [openRoku, openCast] = await Promise.all([
-            this.tcpOpen(ip, 8060, 300),
-            this.tcpOpen(ip, 8009, 300)
+          const [openRoku, openCast, openDial, openSamsung, openLg] = await Promise.all([
+            this.tcpOpen(ip, 8060, 320),
+            this.tcpOpen(ip, 8009, 320),
+            this.tcpOpen(ip, 8008, 320),
+            this.tcpOpen(ip, 8001, 320),
+            this.tcpOpen(ip, 3000, 320)
           ]);
           if (openRoku) {
             const info = await this.fetchRokuInfo(ip, 900);
             if (info && info.ip) {
+              info.lastSeen = Date.now();
               found.set(info.ip, info);
               this.devices.set(info.ip, info);
             }
-          } else if (openCast) {
+          } else if (openCast || openDial) {
             const castDev = {
               id: `cast-${ip}`,
               name: `Chromecast / Google TV (${ip})`,
               type: 'chromecast',
               ip,
+              port: openDial ? 8008 : 8009,
               lastSeen: Date.now()
             };
             found.set(ip, castDev);
             this.devices.set(ip, castDev);
+          } else if (openSamsung) {
+            const samDev = {
+              id: `samsung-${ip}`,
+              name: `Samsung Smart TV (${ip})`,
+              type: 'roku',
+              ip,
+              port: 8001,
+              lastSeen: Date.now()
+            };
+            found.set(ip, samDev);
+            this.devices.set(ip, samDev);
+          } else if (openLg) {
+            const lgDev = {
+              id: `lg-${ip}`,
+              name: `LG webOS Smart TV (${ip})`,
+              type: 'roku',
+              ip,
+              port: 3000,
+              lastSeen: Date.now()
+            };
+            found.set(ip, lgDev);
+            this.devices.set(ip, lgDev);
           }
         }
       };
-      const n = Math.min(limit || 24, Math.max(4, ips.length));
+      const n = Math.min(limit || 28, Math.max(4, ips.length));
       await Promise.all(Array.from({ length: n }, () => worker()));
     };
 
-    await run(priorityIps, 24);
-    if (found.size === 0) await run(extraIps, 24);
+    await run(priorityIps, 28);
+    await run(extraIps, 32);
     return Array.from(found.values());
   }
 
@@ -230,7 +258,7 @@ class CastManager {
 
       this.ssdpClient.on('response', (headers, statusCode, rinfo) => {
         const ip = rinfo && rinfo.address;
-        if (!ip) return;
+        if (!ip || this.getOwnIpv4s().has(ip)) return;
         const location = headers.LOCATION || headers.Location || '';
         const server = headers.SERVER || headers.Server || '';
         const st = headers.ST || headers.st || '';
@@ -255,9 +283,43 @@ class CastManager {
         }
       });
 
+      try {
+        const ChromecastAPI = require('chromecast-api');
+        this.ccClient = new ChromecastAPI();
+        this.ccClient.on('device', (d) => {
+          const ip = d && d.host;
+          if (!ip || this.getOwnIpv4s().has(ip)) return;
+          const friendly = (d.friendlyName || d.name || '').trim();
+          this.devices.set(ip, {
+            id: `cast-${ip}`,
+            name: friendly ? `${friendly} (${ip})` : `Chromecast / Google TV (${ip})`,
+            type: 'chromecast',
+            ip,
+            lastSeen: Date.now()
+          });
+        });
+      } catch (e) {}
+
       this.scan();
       this.scanInterval = setInterval(() => {
-        this.scan();
+        try {
+        const ChromecastAPI = require('chromecast-api');
+        this.ccClient = new ChromecastAPI();
+        this.ccClient.on('device', (d) => {
+          const ip = d && d.host;
+          if (!ip || this.getOwnIpv4s().has(ip)) return;
+          const friendly = (d.friendlyName || d.name || '').trim();
+          this.devices.set(ip, {
+            id: `cast-${ip}`,
+            name: friendly ? `${friendly} (${ip})` : `Chromecast / Google TV (${ip})`,
+            type: 'chromecast',
+            ip,
+            lastSeen: Date.now()
+          });
+        });
+      } catch (e) {}
+
+      this.scan();
         this.scanLocalSubnets();
       }, 20000);
     } catch (err) {
@@ -545,7 +607,7 @@ class CastManager {
 
       const req = http.request({
         hostname: device.ip,
-        port: device.port || 8060,
+        port: 8060,
         path: queryPath,
         method: 'POST',
         headers: {
@@ -571,10 +633,32 @@ class CastManager {
       });
 
       req.on('error', (err) => {
-        resolve({
-          success: false,
-          error: `Não foi possível iniciar o app diretamente na TV: ${err.message}. Certifique-se de que o controle de rede da TV esteja em 'Habilitado/Permitido'.`
+        // Fallback DIAL (porta 8008) para TVs Android TV / Samsung / LG
+        const dialBody = contentUrl ? `v=${encodeURIComponent(contentUrl.replace(/^.*v=/, ''))}` : '';
+        const dialReq = http.request({
+          hostname: device.ip,
+          port: 8008,
+          path: '/apps/YouTube',
+          method: 'POST',
+          timeout: 2500,
+          headers: {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'Content-Length': Buffer.byteLength(dialBody)
+          }
+        }, () => {
+          resolve({
+            success: true,
+            message: `Transmitido para ${device.name} via DIAL!`
+          });
         });
+        dialReq.on('error', () => {
+          resolve({
+            success: false,
+            error: `Não foi possível iniciar o app diretamente na TV: ${err.message}. Certifique-se de que o controle de rede da TV esteja em 'Habilitado/Permitido'.`
+          });
+        });
+        if (dialBody) dialReq.write(dialBody);
+        dialReq.end();
       });
 
       if (postData) req.write(postData);

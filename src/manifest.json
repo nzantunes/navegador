@@ -5,6 +5,14 @@
   "start_url": "/",
   "id": "/",
   "scope": "/",
+  "related_applications": [
+    {
+      "platform": "webapp",
+      "url": "https://papaleguas.app/manifest.json",
+      "id": "/"
+    }
+  ],
+  "prefer_related_applications": false,
   "display": "standalone",
   "display_override": ["standalone", "minimal-ui"],
   "orientation": "any",
@@ -34,6 +42,36 @@
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "BaixaTube Vídeos",
+      "short_name": "BaixaTube",
+      "description": "Assistir e baixar vídeos do YouTube sem anúncios",
+      "url": "/baixatube",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Músicas e Áudio",
+      "short_name": "Músicas",
+      "description": "Ouvir músicas sem anúncios em segundo plano",
+      "url": "/baixatube?q=musica",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Filmes e Séries",
+      "short_name": "Filmes",
+      "description": "Filmes completos e documentários",
+      "url": "/baixatube?q=filmes+completos",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Notícias e Tendências",
+      "short_name": "Notícias",
+      "description": "Notícias ao vivo e principais tendências",
+      "url": "/baixatube?q=noticias+hoje",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
     }
   ]
 }

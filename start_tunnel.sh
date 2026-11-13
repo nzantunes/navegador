@@ -38,6 +38,15 @@ if pgrep -f "cloudflared.*tunnel" > /dev/null; then
     exit 0
 fi
 
-# 3. Cria nova conexão Quick Tunnel se o app ainda não tiver ligado o cloudflared
-echo "🔗 Criando nova conexão Cloudflare Tunnel..."
-"$CLOUDFLARED_BIN" tunnel --no-autoupdate --no-prechecks --protocol http2 --edge-ip-version 4 --retries 15 --proxy-connect-timeout 30s --proxy-tcp-keepalive 30s --proxy-keepalive-timeout 90s --proxy-keepalive-connections 32 --url http://127.0.0.1:$PORT
+# 3. Cria nova conexão Cloudflare Tunnel com o domínio oficial ou fallback
+echo "🔗 Conectando Cloudflare Tunnel..."
+TOKEN_FILE="$PROJECT_DIR/papaleguas/data/cloudflare_token.txt"
+if [ -f "$TOKEN_FILE" ] && [ -s "$TOKEN_FILE" ]; then
+    TOKEN=$(cat "$TOKEN_FILE" | tr -d '[:space:]')
+    echo "🔑 Conectando túnel oficial para papaleguas.app..."
+    "$CLOUDFLARED_BIN" tunnel run --token "$TOKEN"
+else
+    echo "⚠️ Token oficial não encontrado. Iniciando Quick Tunnel temporário..."
+    "$CLOUDFLARED_BIN" tunnel --no-autoupdate --no-prechecks --protocol http2 --edge-ip-version 4 --retries 15 --proxy-connect-timeout 30s --proxy-tcp-keepalive 30s --proxy-keepalive-timeout 90s --proxy-keepalive-connections 32 --url http://127.0.0.1:$PORT
+fi
+

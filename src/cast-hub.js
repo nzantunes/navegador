@@ -245,10 +245,17 @@
           <button type="button" class="pch-close" id="pch-close" aria-label="Fechar">×</button>
         </div>
 
-        <div class="pch-net" id="pch-net">
-          <span class="pch-net-dot"></span>
-          <div class="pch-net-text"><b id="pch-net-title">📶 Conexão Wi-Fi do seu Celular</b><span id="pch-net-desc">Certifique-se de que a Smart TV e o seu celular estão conectados na mesma rede Wi-Fi.</span></div>
+        <div class="pch-media" id="pch-media">
+          <img id="pch-media-thumb" alt="" loading="lazy" decoding="async" />
+          <div class="pch-media-text"><small>Vai para a TV</small><b id="pch-media-title">Nenhum vídeo em reprodução</b></div>
         </div>
+
+        <div class="pch-section"><span id="pch-devices-label">Smart TVs Reconhecidas no seu Wi-Fi</span>
+          <button type="button" class="pch-mini-btn" id="pch-rescan"><i class="pch-spin"></i>Buscar Aparelhos</button>
+        </div>
+        <div class="pch-devices" id="pch-devices"></div>
+        <div class="pch-progress" id="pch-progress"><i></i></div>
+        <div class="pch-scan-note" id="pch-scan-note"></div>
 
         <div class="pch-perm" id="pch-perm">
           <span class="pch-perm-icon">🔓</span>
@@ -256,9 +263,17 @@
           <button type="button" id="pch-perm-btn">Permitir Acesso</button>
         </div>
 
-        <div class="pch-media" id="pch-media">
-          <img id="pch-media-thumb" alt="" />
-          <div class="pch-media-text"><small>Vai para a TV</small><b id="pch-media-title">Nenhum vídeo em reprodução</b></div>
+        <div class="pch-section">Smart TV por Endereço IP (Samsung, LG, Roku, Fire TV)</div>
+        <div class="pch-ip">
+          <input type="text" id="pch-ip" inputmode="decimal" placeholder="Digite o IP da TV (Ex: 192.168.1.15)" autocomplete="off" />
+          <button type="button" id="pch-ip-go">▶ Conectar na TV</button>
+        </div>
+        <div class="pch-hint" id="pch-ip-hint">
+          <b>💡 Como encontrar o IP da sua Smart TV:</b><br>
+          • <b>Samsung:</b> Configurações › Geral › Rede › Status da Rede › Configurações de IP<br>
+          • <b>LG (webOS):</b> Configurações › Rede › Conexão Wi-Fi › Avançado › Endereço IP<br>
+          • <b>Roku TV:</b> Configurações › Rede › Sobre › Endereço IP<br>
+          • <b>Android TV / Chromecast:</b> Configurações › Rede e Internet › Seu Wi-Fi › Endereço IP
         </div>
 
         <div class="pch-section">Opções de Transmissão Direta</div>
@@ -301,24 +316,9 @@
           <li><i>3</i><span>Selecione a sua Smart TV na lista para espelhar a tela instantaneamente.</span></li>
         </ul>
 
-        <div class="pch-section"><span id="pch-devices-label">Smart TVs Reconhecidas no seu Wi-Fi</span>
-          <button type="button" class="pch-mini-btn" id="pch-rescan"><i class="pch-spin"></i>Buscar Aparelhos</button>
-        </div>
-        <div class="pch-devices" id="pch-devices"></div>
-        <div class="pch-progress" id="pch-progress"><i></i></div>
-        <div class="pch-scan-note" id="pch-scan-note"></div>
-
-        <div class="pch-section">Smart TV por Endereço IP (Samsung, LG, Roku, Fire TV)</div>
-        <div class="pch-ip">
-          <input type="text" id="pch-ip" inputmode="decimal" placeholder="Digite o IP da TV (Ex: 192.168.1.15)" autocomplete="off" />
-          <button type="button" id="pch-ip-go">▶ Conectar na TV</button>
-        </div>
-        <div class="pch-hint" id="pch-ip-hint">
-          <b>💡 Como encontrar o IP da sua Smart TV:</b><br>
-          • <b>Samsung:</b> Configurações › Geral › Rede › Status da Rede › Configurações de IP<br>
-          • <b>LG (webOS):</b> Configurações › Rede › Conexão Wi-Fi › Avançado › Endereço IP<br>
-          • <b>Roku TV:</b> Configurações › Rede › Sobre › Endereço IP<br>
-          • <b>Android TV / Chromecast:</b> Configurações › Rede e Internet › Seu Wi-Fi › Endereço IP
+        <div class="pch-net" id="pch-net" style="margin-top:12px;margin-bottom:0;">
+          <span class="pch-net-dot"></span>
+          <div class="pch-net-text"><b id="pch-net-title">📶 Conexão Wi-Fi do seu Celular</b><span id="pch-net-desc">Certifique-se de que a Smart TV e o seu celular estão conectados na mesma rede Wi-Fi.</span></div>
         </div>
 
         <div class="pch-guide-card" id="pch-perm-guide">
@@ -494,8 +494,13 @@
   }
 
   async function grantLocalNetwork() {
-    // No app instalado, aciona diretamente a gaveta nativa de Cast do sistema Android/iOS
-    castViaPhone();
+    const c = cc();
+    if (c && typeof c.requestLocalNetworkAccess === 'function') {
+      try { await c.requestLocalNetworkAccess(); } catch (e) {}
+    }
+    await refreshPermission();
+    renderPermission();
+    scan(true);
   }
 
   function renderDevices() {

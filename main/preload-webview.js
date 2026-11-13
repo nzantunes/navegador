@@ -143,7 +143,10 @@ if (isInternalPage) {
       readFavoriteTrack: (playlist, fileName) => ipcRenderer.invoke('read-favorite-track', playlist, fileName),
       openFavoriteFolder: (name) => ipcRenderer.invoke('open-favorite-folder', name),
       deleteFavoritePlaylist: (name) => ipcRenderer.invoke('delete-favorite-playlist', name),
-      deleteFavoriteTrack: (playlist, fileName) => ipcRenderer.invoke('delete-favorite-track', playlist, fileName),
+      deleteFavoriteTrack: (playlist, fileName, title, artist) => ipcRenderer.invoke('delete-favorite-track', playlist, fileName, title, artist),
+      renameFavoritePlaylist: (payload) => ipcRenderer.invoke('rename-favorite-playlist', payload),
+      editFavoriteTrack: (payload) => ipcRenderer.invoke('edit-favorite-track', payload),
+      saveFavoritePlaylistIndex: (payload) => ipcRenderer.invoke('save-favorite-playlist-index', payload),
       setFavoritePlaylistCover: (payload) => ipcRenderer.invoke('set-favorite-playlist-cover', payload),
       createFavoritePlaylist: (name) => ipcRenderer.invoke('create-favorite-playlist', name),
       scanClientLan: () => ipcRenderer.invoke('scan-client-lan'),
@@ -189,9 +192,49 @@ window.addEventListener('message', async (ev) => {
     }
   } else if (ev.data && ev.data.type === 'OPEN_NEW_TAB') {
     openInNewTab(ev.data.url);
-  } else if (ev.data && (ev.data.type === 'music-state-update' || ev.data.type === 'toggle-music-mini-player' || ev.data.type === 'youtube-state-update' || ev.data.type === 'enter-video-fullscreen' || ev.data.type === 'exit-video-fullscreen' || ev.data.type === 'youtube-enter-pip')) {
+  } else if (ev.data && (
+    ev.data.type === 'play-youtube-video' ||
+    ev.data.type === 'play-video' ||
+    ev.data.type === 'play-dj-music' ||
+    ev.data.type === 'music-state-update' ||
+    ev.data.type === 'toggle-music-mini-player' ||
+    ev.data.type === 'youtube-state-update' ||
+    ev.data.type === 'enter-video-fullscreen' ||
+    ev.data.type === 'exit-video-fullscreen' ||
+    ev.data.type === 'youtube-enter-pip'
+  )) {
     try { ipcRenderer.sendToHost(ev.data.type, ev.data); } catch(e) {}
   }
+});
+
+function showInPageClickFeedback() {
+  try {
+    if (document.body) document.body.style.cursor = 'progress';
+    let bar = document.getElementById('papaleguas-click-loading-bar');
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'papaleguas-click-loading-bar';
+      bar.style.cssText = 'position:fixed;top:0;left:0;height:3.5px;width:0%;z-index:2147483647;pointer-events:none;background:linear-gradient(90deg,#00f0ff,#38bdf8,#818cf8,#f59e0b);box-shadow:0 0 12px rgba(0,240,255,0.95);transition:width 0.28s ease,opacity 0.25s ease;';
+      (document.body || document.documentElement).appendChild(bar);
+    }
+    bar.style.opacity = '1';
+    bar.style.width = '30%';
+    setTimeout(() => { if (bar) bar.style.width = '75%'; }, 150);
+  } catch (e) {}
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+  try {
+    if (document.body) document.body.style.cursor = '';
+    const bar = document.getElementById('papaleguas-click-loading-bar');
+    if (bar) {
+      bar.style.width = '100%';
+      setTimeout(() => {
+        bar.style.opacity = '0';
+        setTimeout(() => { bar.remove(); }, 250);
+      }, 150);
+    }
+  } catch (e) {}
 });
 
 // Em site externo, o clique não pode navegar este documento: o app abre a URL
@@ -199,8 +242,19 @@ window.addEventListener('message', async (ev) => {
 function openLinkInside(e, link) {
   const href = linkHref(link);
   if (!/^https?:/i.test(href) && !href.startsWith('file://')) return false;
+
+  const ytFromClick = youtubeIdFromUrl(href);
+  if (ytFromClick) {
+    e.preventDefault();
+    e.stopPropagation();
+    try { ipcRenderer.sendToHost('open-new-tab', '/baixatube?v=' + ytFromClick); } catch (err) {}
+    return true;
+  }
+
   e.preventDefault();
   e.stopPropagation();
+  showInPageClickFeedback();
+  try { ipcRenderer.sendToHost('page-loading', { url: href, kind: 'link' }); } catch (err) {}
   openInNewTab(href);
   return true;
 }
@@ -217,13 +271,36 @@ window.addEventListener('click', (e) => {
   if (!link || link.hasAttribute('download')) return;
   const href = linkHref(link);
   if (!/^https?:/i.test(href) && !href.startsWith('file://')) return;
+
   const modified = e.button === 1 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey;
   if (modified || linkOpensNewContext(link) || link.classList.contains('gpt-link') || link.getAttribute('data-external') === 'true') {
     openLinkInside(e, link);
     return;
   }
+
+  const ytFromClick = youtubeIdFromUrl(href);
+  if (ytFromClick) {
+    if (link && link.closest && link.closest('#videoModal, [data-inpage-player]')) {
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    const title = (link.textContent || link.getAttribute('title') || '').trim();
+    try { ipcRenderer.sendToHost('open-new-tab', '/baixatube?v=' + ytFromClick); } catch (err) {}
+    return;
+  }
   if (e.button !== 0) return;
-  if (isInternalPage) return;
+  if (isInternalPage) {
+    if (/^\/proxy\?url=/i.test(href) || href.includes('/proxy?url=') || (/^https?:\/\//i.test(href) && !href.includes('localhost:8080') && !href.includes('127.0.0.1:8080'))) {
+      e.preventDefault();
+      e.stopPropagation();
+      showInPageClickFeedback();
+      try { ipcRenderer.sendToHost('page-loading', { url: href, kind: 'link' }); } catch (err) {}
+      try { ipcRenderer.sendToHost('navigate-current-tab', href); } catch (err) {}
+      return;
+    }
+    return;
+  }
   try {
     const next = new URL(href, window.location.href);
     if (next.origin === window.location.origin && next.pathname === window.location.pathname && next.search === window.location.search) {
@@ -234,6 +311,8 @@ window.addEventListener('click', (e) => {
   }
   e.preventDefault();
   e.stopPropagation();
+  showInPageClickFeedback();
+  try { ipcRenderer.sendToHost('page-loading', { url: href, kind: 'link' }); } catch (err) {}
   try { ipcRenderer.sendToHost('navigate-current-tab', href); } catch (err) {}
 }, true);
 
@@ -282,7 +361,7 @@ const adHideCSS = `
 `;
 
 
-let __adblockEnabled = false;
+let __adblockEnabled = true;
 
 function removeAdblockCSS() {
   try {
@@ -313,15 +392,15 @@ try {
 // Verifica estado do adblocker ao iniciar
 try {
   ipcRenderer.invoke('get-adblock-status').then(res => {
-    updateAdblockState(res && res.enabled);
+    updateAdblockState(res && typeof res.enabled === 'boolean' ? res.enabled : true);
   }).catch(() => {
-    __adblockEnabled = false;
-    removeAdblockCSS();
+    __adblockEnabled = true;
+    injectAdblockCSS();
     try { ipcRenderer.sendToHost('get-adblock-status'); } catch (e2) {}
   });
 } catch(e) {
-  __adblockEnabled = false;
-  removeAdblockCSS();
+  __adblockEnabled = true;
+  injectAdblockCSS();
 }
 
 function injectAdblockCSS() {
@@ -816,7 +895,19 @@ function killYouTubeVideoAds() {
 // ----------------------------------------------------
 function youtubeIdFromUrl(raw) {
   try {
-    const u = new URL(String(raw || ''), window.location.href);
+    const rawStr = String(raw || '').trim();
+    if (!rawStr) return '';
+    // 1. YouTube padrão, embed, shorts ou youtu.be, ou rota interna baixatube
+    const m = rawStr.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?|shorts)\/|.*[?&]v=)|youtu\.be\/|baixatube(?:\.html)?\?.*[?&]v=)([^"&?\/\s]{11})/i);
+    if (m && m[1]) return m[1];
+    // 2. Parâmetro v= de 11 caracteres em qualquer rota interna ou externa
+    const vMatch = rawStr.match(/[?&]v=([^"&?\/\s]{11})/i);
+    if (vMatch && vMatch[1]) return vMatch[1];
+    // 3. Rota /v/11chars
+    const vRoute = rawStr.match(/\/v\/([a-zA-Z0-9_-]{11})/i);
+    if (vRoute && vRoute[1]) return vRoute[1];
+    // 4. URL parsing padrão
+    const u = new URL(rawStr, window.location.href);
     const host = u.hostname.replace(/^www\./, '');
     if (host === 'youtu.be') return (u.pathname.split('/').filter(Boolean)[0] || '').split('?')[0];
     if (host.endsWith('youtube.com') || host.endsWith('youtube-nocookie.com')) {
@@ -853,6 +944,7 @@ function isOwnAppPage(href) {
   let lastReportedVideo = '';
   function sniffVideos() {
     try {
+      if (window.__papaleguasVideoSniffDisabled) return;
       const pageUrl = realBrowsedUrl();
       if (!pageUrl || isOwnAppPage(window.location.href) || isOwnAppPage(pageUrl)) return;
       let detected = null;
@@ -862,6 +954,7 @@ function isOwnAppPage(href) {
           type: 'youtube',
           youtubeId: ytFromPage,
           url: 'https://www.youtube.com/watch?v=' + ytFromPage,
+          pageUrl: pageUrl,
           title: document.title.replace(/\s+-\s+YouTube\s*$/i, '').trim() || 'Vídeo',
           width: 1280,
           duration: 0
@@ -875,6 +968,7 @@ function isOwnAppPage(href) {
             type: 'youtube',
             youtubeId: frameId,
             url: 'https://www.youtube.com/watch?v=' + frameId,
+            pageUrl: pageUrl,
             title: document.title || 'Vídeo',
             width: 1280,
             duration: 0
@@ -895,6 +989,7 @@ function isOwnAppPage(href) {
               type: mediaUrl ? 'html5' : 'page',
               youtubeId: '',
               url: pageUrl,
+              pageUrl: pageUrl,
               mediaUrl: mediaUrl,
               title: document.title || 'Vídeo na página',
               width: width,
@@ -904,6 +999,7 @@ function isOwnAppPage(href) {
         }
       }
 
+      if (window.__papaleguasVideoSniffDisabled) return;
       const reportKey = detected ? (detected.youtubeId || detected.mediaUrl || detected.url) : '';
       if (detected && reportKey && reportKey !== lastReportedVideo) {
         lastReportedVideo = reportKey;
@@ -913,17 +1009,35 @@ function isOwnAppPage(href) {
       }
     } catch (e) {}
   }
+  window.sniffVideos = sniffVideos;
+
+  ipcRenderer.on('video-recognition-disabled-for-page', () => {
+    window.__papaleguasVideoSniffDisabled = true;
+    lastReportedVideo = '';
+  });
+  ipcRenderer.on('video-recognition-enabled-for-page', () => {
+    window.__papaleguasVideoSniffDisabled = false;
+    lastReportedVideo = '';
+  });
 
   window.addEventListener('message', (ev) => {
-    if (!ev.data || ev.data.type !== 'papaleguas-pause-media') return;
-    document.querySelectorAll('video,audio').forEach((media) => {
-      try { media.pause(); } catch (e) {}
-    });
+    if (!ev.data) return;
+    if (ev.data.type === 'video-recognition-disabled-for-page') {
+      window.__papaleguasVideoSniffDisabled = true;
+      lastReportedVideo = '';
+    } else if (ev.data.type === 'video-recognition-enabled-for-page') {
+      window.__papaleguasVideoSniffDisabled = false;
+      lastReportedVideo = '';
+    } else if (ev.data.type === 'papaleguas-pause-media') {
+      document.querySelectorAll('video,audio').forEach((media) => {
+        try { media.pause(); } catch (e) {}
+      });
+    }
   });
 
   // Página em segundo plano não precisa ser vasculhada atrás de vídeo.
-  setInterval(() => {
-    if (document.hidden) return;
+  window.__papaleguasSniffTimer = setInterval(() => {
+    if (document.hidden || window.__papaleguasVideoSniffDisabled) return;
     sniffVideos();
   }, 1800);
   if (document.readyState === 'loading') {

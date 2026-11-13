@@ -4,6 +4,8 @@
 // Responsável pelas rotas da Central de Música, DJ de IA, Playlists
 // e recomendações musicais personalizadas por cliente e país.
 
+const { swallowed } = require('../logger');
+
 /**
  * Manipulador principal do módulo de Música.
  * Retorna true se a requisição foi tratada, ou false caso pertença a outro módulo.
@@ -74,7 +76,7 @@ async function handle(req, res, ctx) {
   // 3. PRÉ-AQUECIMENTO DE PLAYLIST (/api/prewarm-playlist)
   // -----------------------------------------------------------------------
   if (pathname === '/api/prewarm-playlist' && req.method === 'POST') {
-    const list = Array.isArray(body.tracks) ? body.tracks.slice(0, 12) : [];
+    const list = Array.isArray(body.tracks) ? body.tracks.slice(0, 60) : [];
     let running = 0;
     const queue = list.filter((t) => t && t.title);
     const next = () => {
@@ -84,7 +86,7 @@ async function handle(req, res, ctx) {
         if (typeof ctx.getFullAudioStream === 'function') {
           ctx.getFullAudioStream({ title: String(t.title), artist: String(t.artist || '') })
             .catch(() => null)
-            .then(() => { running -= 1; next(); });
+            .then(() => { running -= 1; setTimeout(next, 300); });
         } else {
           running -= 1;
         }
@@ -97,12 +99,57 @@ async function handle(req, res, ctx) {
   }
 
   // -----------------------------------------------------------------------
-  // 4. PESQUISA DE PLAYLISTS E BUSCA GERAL DEEZER (/api/playlists, /api/all)
+  // 4. FAIXAS DE PLAYLIST, PESQUISA DE PLAYLISTS E BUSCA GERAL DEEZER
   // -----------------------------------------------------------------------
+  if (!global.__plDeezerFastCache) {
+    global.__plDeezerFastCache = new Map();
+  }
+  const deezerFastCache = global.__plDeezerFastCache;
+
+  if (pathname === '/api/playlist-tracks') {
+    const id = reqUrl.searchParams.get('id');
+    if (!id) {
+      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ success: false, error: 'id param required' }));
+      return true;
+    }
+    if (typeof ctx.getDeezerPlaylistTracks === 'function') {
+      try {
+        const cacheKey = `pltracks:${id}`;
+        const cached = deezerFastCache.get(cacheKey);
+        if (cached && Date.now() - cached.ts < 600000) {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify(cached.data));
+          return true;
+        }
+        const result = await ctx.getDeezerPlaylistTracks(id, 200);
+        if (result && result.success && Array.isArray(result.tracks) && result.tracks.length > 0) {
+          deezerFastCache.set(cacheKey, { ts: Date.now(), data: result });
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ success: false, error: e.message }));
+      }
+      return true;
+    }
+  }
+
   if (pathname === '/api/playlists') {
     const q = reqUrl.searchParams.get('q') || body.q || '';
     if (typeof ctx.searchDeezerPlaylists === 'function') {
+      const cacheKey = `pls:${String(q).trim().toLowerCase()}`;
+      const cached = deezerFastCache.get(cacheKey);
+      if (cached && Date.now() - cached.ts < 600000) {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify(cached.data));
+        return true;
+      }
       const result = await ctx.searchDeezerPlaylists(q);
+      if (result && result.success && Array.isArray(result.results) && result.results.length > 0) {
+        deezerFastCache.set(cacheKey, { ts: Date.now(), data: result });
+      }
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(result));
       return true;
@@ -112,7 +159,17 @@ async function handle(req, res, ctx) {
   if (pathname === '/api/all') {
     const q = reqUrl.searchParams.get('q') || body.q || '';
     if (typeof ctx.searchDeezerAll === 'function') {
+      const cacheKey = `all:${String(q).trim().toLowerCase()}`;
+      const cached = deezerFastCache.get(cacheKey);
+      if (cached && Date.now() - cached.ts < 600000) {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify(cached.data));
+        return true;
+      }
       const result = await ctx.searchDeezerAll(q);
+      if (result && result.success && Array.isArray(result.results) && result.results.length > 0) {
+        deezerFastCache.set(cacheKey, { ts: Date.now(), data: result });
+      }
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(result));
       return true;

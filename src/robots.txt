@@ -1,3 +1,57 @@
 User-agent: *
+Allow: /proxy
+Allow: /proxy-base/
+Disallow: /search
 Allow: /
-Sitemap: https://papaleguas.ngrok.app/sitemap.xml
+
+# Motores de IA e Busca Conversacional (Permissão explícita para indexação e navegação via proxy)
+User-agent: GPTBot
+Allow: /proxy
+Allow: /proxy-base/
+Disallow: /search
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /proxy
+Allow: /proxy-base/
+Disallow: /search
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /proxy
+Allow: /proxy-base/
+Disallow: /search
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /proxy
+Allow: /proxy-base/
+Disallow: /search
+Allow: /
+
+User-agent: Applebot
+Allow: /proxy
+Allow: /proxy-base/
+Disallow: /search
+Allow: /
+
+User-agent: Google-Extended
+Allow: /proxy
+Allow: /proxy-base/
+Disallow: /search
+Allow: /
+
+User-agent: Googlebot
+Allow: /proxy
+Allow: /proxy-base/
+Allow: /
+
+User-agent: Bingbot
+Allow: /proxy
+Allow: /proxy-base/
+Allow: /
+
+# Feeds de Sindicatura e Sitemaps
+Sitemap: https://papaleguas.app/sitemap.xml
+Sitemap: https://papaleguas.app/feed.xml
+Sitemap: https://papaleguas.app/llms.txt

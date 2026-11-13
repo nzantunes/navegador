@@ -37,6 +37,11 @@ start() {
     # Inicia o supervisor completamente desacoplado da sessão de terminal (setsid)
     setsid node bin/papaleguas-watchdog.js </dev/null >> "$LOG_FILE" 2>&1 &
 
+    # Garante que o Cloudflare Tunnel oficial para papaleguas.app esteja ativo
+    if ! pgrep -f "cloudflared.*tunnel" > /dev/null; then
+        echo "🌐 Conectando Cloudflare Tunnel para papaleguas.app..."
+        setsid bash ./start_tunnel.sh </dev/null >> "$PROJECT_DIR/papaleguas/data/cloudflared.log" 2>&1 &
+    fi
 
     sleep 1
     if [ -f "$PID_FILE" ]; then
@@ -47,8 +52,8 @@ start() {
 
     echo "✅ Papaléguas Supervisor ativo em segundo plano (PID: $SUPERVISOR_PID)."
     echo "📄 Logs em: $LOG_FILE"
-
-    echo "📱 Conexões externas mantidas via Cloudflare e ngrok."
+    echo "🌍 Domínio oficial ativo: https://papaleguas.app"
+    echo "📱 Conexões externas mantidas via Cloudflare (https://papaleguas.app)."
 }
 
 stop() {
@@ -59,7 +64,10 @@ stop() {
         rm -f "$PID_FILE"
         fuser -k 8080/tcp 2>/dev/null
         pkill -f "electron --no-sandbox" 2>/dev/null
-        echo "✅ Papaléguas e Supervisor finalizados."
+        rm -f /home/nain/.config/papaleguas-tor/Singleton* 2>/dev/null
+        pkill -f "cloudflared.*tunnel" 2>/dev/null
+        pkill -9 -f "ngrok.*http" 2>/dev/null
+        echo "✅ Papaléguas, Túnel e Supervisor finalizados."
     else
         echo "ℹ️ Nenhum supervisor em execução encontrado."
     fi

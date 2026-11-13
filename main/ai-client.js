@@ -151,6 +151,13 @@ async function callGrok(payload) {
 
 function callOpenAi(payload) {
   return new Promise((resolve, reject) => {
+    try {
+      loadDotEnv();
+      if (process.env.OPENAI_API_KEY) {
+        openaiFallbackKey = process.env.OPENAI_API_KEY;
+      }
+    } catch (e) {}
+
     if (!openaiFallbackKey) {
       reject(new Error('Nenhuma chave de IA configurada'));
       return;

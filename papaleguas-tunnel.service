@@ -1,0 +1,13 @@
+[Unit]
+Description=Cloudflare Tunnel for papaleguas.app
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/nain/ip/cloudflared tunnel run --token eyJhIjoiYjY3MGQyNjZiZTM5NzYzZWM1ZmViNDg2Njc0OGNkZGEiLCJ0IjoiZjRjYzY2MWMtMzgyMC00ODlkLWI5OWUtY2JhNjMzYzMwNDRkIiwicyI6Ik5tTTBPRGMzTWpjdE1URTJNaTAwWVRkakxUZzBOVEl0T1RJME9HUXlNbUpsTURSaSJ9
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

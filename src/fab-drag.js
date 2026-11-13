@@ -90,7 +90,6 @@
       startTop = r.top;
       dragging = true;
       moved = false;
-      try { el.setPointerCapture(pid); } catch (err) {}
     }
 
     function onMove(e) {
@@ -100,6 +99,7 @@
       if (!moved && Math.hypot(dx, dy) < 7) return;
       if (!moved) {
         moved = true;
+        try { el.setPointerCapture(pid); } catch (err) {}
         el.classList.add('is-dragging');
         if (typeof opts.onDragStart === 'function') opts.onDragStart();
       }
@@ -110,7 +110,9 @@
     function onEnd(e) {
       if (!dragging || (e && e.pointerId != null && e.pointerId !== pid)) return;
       dragging = false;
-      try { el.releasePointerCapture(pid); } catch (err) {}
+      if (moved) {
+        try { el.releasePointerCapture(pid); } catch (err) {}
+      }
       if (!moved) return;
       el.classList.remove('is-dragging');
       el.classList.add('is-moved');
@@ -122,9 +124,9 @@
     }
 
     el.addEventListener('pointerdown', onDown);
-    el.addEventListener('pointermove', onMove);
-    el.addEventListener('pointerup', onEnd);
-    el.addEventListener('pointercancel', onEnd);
+    root.addEventListener('pointermove', onMove, { passive: false });
+    root.addEventListener('pointerup', onEnd);
+    root.addEventListener('pointercancel', onEnd);
     el.addEventListener('click', function (e) {
       if (!suppressClick) return;
       e.preventDefault();
