@@ -7,6 +7,8 @@
 
 const https = require('https');
 const http = require('http');
+const path = require('path');
+const { execFile } = require('child_process');
 const urlModule = require('url');
 const nativeCore = require('./native-core');
 
@@ -491,7 +493,7 @@ function fetchAhmiaToken(useOnion = false, timeoutMs = 3000) {
     };
     const targetUrl = useOnion ? `${AHMIA_ONION_HOST}/` : 'https://ahmia.fi/';
     const client = useOnion ? http : https;
-    const agent = (useOnion && SocksProxyAgent) ? new SocksProxyAgent(TOR_SOCKS_PROXY) : false;
+    const agent = SocksProxyAgent ? new SocksProxyAgent(TOR_SOCKS_PROXY) : undefined;
     const req = client.get(targetUrl, {
       agent,
       family: useOnion ? undefined : 4,
@@ -540,7 +542,7 @@ function queryAhmiaEndpoint(q, token, useOnion = false, timeoutMs = 3500) {
       : '';
     const url = `${base}/search/?q=${encodeURIComponent(q)}${tokenParam}`;
     const client = useOnion ? http : https;
-    const agent = (useOnion && SocksProxyAgent) ? new SocksProxyAgent(TOR_SOCKS_PROXY) : false;
+    const agent = SocksProxyAgent ? new SocksProxyAgent(TOR_SOCKS_PROXY) : undefined;
 
     let resolved = false;
     const done = (val) => {
@@ -720,7 +722,9 @@ async function getTorTaxiHarvestedLinks(query, timeoutMs = 3500) {
   if (Date.now() - torTaxiCache.ts > 30 * 60 * 1000 || torTaxiCache.items.length === 0) {
     try {
       const fetchHtml = (targetUrl) => new Promise((resolve) => {
+        const agent = SocksProxyAgent ? new SocksProxyAgent(TOR_SOCKS_PROXY) : undefined;
         const req = https.get(targetUrl, {
+          agent,
           family: 4,
           headers: { 'User-Agent': TOR_BROWSER_UA },
           timeout: timeoutMs
@@ -847,7 +851,9 @@ async function crawlWebForOnionLinks(query, timeoutMs = 2800) {
       doneFlag = true;
       resolve(val);
     };
+    const agent = SocksProxyAgent ? new SocksProxyAgent(TOR_SOCKS_PROXY) : undefined;
     const req = https.get(targetSearchUrl, {
+      agent,
       family: 4,
       headers: {
         'User-Agent': TOR_BROWSER_UA,
@@ -1118,6 +1124,50 @@ const onionUptimeCache = new Map();
 /**
  * Testa em tempo real se um serviço .onion está online e respondendo HTTP 200
  */
+/**
+ * Sonda leve de disponibilidade .onion usando o módulo nativo PPL `tor_proxy` em subprocesso
+ * para não bloquear o event loop principal.
+ */
+function probeOnionViaPplTor(parsedUrl, timeoutMs = 3500) {
+  return new Promise((resolve) => {
+    if (!parsedUrl || !parsedUrl.hostname) return resolve(null);
+    const useTls = parsedUrl.protocol === 'https:';
+    const port = parsedUrl.port ? Number(parsedUrl.port) : (useTls ? 443 : 80);
+    const reqPath = (parsedUrl.pathname || '/') + (parsedUrl.search || '');
+    const runtimePath = path.join(__dirname, '..', 'papaleguas-lang', 'runtime');
+    const script = [
+      'const rt = require(process.argv[1]);',
+      'const mod = rt.loadNativeModule("tor_proxy");',
+      'if (!mod || typeof mod.tor_get !== "function") process.exit(2);',
+      'const out = mod.tor_get(process.argv[2], Number(process.argv[3]), process.argv[4], process.argv[5] === "1");',
+      'const first = String(out || "").split("\\r\\n")[0] || "";',
+      'process.stdout.write(first);'
+    ].join('');
+    const start = Date.now();
+    execFile(
+      process.execPath,
+      ['-e', script, runtimePath, parsedUrl.hostname, String(port), reqPath, useTls ? '1' : '0'],
+      { timeout: Math.max(1000, Math.min(timeoutMs, 3500)), windowsHide: true },
+      (err, stdout) => {
+        if (err || !stdout) return resolve(null);
+        const match = String(stdout).match(/^HTTP\/\d+(?:\.\d+)?\s+(\d{3})/i);
+        if (!match) return resolve(null);
+        const code = Number(match[1]) || 0;
+        const latencyMs = Date.now() - start;
+        const ok = code >= 200 && code < 400;
+        resolve({
+          online: ok,
+          statusCode: code,
+          latencyMs,
+          lastChecked: Date.now(),
+          viaPplTor: true,
+          badge: ok ? `HTTP ${code} Online (PPL ${latencyMs}ms)` : `HTTP ${code}`
+        });
+      }
+    );
+  });
+}
+
 async function checkOnionAlive(targetUrl, timeoutMs = 4000) {
   if (!targetUrl || !targetUrl.includes('.onion')) {
     return { online: false, statusCode: 0, latencyMs: 0, badge: 'Desconhecido' };
@@ -1128,6 +1178,16 @@ async function checkOnionAlive(targetUrl, timeoutMs = 4000) {
     const cached = onionUptimeCache.get(targetUrl);
     if (Date.now() - cached.ts < 10 * 60 * 1000) {
       return cached.status;
+    }
+  }
+
+  let parsedInit = null;
+  try { parsedInit = new URL(targetUrl); } catch (e) { parsedInit = null; }
+  if (parsedInit) {
+    const pplProbe = await probeOnionViaPplTor(parsedInit, Math.min(timeoutMs, 3000));
+    if (pplProbe && pplProbe.online) {
+      onionUptimeCache.set(targetUrl, { ts: Date.now(), status: pplProbe });
+      return pplProbe;
     }
   }
 

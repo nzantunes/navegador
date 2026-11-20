@@ -1,0 +1,54 @@
+@policy(max_loops=100, no_network=true, zero_traces=true)
+
+// Módulo nativo PPL: roteamento de paths, bloqueio de traversal/arquivos sensíveis e TTL de cache HTTP
+
+export fn is_forbidden_static_path(pathname: str) -> bool {
+  let p: str = str.trim(pathname);
+  if str.is_empty(p) {
+    return true;
+  }
+  if str.contains(p, "..") or str.contains(p, "\\") or str.contains(p, "\0") {
+    return true;
+  }
+  if str.contains_ci(p, "/.env") or str.ends_with_ci(p, ".env") or str.contains_ci(p, "/.git") {
+    return true;
+  }
+  if str.ends_with_ci(p, ".sqlite") or str.ends_with_ci(p, ".db") or str.ends_with_ci(p, ".key") or str.ends_with_ci(p, ".pem") {
+    return true;
+  }
+  return false;
+}
+
+// 1 = static immutable asset, 2 = portal HTML, 3 = API JSON, 4 = media stream, 5 = proxy/other
+export fn classify_route_kind(pathname: str) -> u64 {
+  let p: str = str.trim(pathname);
+  if str.starts_with_ci(p, "/api/stream-") or str.starts_with_ci(p, "/api/audio-") or str.starts_with_ci(p, "/api/preview-img") {
+    return 4;
+  }
+  if str.starts_with_ci(p, "/api/") {
+    return 3;
+  }
+  if str.starts_with_ci(p, "/proxy") {
+    return 5;
+  }
+  if str.ends_with_ci(p, ".js") or str.ends_with_ci(p, ".css") or str.ends_with_ci(p, ".webp") or str.ends_with_ci(p, ".png") or str.ends_with_ci(p, ".jpg") or str.ends_with_ci(p, ".svg") or str.ends_with_ci(p, ".woff2") or str.ends_with_ci(p, ".ico") or str.ends_with_ci(p, ".wasm") {
+    return 1;
+  }
+  if str.equals_ci(p, "/") or str.equals_ci(p, "/baixatube") or str.equals_ci(p, "/youtube") or str.equals_ci(p, "/musica") or str.equals_ci(p, "/filmes") or str.equals_ci(p, "/search") or str.ends_with_ci(p, ".html") {
+    return 2;
+  }
+  return 5;
+}
+
+export fn cache_ttl_seconds(route_kind: u64, has_version_query: bool) -> u64 {
+  if route_kind == 1 {
+    if has_version_query {
+      return 31536000;
+    }
+    return 3600;
+  }
+  if route_kind == 4 {
+    return 86400;
+  }
+  return 0;
+}

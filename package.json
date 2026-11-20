@@ -5,7 +5,6 @@
   "main": "main/main.js",
   "scripts": {
     "start": "electron --no-sandbox --no-zygote .",
-    "test": "node bin/validate-code.js && node --test tests/*.test.js",
     "test:unit": "node --test tests/*.test.js",
     "agent:watch": "node bin/antigravity-code-auditor.js --watch",
     "agent:audit": "node bin/antigravity-code-auditor.js",

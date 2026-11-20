@@ -1,0 +1,37 @@
+@policy(max_loops=100, no_network=true, zero_traces=true)
+
+// Motor nativo PPL de validação de token PPL, derivação determinística de nonce e mistura de entropia
+
+export fn is_valid_ppl_token(raw_token: str) -> bool {
+  let t: str = str.trim(raw_token);
+  let total_len: u64 = str.len(t);
+  if total_len < 4 or total_len > 90000 {
+    return false;
+  }
+  let dot: i64 = str.index_of(t, ".");
+  if dot < 1 or dot > 8 {
+    return false;
+  }
+  let dot_u: u64 = dot;
+  let prefix: str = str.slice(t, 0, dot_u);
+  if not str.is_ascii_alnum(prefix) {
+    return false;
+  }
+  return total_len > (dot_u + 1);
+}
+
+export fn derive_deterministic_nonce(payload: str) -> u64 {
+  let h: u64 = hw.hash_fnv1a(payload);
+  let folded: u64 = (h ^ (h >> 32)) & 0xFFFFFFFF;
+  if folded == 0 {
+    return 1;
+  }
+  return folded;
+}
+
+export fn mix_entropy_u64(a: u64, b: u64) -> u64 {
+  let z: u64 = (a ^ 0x50504C5F32303236) + (b * 0x9E3779B97F4A7C15);
+  z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9;
+  z = (z ^ (z >> 27)) * 0x94D049BB133111EB;
+  return z ^ (z >> 31);
+}

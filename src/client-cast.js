@@ -19,7 +19,8 @@
   const lastScanInfo = {
     subnets: [],
     localIps: [],
-    remote: false
+    remote: false,
+    serverSameNetwork: false
   };
 
   function isPrivateIpv4(ip) {
@@ -161,8 +162,15 @@
 
   async function apiDiscover(onFound) {
     try {
-      const res = await fetch(apiOrigin() + '/api/cast-devices', { cache: 'no-store' });
+      const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const tm = ctrl ? setTimeout(() => { try { ctrl.abort(); } catch (e) {} }, 9000) : null;
+      const res = await fetch(apiOrigin() + '/api/cast-devices', {
+        cache: 'no-store',
+        signal: ctrl ? ctrl.signal : undefined
+      });
+      if (tm) clearTimeout(tm);
       const data = await res.json();
+      if (data && data.sameNetwork) lastScanInfo.serverSameNetwork = true;
       const list = (data && Array.isArray(data.devices)) ? data.devices : [];
       const out = [];
       list.forEach((dev) => {
@@ -420,16 +428,18 @@
     };
 
     lastScanInfo.remote = isRemotePublicOrigin();
+    lastScanInfo.serverSameNetwork = !lastScanInfo.remote;
     lastScanInfo.localIps = [];
     lastScanInfo.subnets = [];
 
-    // Em modo local (Electron ou navegador na mesma LAN do servidor), usa a descoberta nativa/API do host
+    // Sempre consulta descoberta nativa / API do servidor primeiro:
+    // - Em modo local (Electron / localhost / LAN), retorna todas as TVs da rede.
+    // - Via domínio público (https://papaleguas.app), se o aparelho estiver no mesmo Wi-Fi
+    //   do servidor (mesmo IP WAN), o servidor reconhece e retorna as TVs sem bloqueio Mixed Content!
     try {
-      if (!lastScanInfo.remote) {
-        if (nativeScanApi()) await nativeDiscover(report);
-        await apiDiscover(report);
-        if (found.size > 0) return Array.from(found.values());
-      }
+      if (nativeScanApi()) await nativeDiscover(report);
+      await apiDiscover(report);
+      if (found.size > 0) return Array.from(found.values());
     } catch (e) {}
 
     const localIps = await gatherLocalIps(3200);
@@ -548,8 +558,8 @@
     const videoId = extractedId || rawTarget;
     const cleanTitle = String(title || '').replace('▶', '').trim() || 'Vídeo';
 
-    // Se estiver em modo Electron local (mesma máquina):
-    if (!isRemotePublicOrigin()) {
+    // Se estiver na mesma rede do servidor (local ou mesmo Wi-Fi via domínio público):
+    if (!isRemotePublicOrigin() || lastScanInfo.serverSameNetwork) {
       try {
         const res = await fetch(apiOrigin() + '/api/cast-to-device', {
           method: 'POST',

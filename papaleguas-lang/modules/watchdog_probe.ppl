@@ -1,0 +1,35 @@
+@policy(allow_network=true, max_loops=50, zero_traces=true)
+
+// Sonda de saúde nativa do Supervisor Papaléguas (.ppl)
+
+const WATCHDOG_PROBE_V: u64 = 1;
+
+export fn probe_main_server(port: u64) -> bool {
+  let body: str = net.http_get("127.0.0.1", port, "/api/session-info");
+  if str.contains(body, "\"success\":true") or str.contains(body, "\"ok\":true") {
+    return true;
+  }
+  return false;
+}
+
+export fn probe_native_httpd(port: u64) -> bool {
+  let body: str = net.http_get("127.0.0.1", port, "/health");
+  if str.contains(body, "\"ok\":true") {
+    return true;
+  }
+  return false;
+}
+
+export fn probe_tor_and_all(main_port: u64, native_port: u64) -> u64 {
+  let mask: u64 = 0;
+  if probe_main_server(main_port) {
+    mask = mask + 1;
+  }
+  if probe_native_httpd(native_port) {
+    mask = mask + 2;
+  }
+  if net.tor_alive("127.0.0.1", 9050) {
+    mask = mask + 4;
+  }
+  return mask;
+}

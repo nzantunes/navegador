@@ -32,6 +32,12 @@ contextBridge.exposeInMainWorld('torBrowserAPI', {
       if (typeof cb === 'function') cb(url);
     });
   },
+  onTorRequiredForTab: (cb) => {
+    ipcRenderer.removeAllListeners('tor-required-for-tab');
+    ipcRenderer.on('tor-required-for-tab', (_event, url) => {
+      if (typeof cb === 'function') cb(url);
+    });
+  },
   searchMusic: (query, limit = 30, index = 0) => ipcRenderer.invoke('search-music', query, limit, index),
   searchPlaylists: (query) => ipcRenderer.invoke('search-playlists', query),
   searchAll: (query) => ipcRenderer.invoke('search-all', query),

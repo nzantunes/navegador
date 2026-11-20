@@ -1,5 +1,8 @@
-// Service Worker para Papaléguas PWA com tela de reconexão inteligente e auto-update
-const CACHE_NAME = 'papaleguas-pwa-2026.11.12-v139';
+// Service Worker para Papaléguas PWA + PPL Client Offload (cache em disco de .ppl.wasm, assets e thumbs)
+const CACHE_NAME = 'papaleguas-pwa-2026.11.19-v156';
+const WASM_CACHE_NAME = 'papaleguas-ppl-wasm-v1';
+const THUMB_CACHE_NAME = 'papaleguas-media-thumbs-v1';
+const MAX_THUMB_ENTRIES = 180;
 const OFFLINE_URL = '/offline.html';
 
 const OFFLINE_HTML = `<!DOCTYPE html>
@@ -124,9 +127,12 @@ const SHELL_ASSETS = [
   '/styles.css',
   '/renderer.js',
   '/hybrid-bridge.js',
-  '/fab-drag.js?v=1',
-  '/client-cast.js?v=9',
-  '/cast-hub.js?v=8',
+  '/ppl-net-crypto.js?v=2',
+  '/ppl-worker.js?v=1',
+  '/ppl-client-offload.js?v=1',
+  '/fab-drag.js?v=109',
+  '/client-cast.js?v=14',
+  '/cast-hub.js?v=10',
   '/auto-update.js',
   '/i18n-ip.js',
   '/manifest.json',
@@ -153,11 +159,12 @@ self.addEventListener('install', (event) => {
 });
 
 self.addEventListener('activate', (event) => {
+  const keepCaches = new Set([CACHE_NAME, WASM_CACHE_NAME, THUMB_CACHE_NAME]);
   event.waitUntil(
     caches.keys().then((keys) => {
       return Promise.all(
         keys.map((key) => {
-          if (key !== CACHE_NAME) {
+          if (!keepCaches.has(key)) {
             return caches.delete(key);
           }
         })
@@ -165,6 +172,19 @@ self.addEventListener('activate', (event) => {
     }).then(() => self.clients.claim())
   );
 });
+
+async function trimCacheEntries(cacheName, maxEntries) {
+  try {
+    const cache = await caches.open(cacheName);
+    const keys = await cache.keys();
+    if (keys.length > maxEntries) {
+      const excess = keys.length - maxEntries;
+      for (let i = 0; i < excess; i++) {
+        await cache.delete(keys[i]);
+      }
+    }
+  } catch (e) {}
+}
 
 self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'SKIP_WAITING') {
@@ -197,6 +217,37 @@ self.addEventListener('fetch', (event) => {
       url.includes('/api/stream-') ||
       url.includes('/api/audio-') ||
       url.includes('/api/downloaded-track-file')) {
+    return;
+  }
+
+  // Módulos PPL WebAssembly (.ppl.wasm): Cache-First + atualização em segundo plano (0 ms no disco do cliente)
+  if (url.includes('/api/ppl-wasm')) {
+    event.respondWith(
+      caches.open(WASM_CACHE_NAME).then(async (cache) => {
+        const cached = await cache.match(event.request);
+        const netPromise = fetch(withAntiWarningHeaders(event.request)).then((resp) => {
+          if (resp && resp.status === 200) cache.put(event.request, resp.clone()).catch(() => {});
+          return resp;
+        }).catch(() => cached);
+        return cached || netPromise;
+      })
+    );
+    return;
+  }
+
+  // Miniaturas e capas (/api/preview-img, /api/cover): Cache-First no disco do cliente (alivia banda do servidor)
+  if (event.request.method === 'GET' && (url.includes('/api/preview-img') || url.includes('/api/cover'))) {
+    event.respondWith(
+      caches.open(THUMB_CACHE_NAME).then(async (cache) => {
+        const cached = await cache.match(event.request);
+        if (cached) return cached;
+        const resp = await fetch(withAntiWarningHeaders(event.request));
+        if (resp && resp.status === 200) {
+          cache.put(event.request, resp.clone()).then(() => trimCacheEntries(THUMB_CACHE_NAME, MAX_THUMB_ENTRIES)).catch(() => {});
+        }
+        return resp;
+      })
+    );
     return;
   }
 

@@ -1,0 +1,111 @@
+@policy(max_loops=10000, no_network=true, zero_traces=true)
+
+// Módulo nativo de proteção de requisições e fingerprinting rápido em Papaléguas (.ppl)
+
+const RISK_BLOCK_THRESHOLD: u64 = 80;
+
+export fn fingerprint_fnv1a(payload: str) -> u64 {
+  return hw.hash_fnv1a(payload);
+}
+
+export fn score_request(req_per_min: u64, active_conns: u64, is_local: bool, has_session: bool) -> u64 {
+  if is_local {
+    return 0;
+  }
+  let score: u64 = 0;
+  if req_per_min > 120 {
+    score = score + 50;
+  } else if req_per_min > 60 {
+    score = score + 25;
+  }
+  if active_conns > 20 {
+    score = score + 35;
+  } else if active_conns > 10 {
+    score = score + 15;
+  }
+  if not has_session {
+    score = score + 20;
+  }
+  return clamp_u64(score, 0, 100);
+}
+
+export fn should_block(req_per_min: u64, active_conns: u64, is_local: bool, has_session: bool) -> bool {
+  let s: u64 = score_request(req_per_min, active_conns, is_local, has_session);
+  return s >= RISK_BLOCK_THRESHOLD;
+}
+
+export fn is_private_ip(ip: str) -> bool {
+  if str.len(ip) == 0 or str.eq(ip, "::1") or str.eq(ip, "localhost") {
+    return true;
+  }
+  if str.starts_with(ip, "127.") or str.starts_with(ip, "10.") or str.starts_with(ip, "192.168.") or str.starts_with(ip, "169.254.") {
+    return true;
+  }
+  if str.starts_with(ip, "172.16.") or str.starts_with(ip, "172.17.") or str.starts_with(ip, "172.18.") or str.starts_with(ip, "172.19.") or str.starts_with(ip, "172.30.") or str.starts_with(ip, "172.31.") {
+    return true;
+  }
+  if str.starts_with(ip, "172.20.") or str.starts_with(ip, "172.21.") or str.starts_with(ip, "172.22.") or str.starts_with(ip, "172.23.") or str.starts_with(ip, "172.24.") or str.starts_with(ip, "172.25.") or str.starts_with(ip, "172.26.") or str.starts_with(ip, "172.27.") or str.starts_with(ip, "172.28.") or str.starts_with(ip, "172.29.") {
+    return true;
+  }
+  if str.starts_with(ip, "100.64.") or str.starts_with(ip, "100.65.") or str.starts_with(ip, "100.66.") or str.starts_with(ip, "100.67.") or str.starts_with(ip, "100.68.") or str.starts_with(ip, "100.69.") {
+    return true;
+  }
+  if (str.starts_with(ip, "100.7") and not str.starts_with(ip, "100.7.")) or (str.starts_with(ip, "100.8") and not str.starts_with(ip, "100.8.")) or (str.starts_with(ip, "100.9") and not str.starts_with(ip, "100.9.")) {
+    return true;
+  }
+  if (str.starts_with(ip, "100.10") and not str.starts_with(ip, "100.10.")) or (str.starts_with(ip, "100.11") and not str.starts_with(ip, "100.11.")) {
+    return true;
+  }
+  if str.starts_with(ip, "100.120.") or str.starts_with(ip, "100.121.") or str.starts_with(ip, "100.122.") or str.starts_with(ip, "100.123.") or str.starts_with(ip, "100.124.") or str.starts_with(ip, "100.125.") or str.starts_with(ip, "100.126.") or str.starts_with(ip, "100.127.") {
+    return true;
+  }
+  if str.starts_with(ip, "fc") or str.starts_with(ip, "fd") or str.starts_with(ip, "fe80:") {
+    return true;
+  }
+  return false;
+}
+
+export fn rate_allow(prev_count: u64, cur_count: u64, elapsed_ms: u64, window_ms: u64, max_req: u64) -> bool {
+  if window_ms == 0 or max_req == 0 {
+    return false;
+  }
+  if elapsed_ms >= window_ms {
+    return cur_count < max_req;
+  }
+  let rem_ms: u64 = window_ms - elapsed_ms;
+  let weighted_prev: u64 = (prev_count * rem_ms) / window_ms;
+  return (weighted_prev + cur_count) < max_req;
+}
+
+export fn is_scanner_path(path: str) -> bool {
+  let p: str = str.to_lower(str.trim(path));
+  if str.len(p) == 0 {
+    return false;
+  }
+  if str.starts_with(p, "/.env") or str.starts_with(p, "/.git") or str.starts_with(p, "/wp-admin") or str.starts_with(p, "/wp-login") {
+    return true;
+  }
+  if str.starts_with(p, "/phpmyadmin") or str.starts_with(p, "/actuator") or str.starts_with(p, "/vendor/phpunit") or str.starts_with(p, "/boaform") {
+    return true;
+  }
+  if str.eq(p, "/xmlrpc.php") or str.contains(p, "../") or str.contains(p, "..\\") {
+    return true;
+  }
+  return false;
+}
+
+export fn classify_threat_level(req_per_min: u64, error_4xx_count: u64, path_scan_hits: u64, is_local: bool) -> u64 {
+  if is_local {
+    return 0;
+  }
+  if path_scan_hits >= 2 or req_per_min >= 240 or error_4xx_count >= 30 {
+    return 3;
+  }
+  if path_scan_hits >= 1 or req_per_min >= 140 or error_4xx_count >= 15 {
+    return 2;
+  }
+  if req_per_min >= 80 or error_4xx_count >= 8 {
+    return 1;
+  }
+  return 0;
+}

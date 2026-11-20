@@ -1,0 +1,53 @@
+@policy(max_loops=1000, tor_only=true, hardware_direct=true)
+
+// Módulo nativo de telemetria direta de hardware em Linguagem Papaléguas (.ppl)
+
+export fn cpu_cores() -> u64 {
+  return hw.cpu_cores();
+}
+
+export fn ram_total_mb() -> u64 {
+  return hw.ram_total_mb();
+}
+
+export fn ram_free_mb() -> u64 {
+  return hw.ram_free_mb();
+}
+
+export fn uptime_sec() -> u64 {
+  return hw.uptime_sec();
+}
+
+export fn memory_pressure_pct() -> u64 {
+  let total: u64 = hw.ram_total_mb();
+  let free_mb: u64 = hw.ram_free_mb();
+  if total == 0 {
+    return 0;
+  }
+  let used: u64 = total - free_mb;
+  return clamp_u64((used * 100) / total, 0, 100);
+}
+
+export fn optimal_worker_threads() -> u64 {
+  let cores: u64 = hw.cpu_cores();
+  let press: u64 = memory_pressure_pct();
+  if press >= 90 {
+    return 2;
+  }
+  if press >= 75 {
+    return clamp_u64(cores, 2, 6);
+  }
+  return clamp_u64(cores * 2, 4, 16);
+}
+
+export fn health_score() -> u64 {
+  let press: u64 = memory_pressure_pct();
+  if press >= 98 {
+    return 10;
+  }
+  let base: u64 = 100 - (press / 2);
+  if hw.cpu_cores() >= 4 {
+    base = base + 5;
+  }
+  return clamp_u64(base, 10, 100);
+}

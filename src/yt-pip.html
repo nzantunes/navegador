@@ -98,6 +98,7 @@
       <video id="pip-native-video" controls playsinline webkit-playsinline style="display:none;position:absolute;inset:0;width:100%;height:100%;z-index:2;background:#000;object-fit:contain;"></video>
     </div>
   </div>
+  <script src="ppl-net-crypto.js?v=1"></script>
   <script>
     const params = new URLSearchParams(location.search);
     const videoId = params.get('v') || '';
@@ -117,7 +118,8 @@
       iframe.style.display = 'none';
       iframe.src = 'about:blank';
       nativeVideo.style.display = 'block';
-      nativeVideo.src = origin + '/api/stream-video?v=' + encodeURIComponent(videoId) + '&lang=' + encodeURIComponent(pipLang);
+      const rawPipSrc = origin + '/api/stream-video?v=' + encodeURIComponent(videoId) + '&lang=' + encodeURIComponent(pipLang);
+      nativeVideo.src = (typeof window.__pplEncryptUrl === 'function') ? window.__pplEncryptUrl(rawPipSrc) : rawPipSrc;
       if (start > 1) {
         nativeVideo.addEventListener('loadedmetadata', function seekOnce() {
           nativeVideo.removeEventListener('loadedmetadata', seekOnce);
@@ -181,8 +183,8 @@
       }
     };
     document.getElementById('btn-close').onclick = () => {
-      if (window.torBrowserAPI && window.torBrowserAPI.closePipAndQuit) {
-        window.torBrowserAPI.closePipAndQuit();
+      if (window.torBrowserAPI && window.torBrowserAPI.restoreMainFromPip) {
+        window.torBrowserAPI.restoreMainFromPip();
       } else {
         window.close();
       }

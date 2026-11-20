@@ -1,0 +1,102 @@
+@policy(max_loops=200, no_network=true, zero_traces=true)
+
+// Módulo WebAssembly (.ppl.wasm) executado diretamente no navegador do cliente
+
+export fn sanitize_zoom_pct(zoom: u64) -> u64 {
+  if zoom < 50 {
+    return 50;
+  }
+  if zoom > 250 {
+    return 250;
+  }
+  return zoom;
+}
+
+export fn score_client_nav(is_https: bool, is_onion: bool, redirect_hops: u64) -> u64 {
+  let score: u64 = 100;
+  if not is_https and not is_onion {
+    if score >= 25 {
+      score = score - 25;
+    }
+  }
+  let hop_penalty: u64 = redirect_hops * 10;
+  if score > hop_penalty {
+    score = score - hop_penalty;
+  } else {
+    score = 0;
+  }
+  return score;
+}
+
+export fn score_home_feed_item(is_live: bool, is_trend: bool, is_liked_rel: bool, age_hours: u64, has_thumb: bool) -> u64 {
+  let score: u64 = 50;
+  if is_live {
+    score += 45;
+  }
+  if is_trend {
+    score += 30;
+  }
+  if is_liked_rel {
+    score += 35;
+  }
+  if has_thumb {
+    score += 10;
+  }
+  if age_hours <= 6 {
+    score += 25;
+  } else if age_hours <= 24 {
+    score += 15;
+  } else if age_hours >= 720 {
+    if score > 30 {
+      score -= 30;
+    } else {
+      score = 0;
+    }
+  }
+  return score;
+}
+
+export fn ppl_keystream_byte(nonce: u64, idx: u64) -> u64 {
+  let seed: u64 = nonce ^ 0x50504C5F32303236;
+  let z: u64 = seed + ((idx + 1) * 0x9E3779B97F4A7C15);
+  z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9;
+  z = (z ^ (z >> 27)) * 0x94D049BB133111EB;
+  z = z ^ (z >> 31);
+  return z & 0xFF;
+}
+
+export fn select_best_endpoint(lan_rtt_ms: u64, tunnel_rtt_ms: u64, consecutive_errors: u64) -> u64 {
+  if consecutive_errors >= 2 {
+    return 2;
+  }
+  if lan_rtt_ms > 0 and (tunnel_rtt_ms == 0 or (lan_rtt_ms + 15) < tunnel_rtt_ms) {
+    return 1;
+  }
+  return 2;
+}
+
+export fn compute_adaptive_backoff_ms(attempt: u64, rtt_ms: u64, is_mobile_net: bool) -> u64 {
+  let step: u64 = attempt;
+  if step < 1 {
+    step = 1;
+  }
+  if step > 6 {
+    step = 6;
+  }
+  let base: u64 = step * 350;
+  if is_mobile_net {
+    base = base + 250;
+  }
+  let rtt_bonus: u64 = rtt_ms;
+  if rtt_bonus > 2000 {
+    rtt_bonus = 2000;
+  }
+  let total: u64 = base + (rtt_bonus / 2);
+  if total < 250 {
+    return 250;
+  }
+  if total > 8000 {
+    return 8000;
+  }
+  return total;
+}

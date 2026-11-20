@@ -1,0 +1,125 @@
+@policy(max_loops=1000, no_network=true, zero_traces=true)
+
+// Filtro nativo de URLs, rastreadores e esquemas inseguros em Papaléguas (.ppl)
+
+export fn is_blocked_tracker(url: str) -> bool {
+  if str.len(url) == 0 {
+    return false;
+  }
+  if str.contains(url, "doubleclick.net") or str.contains(url, "googlesyndication.com") {
+    return true;
+  }
+  if str.contains(url, "google-analytics.com") or str.contains(url, "googletagmanager.com") {
+    return true;
+  }
+  if str.contains(url, "facebook.net/tr") or str.contains(url, "connect.facebook.net") {
+    return true;
+  }
+  if str.contains(url, "adsrvr.org") or str.contains(url, "adnxs.com") or str.contains(url, "taboola.com") or str.contains(url, "outbrain.com") {
+    return true;
+  }
+  return false;
+}
+
+export fn is_unsafe_scheme(url: str) -> bool {
+  if str.starts_with(url, "javascript:") or str.starts_with(url, "vbscript:") {
+    return true;
+  }
+  if str.starts_with(url, "data:text/html") {
+    return true;
+  }
+  return false;
+}
+
+export fn is_spotify_restricted_url(url: str) -> bool {
+  if not (str.contains(url, "spotify.com") or str.contains(url, "scdn.co") or str.contains(url, "spoti.fi")) {
+    return false;
+  }
+  if str.contains(url, "/account") or str.contains(url, "/preferences") or str.contains(url, "/settings") {
+    return true;
+  }
+  if str.contains(url, "accounts.spotify.com/status") or str.contains(url, "accounts.spotify.com/change-password") {
+    return true;
+  }
+  if str.contains(url, "/ad-logic/") or str.contains(url, "/ads/") or str.contains(url, "/ad/") {
+    return true;
+  }
+  if str.contains(url, "heads-fa.spotify.com") or str.contains(url, "spclient.wg.spotify.com/commercial-video/") {
+    return true;
+  }
+  return false;
+}
+
+export fn is_ad_domain_or_keyword(url: str) -> bool {
+  if str.len(url) == 0 {
+    return false;
+  }
+  if is_blocked_tracker(url) {
+    return true;
+  }
+  if str.contains(url, "googleadservices.com") or str.contains(url, "adservice.google.com") or str.contains(url, "admob.com") or str.contains(url, "adsafeprotected.com") {
+    return true;
+  }
+  if str.contains(url, "criteo.com") or str.contains(url, "criteo.net") or str.contains(url, "rubiconproject.com") or str.contains(url, "pubmatic.com") {
+    return true;
+  }
+  if str.contains(url, "popads.net") or str.contains(url, "propellerads.com") or str.contains(url, "clickadu.com") or str.contains(url, "exoclick.com") or str.contains(url, "trafficjunky.net") {
+    return true;
+  }
+  if str.contains(url, "scorecardresearch.com") or str.contains(url, "hotjar.com") or str.contains(url, "quantserve.com") or str.contains(url, "moatads.com") {
+    return true;
+  }
+  if str.contains(url, "mgid.com") or str.contains(url, "adsterra.com") or str.contains(url, "monetag.com") or str.contains(url, "hilltopads.com") or str.contains(url, "adcash.com") or str.contains(url, "coinhive.com") {
+    return true;
+  }
+  if str.contains(url, "/ads.js") or str.contains(url, "/ad.js") or str.contains(url, "/advert.js") or str.contains(url, "/ads_min.js") or str.contains(url, "/adserver") {
+    return true;
+  }
+  if str.contains(url, "/pagead/") or str.contains(url, "/gpt.js") or str.contains(url, "/prebid.js") or str.contains(url, "/analytics.js") or str.contains(url, "banner-ad") or str.contains(url, "popup-ad") {
+    return true;
+  }
+  return false;
+}
+
+export fn should_allow_popup_url(url: str) -> bool {
+  if str.len(url) == 0 or url == "about:blank" {
+    return false;
+  }
+  if is_unsafe_scheme(url) or is_ad_domain_or_keyword(url) {
+    return false;
+  }
+  if str.starts_with(url, "http://") or str.starts_with(url, "https://") or str.starts_with(url, "/") or str.starts_with(url, "file:") {
+    return true;
+  }
+  return false;
+}
+
+export fn detect_os(ua: str, sec_ch: str) -> str {
+  if str.contains(ua, "iphone") or str.contains(ua, "ipad") or str.contains(ua, "ipod") {
+    return "ios";
+  }
+  if str.contains(ua, "android") or str.contains(sec_ch, "android") {
+    return "android";
+  }
+  if str.contains(ua, "linux") or str.contains(ua, "x11") or str.contains(ua, "ubuntu") or str.contains(sec_ch, "linux") {
+    return "linux";
+  }
+  if str.contains(ua, "macintosh") or str.contains(ua, "mac os") or str.contains(sec_ch, "macos") {
+    return "macos";
+  }
+  return "windows";
+}
+
+export fn is_ip_leak_or_stun_url(url: str) -> bool {
+  let u: str = str.to_lower(str.trim(url));
+  if str.len(u) == 0 {
+    return false;
+  }
+  if str.starts_with(u, "stun:") or str.starts_with(u, "turn:") or str.starts_with(u, "turns:") {
+    return true;
+  }
+  if str.contains(u, "/cdn-cgi/trace") or str.contains(u, "webrtc-leak") or str.contains(u, "stun.l.google.com") {
+    return true;
+  }
+  return false;
+}

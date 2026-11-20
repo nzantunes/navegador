@@ -1,0 +1,71 @@
+@policy(max_loops=100, no_network=true, zero_traces=true)
+
+// Módulo auto-otimizado pelo Agente Papaléguas (perfil: high_pressure)
+const PROFILE_CODE: u64 = 3;
+const BLOCK_THRESHOLD: u64 = 70;
+const CACHE_LIMIT: u64 = 2000;
+
+struct TunerState {
+  profile: u64,
+  threshold: u64,
+  cache_limit: u64
+}
+
+export fn active_profile_code() -> u64 {
+  let st: TunerState = TunerState { profile: PROFILE_CODE, threshold: BLOCK_THRESHOLD, cache_limit: CACHE_LIMIT };
+  return st.profile;
+}
+
+export fn adaptive_block_threshold() -> u64 {
+  return BLOCK_THRESHOLD;
+}
+
+export fn recommended_cache_limit() -> u64 {
+  return CACHE_LIMIT;
+}
+
+export fn should_shed_load(pressure_pct: u64) -> bool {
+  if pressure_pct >= 85 {
+    return true;
+  }
+  return false;
+}
+
+export fn choose_compression_level(payload_bytes: u64, is_local_lan: bool, cpu_pressure_pct: u64) -> u64 {
+  if payload_bytes < 1024 or cpu_pressure_pct >= 90 {
+    return 0;
+  }
+  if is_local_lan {
+    if payload_bytes < 4096 {
+      return 0;
+    }
+    return 1;
+  }
+  if cpu_pressure_pct >= 75 {
+    return 2;
+  }
+  if payload_bytes >= 32768 {
+    return 5;
+  }
+  return 4;
+}
+
+export fn should_serve_compressed_ram(is_compressible: bool, accept_compressed: bool, size_bytes: u64) -> bool {
+  if not is_compressible or not accept_compressed {
+    return false;
+  }
+  if size_bytes < 128 {
+    return false;
+  }
+  return true;
+}
+
+export fn optimal_static_brotli_quality(size_bytes: u64, cpu_pressure_pct: u64) -> u64 {
+  if cpu_pressure_pct >= 85 {
+    return 4;
+  }
+  if size_bytes >= 65536 {
+    return 6;
+  }
+  return 5;
+}

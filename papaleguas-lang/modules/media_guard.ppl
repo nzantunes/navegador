@@ -1,0 +1,45 @@
+@policy(max_loops=100, no_network=true, zero_traces=true)
+
+// Módulo nativo PPL: validação de mídia, normalização de MIME de áudio/vídeo e rotação de feed BaixaTube
+
+export fn is_valid_youtube_id(vid: str) -> bool {
+  let s: str = str.trim(vid);
+  if str.len(s) != 11 {
+    return false;
+  }
+  return str.is_ascii_alnum(s);
+}
+
+export fn normalize_stream_mime(raw_ct: str, prefer_video: bool) -> str {
+  let ct: str = str.to_lower(str.trim(raw_ct));
+  if prefer_video {
+    if str.len(ct) == 0 {
+      return "video/mp4";
+    }
+    return ct;
+  }
+  if str.len(ct) == 0 or str.contains(ct, "video/mp4") {
+    return "audio/mp4";
+  }
+  if str.contains(ct, "video/webm") {
+    return "audio/webm";
+  }
+  return ct;
+}
+
+export fn compute_feed_rotation_page(page_param: u64, is_refresh: bool, rseq: u64) -> u64 {
+  if page_param > 1 {
+    return page_param;
+  }
+  if is_refresh {
+    return (rseq % 6) + 2;
+  }
+  return 1;
+}
+
+export fn should_use_preview_fallback(ready_state: u64, is_paused: bool, elapsed_ms: u64) -> bool {
+  if is_paused and ready_state < 2 and elapsed_ms >= 14000 {
+    return true;
+  }
+  return false;
+}

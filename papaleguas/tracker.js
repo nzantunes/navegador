@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const dns = require('dns');
 const http = require('http');
 const https = require('https');
 
@@ -362,18 +363,57 @@ function isExcludedFromTracking(pathname, fullUrl) {
   return false;
 }
 
+function stripQueryTraces(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+  const qIdx = raw.indexOf('?');
+  const hIdx = raw.indexOf('#');
+  let cut = raw.length;
+  if (qIdx !== -1 && qIdx < cut) cut = qIdx;
+  if (hIdx !== -1 && hIdx < cut) cut = hIdx;
+  return raw.slice(0, cut);
+}
+
+function isSearchTracePath(lowerPath) {
+  return (
+    lowerPath.startsWith('/search') ||
+    lowerPath.startsWith('/proxy') ||
+    lowerPath.startsWith('/api/youtube-search') ||
+    lowerPath.startsWith('/api/url-suggest') ||
+    lowerPath.startsWith('/api/suggest') ||
+    lowerPath.startsWith('/api/music-search') ||
+    lowerPath.startsWith('/api/dj-chat') ||
+    lowerPath.startsWith('/api/query-ai') ||
+    lowerPath.startsWith('/api/extract') ||
+    lowerPath.startsWith('/api/stream-video') ||
+    lowerPath.startsWith('/api/stream-audio')
+  );
+}
+
 function sanitizeAnalyticsData() {
   if (!analyticsData) return;
-  // Mantém os dados estruturados e limpos sem apagar o histórico de requisições por IP
+  // Remove quaisquer parâmetros de pesquisa/vídeo (?q=, ?v=, ?title=, ?ppl=) gravados em analytics
   if (analyticsData.ipStats) {
     for (const ip of Object.keys(analyticsData.ipStats)) {
       const stat = analyticsData.ipStats[ip];
       if (stat) {
         if (!stat.pages) stat.pages = {};
-        if (!Array.isArray(stat.recentRequests)) stat.recentRequests = [];
-        if (stat.recentRequests.length > 25) {
-          stat.recentRequests = stat.recentRequests.slice(0, 25);
+        const cleanPages = {};
+        for (const [k, v] of Object.entries(stat.pages)) {
+          const ck = stripQueryTraces(k);
+          if (ck && !isSearchTracePath(ck.toLowerCase())) {
+            cleanPages[ck] = (cleanPages[ck] || 0) + (Number(v) || 0);
+          }
         }
+        stat.pages = cleanPages;
+        if (!Array.isArray(stat.recentRequests)) stat.recentRequests = [];
+        stat.recentRequests = stat.recentRequests
+          .filter((r) => r && !isSearchTracePath(String(r.pathname || r.path || '').toLowerCase()))
+          .map((r) => Object.assign({}, r, {
+            path: stripQueryTraces(r.pathname || r.path || '/'),
+            pathname: stripQueryTraces(r.pathname || r.path || '/'),
+            referer: r.referer ? stripQueryTraces(r.referer).slice(0, 100) : null
+          }))
+          .slice(0, 25);
       }
     }
   }
@@ -669,6 +709,38 @@ function getIpVersion(ip) {
   return 'IPv4';
 }
 
+const reverseDnsPending = new Set();
+
+async function resolveClientHostname(ip) {
+  if (!ip || isPrivateIp(ip)) return '';
+  if (reverseDnsPending.has(ip)) return '';
+  reverseDnsPending.add(ip);
+  try {
+    const cleanIp = String(ip).trim().replace(/^::ffff:/, '');
+    const hosts = await Promise.race([
+      dns.promises.reverse(cleanIp),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('DNS_TIMEOUT')), 1500))
+    ]);
+    const host = Array.isArray(hosts) && hosts[0] ? String(hosts[0]).trim() : '';
+    if (analyticsData.ipStats[ip]) {
+      analyticsData.ipStats[ip].clientHostname = host;
+      queueSaveAnalytics();
+    }
+    if (geoCache[ip] && host && !geoCache[ip].reverse) {
+      geoCache[ip].reverse = host;
+      saveGeoCache();
+    }
+    return host;
+  } catch (e) {
+    if (analyticsData.ipStats[ip] && analyticsData.ipStats[ip].clientHostname === undefined) {
+      analyticsData.ipStats[ip].clientHostname = '';
+    }
+    return '';
+  } finally {
+    reverseDnsPending.delete(ip);
+  }
+}
+
 async function resolveIpGeo(ip) {
   const generation = residueGeneration;
   if (!ip || isPrivateIp(ip)) {
@@ -690,15 +762,19 @@ async function resolveIpGeo(ip) {
   }
 
   return new Promise((resolve) => {
-    const url = `http://ip-api.com/json/${ip}?fields=status,message,country,countryCode,regionName,city,lat,lon,isp`;
+    const url = `http://ip-api.com/json/${ip}?fields=status,message,country,countryCode,regionName,city,lat,lon,isp,org,as,reverse`;
     const req = http.get(url, { timeout: 3500 }, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
-      res.on('end', () => {
+      res.on('end', async () => {
         try {
           const json = JSON.parse(data);
           if (json.status === 'success') {
             const flag = getFlagEmoji(json.countryCode);
+            let reverseHost = json.reverse ? String(json.reverse).trim() : '';
+            if (!reverseHost) {
+              reverseHost = await resolveClientHostname(ip);
+            }
             const info = {
               ip,
               country: json.country || 'Desconhecido',
@@ -707,6 +783,9 @@ async function resolveIpGeo(ip) {
               city: json.city || 'Desconhecida',
               region: json.regionName || '',
               isp: json.isp || 'Provedor Desconhecido',
+              org: json.org || '',
+              as: json.as || '',
+              reverse: reverseHost,
               lat: json.lat,
               lon: json.lon
             };
@@ -848,6 +927,18 @@ function detectDevice(userAgent, ip) {
   return os + netTag;
 }
 
+function extractServerHost(req) {
+  if (!req) return '';
+  const headers = req.headers || {};
+  const forwardedHost = headers['x-forwarded-host'];
+  const rawHost = forwardedHost || headers.host || '';
+  const cleanHost = String(rawHost).split(',')[0].trim();
+  if (cleanHost) return cleanHost;
+  const localAddr = req.socket && req.socket.localAddress ? String(req.socket.localAddress).replace(/^::ffff:/, '') : '';
+  const localPort = req.socket && req.socket.localPort ? `:${req.socket.localPort}` : '';
+  return localAddr ? `${localAddr}${localPort}` : '';
+}
+
 function logAccess(req, pathname, fullUrl) {
   if (!isTrackingEnabled()) {
     return;
@@ -867,6 +958,7 @@ function logAccess(req, pathname, fullUrl) {
   const timeStr = now.toLocaleTimeString('pt-BR');
   const targetUrl = fullUrl || (req.url || pathname);
   const ipVer = getIpVersion(ip);
+  const serverHost = extractServerHost(req);
 
   analyticsData.totalVisits++;
 
@@ -879,6 +971,7 @@ function logAccess(req, pathname, fullUrl) {
     analyticsData.ipStats[ip] = {
       ip,
       ipVersion: ipVer,
+      serverHost,
       firstSeen: now.toISOString(),
       lastSeen: now.toISOString(),
       visitsCount: 0,
@@ -900,6 +993,7 @@ function logAccess(req, pathname, fullUrl) {
   stat.visitsCount++;
   stat.lastSeen = now.toISOString();
   stat.device = device;
+  stat.serverHost = serverHost;
   if (!stat.ipVersion) stat.ipVersion = ipVer;
 
   queueSaveAnalytics();
@@ -914,8 +1008,9 @@ function captureHttpRequest({ req, res, statusCode, durationMs, pathname, fullUr
   const urlPath = pathname || rawUrl.split('?')[0] || '/';
   const lowerPath = urlPath.toLowerCase();
 
-  // Exclui apenas polling contínuo do próprio painel admin e arquivos estáticos internos do admin
+  // Exclui polling do admin e todas as rotas de pesquisa/proxy/stream (zero rastros de busca)
   if (
+    isSearchTracePath(lowerPath) ||
     lowerPath === '/api/papaleguas/metrics' ||
     lowerPath === '/api/papaleguas/status' ||
     lowerPath === '/api/papaleguas/requests' ||
@@ -938,6 +1033,7 @@ function captureHttpRequest({ req, res, statusCode, durationMs, pathname, fullUr
   const ipVer = getIpVersion(clientIp);
   const finalStatus = statusCode || (res && res.statusCode) || 200;
   const latency = Math.max(1, Math.round(durationMs || 0));
+  const serverHost = extractServerHost(req);
 
   let geo = geoCache[clientIp] || null;
   if (!geo && isLocal) {
@@ -949,21 +1045,24 @@ function captureHttpRequest({ req, res, statusCode, durationMs, pathname, fullUr
     };
   }
 
+  const sanitizedPath = stripQueryTraces(urlPath) || '/';
+  const sanitizedReferer = referer ? stripQueryTraces(referer).slice(0, 100) : null;
   const reqItem = {
     id: `req_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
     timestamp: now.toISOString(),
     time: timeFormatted,
     method: m,
-    path: rawUrl,
-    pathname: urlPath,
+    path: sanitizedPath,
+    pathname: sanitizedPath,
     status: finalStatus,
     durationMs: latency,
     ip: clientIp,
     ipVersion: ipVer,
+    serverHost,
     isLocal,
     device,
     userAgent: userAgent.slice(0, 140),
-    referer: referer ? referer.slice(0, 100) : null,
+    referer: sanitizedReferer,
     geo: geo ? {
       flag: geo.flag || '🌐',
       country: geo.country || 'Desconhecido',
@@ -995,6 +1094,7 @@ function captureHttpRequest({ req, res, statusCode, durationMs, pathname, fullUr
     analyticsData.ipStats[clientIp] = {
       ip: clientIp,
       ipVersion: ipVer,
+      serverHost,
       firstSeen: now.toISOString(),
       lastSeen: now.toISOString(),
       visitsCount: 0,
@@ -1011,17 +1111,18 @@ function captureHttpRequest({ req, res, statusCode, durationMs, pathname, fullUr
   stat.visitsCount = (stat.visitsCount || 0) + 1;
   stat.lastSeen = now.toISOString();
   stat.device = device;
+  stat.serverHost = serverHost;
   if (!stat.ipVersion) stat.ipVersion = ipVer;
   if (!stat.pages) stat.pages = {};
   if (!Array.isArray(stat.recentRequests)) stat.recentRequests = [];
 
   const cleanPath = urlPath || '/';
-  stat.pages[cleanPath] = (stat.pages[cleanPath] || 0) + 1;
+  stat.pages[sanitizedPath] = (stat.pages[sanitizedPath] || 0) + 1;
 
   stat.recentRequests.unshift({
     time: timeFormatted,
     method: m,
-    path: rawUrl,
+    path: sanitizedPath,
     status: finalStatus,
     durationMs: latency
   });
@@ -1332,6 +1433,16 @@ function calculateAcceptanceAndEvolutionMetrics() {
     const lastSeenMs = stat.lastSeen ? new Date(stat.lastSeen).getTime() : 0;
     const isOnline = (Date.now() - lastSeenMs) <= (5 * 60 * 1000); // Visto nos últimos 5 minutos
     const clientClass = classifyClient(ip, stat);
+    const resolvedGeo = stat.geo || geoCache[ip] || null;
+
+    if (!isLocal && stat.clientHostname === undefined && !(resolvedGeo && resolvedGeo.reverse)) {
+      resolveClientHostname(ip).catch(() => {});
+    }
+
+    const clientOrg = (resolvedGeo && (resolvedGeo.org || resolvedGeo.isp)) || '';
+    const clientName = isLocal
+      ? (stat.device || 'Rede Local')
+      : (stat.clientHostname || (resolvedGeo && (resolvedGeo.reverse || resolvedGeo.org || resolvedGeo.isp)) || stat.device || 'Cliente Externo');
 
     return {
       ip: shownIp,
@@ -1339,6 +1450,9 @@ function calculateAcceptanceAndEvolutionMetrics() {
       deviceIpv4,
       deviceLanIpv4,
       ipVersion: shownVersion,
+      serverName: stat.serverHost || (isLocal ? 'localhost' : 'papaleguas.app'),
+      clientName,
+      clientOrg,
       isLocal,
       isOnline,
       isBlocked: isIpBlocked(ip) || isIpBlocked(shownIp) || (deviceIpv4 && isIpBlocked(deviceIpv4)),

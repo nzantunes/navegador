@@ -1,5 +1,14 @@
 // Módulo Adblocker nativo para Papaléguas Tor Browser
-// Bloqueia anúncios, rastreadores, scripts invasivos e popups via WebRequest e injeção de CSS
+// Bloqueia anúncios, rastreadores, scripts invasivos e popups via WebRequest, PPL nativo e injeção de CSS
+let urlFilterPpl = null;
+let adblockEnginePpl = null;
+try {
+  const pplRuntime = require('../papaleguas-lang/runtime');
+  urlFilterPpl = pplRuntime.loadNativeModule('url_filter');
+  adblockEnginePpl = pplRuntime.loadNativeModule('adblock_engine');
+} catch (e) {
+  try { urlFilterPpl = require('../papaleguas-lang/active/url_filter.ppl.node'); } catch (e2) {}
+}
 
 const adBlockPatterns = [
   // Google Ads & DoubleClick
@@ -146,26 +155,30 @@ function setupAdblocker(sessionInstance) {
       return;
     }
 
-    // Bloqueia anúncios, métricas e páginas de configurações/conta do Spotify por segurança
+    if (urlFilterPpl && typeof urlFilterPpl.is_ip_leak_or_stun_url === 'function' && urlFilterPpl.is_ip_leak_or_stun_url(url)) {
+      blockedCount++;
+      callback({ cancel: true });
+      return;
+    }
+
+    // Bloqueia anúncios, métricas e páginas de configurações/conta do Spotify por segurança (via PPL nativo quando disponível)
     if (url.includes('spotify.com') || url.includes('scdn.co') || url.includes('spoti.fi')) {
-      // Bloqueio de segurança: impede que clientes acessem configurações ou alterem conta
-      if (
+      if (urlFilterPpl && typeof urlFilterPpl.is_spotify_restricted_url === 'function') {
+        if (urlFilterPpl.is_spotify_restricted_url(url)) {
+          blockedCount++;
+          callback({ cancel: true });
+          return;
+        }
+      } else if (
         url.includes('/account') ||
         url.includes('/preferences') ||
         url.includes('/settings') ||
         url.includes('accounts.spotify.com/status') ||
-        url.includes('accounts.spotify.com/change-password')
-      ) {
-        blockedCount++;
-        callback({ cancel: true });
-        return;
-      }
-
-      if (
+        url.includes('accounts.spotify.com/change-password') ||
         url.includes('/ad-logic/') ||
         url.includes('/ads/') ||
         url.includes('/ad/') ||
-        url.includes('audio-ak-spotify-com.akamaized.net') && url.includes('/ad/') ||
+        (url.includes('audio-ak-spotify-com.akamaized.net') && url.includes('/ad/')) ||
         url.includes('heads-fa.spotify.com') ||
         url.includes('spclient.wg.spotify.com/ads/') ||
         url.includes('spclient.wg.spotify.com/ad-logic/') ||
@@ -233,7 +246,19 @@ function setupAdblocker(sessionInstance) {
       return;
     }
 
-    // Verifica domínios de anúncios
+    // Verifica domínios de anúncios e trackers via Papaléguas Lang (.ppl.node) em C nativo primeiro
+    if (adblockEnginePpl && typeof adblockEnginePpl.should_block_ad_url === 'function' && adblockEnginePpl.should_block_ad_url(url)) {
+      blockedCount++;
+      callback({ cancel: true });
+      return;
+    }
+    if (urlFilterPpl && typeof urlFilterPpl.is_ad_domain_or_keyword === 'function' && urlFilterPpl.is_ad_domain_or_keyword(url)) {
+      blockedCount++;
+      callback({ cancel: true });
+      return;
+    }
+
+    // Fallback JS para padrões complementares
     const isAdDomain = adBlockPatterns.some(pattern => {
       const clean = pattern.replace(/\*/g, '').replace('://', '');
       return url.includes(clean);
@@ -255,7 +280,8 @@ function setupAdblocker(sessionInstance) {
 function getAdblockStatus() {
   return {
     enabled: adblockEnabled,
-    blockedCount
+    blockedCount,
+    pplActive: Boolean(urlFilterPpl)
   };
 }
 

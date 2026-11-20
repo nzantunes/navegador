@@ -7,7 +7,7 @@ function swallowed(err, where) {
 if (typeof window !== 'undefined' && window.location && window.location.protocol === 'file:') {
   const _origFetch = window.fetch;
   window.fetch = function(input, init) {
-    if (typeof input === 'string' && (input.startsWith('/api/') || input.startsWith('/youtube') || input.startsWith('/search') || input.startsWith('/filmes'))) {
+    if (typeof input === 'string' && (input.startsWith('/api/') || input.startsWith('/youtube') || input.startsWith('/search') || input.startsWith('/filmes') || input.startsWith('/ipcam-live'))) {
       input = 'http://localhost:8080' + input;
     } else if (input instanceof URL && input.protocol === 'file:' && input.pathname.startsWith('/api/')) {
       input = new URL('http://localhost:8080' + input.pathname + input.search);
@@ -30,6 +30,9 @@ function resolveMediaUrl(url) {
     if (!trimmed.includes('ngrok-skip-browser-warning')) {
       const sep = trimmed.includes('?') ? '&' : '?';
       trimmed = trimmed + sep + 'ngrok-skip-browser-warning=1';
+    }
+    if (typeof window !== 'undefined' && typeof window.__pplEncryptUrl === 'function') {
+      trimmed = window.__pplEncryptUrl(trimmed);
     }
   }
   return trimmed;
@@ -905,8 +908,10 @@ async function playTrackAtIndex(index, fromUserClick = true) {
 
   if (!spotifyPreviewAudio) return;
 
-  // Restaura o volume normal caso estivesse em fade
+  // Restaura o volume normal caso estivesse em fade ou mudo (ex: após unlock de autoplay)
+  spotifyPreviewAudio.muted = false;
   spotifyPreviewAudio.volume = 1.0;
+  if (typeof resumeMusicEqContext === 'function') resumeMusicEqContext();
 
   // Garante que a barra do Mini Player apareça imediatamente
   if (spBottomPlayer) spBottomPlayer.classList.add('visible');
@@ -934,6 +939,21 @@ async function playTrackAtIndex(index, fromUserClick = true) {
   spotifyPreviewAudio.src = initialSrc;
   spotifyPreviewAudio.currentTime = 0;
 
+  const scheduleAutoplayRetryOnGesture = () => {
+    const resumeOnNextGesture = () => {
+      if (sessionId !== currentPlaybackSessionId || window.isUserIntentionallyPaused) return;
+      if (typeof resumeMusicEqContext === 'function') resumeMusicEqContext();
+      spotifyPreviewAudio.muted = false;
+      spotifyPreviewAudio.play().then(() => {
+        if (sessionId !== currentPlaybackSessionId) return;
+        stopLoadingIfCurrent();
+        updateBottomPlayerState(true);
+      }).catch(() => {});
+    };
+    window.addEventListener('pointerdown', resumeOnNextGesture, { once: true, passive: true });
+    window.addEventListener('keydown', resumeOnNextGesture, { once: true, passive: true });
+  };
+
   // Inicia reprodução síncrona dentro do evento de toque/clique do usuário (essencial no celular)
   const p = spotifyPreviewAudio.play();
   if (p !== undefined) {
@@ -943,22 +963,49 @@ async function playTrackAtIndex(index, fromUserClick = true) {
       updateBottomPlayerState(true);
     }).catch((err) => {
       console.warn('Início de reprodução aguardando buffer:', err);
+      if (sessionId !== currentPlaybackSessionId) return;
+      if (err && (err.name === 'NotAllowedError' || /notallowed|gesture|autoplay/i.test(String(err.message || '')))) {
+        stopLoadingIfCurrent();
+        updateBottomPlayerState(false);
+        if (spMiniBubbleBadge) spMiniBubbleBadge.textContent = 'Toque ▶ para ouvir';
+        scheduleAutoplayRetryOnGesture();
+      }
     });
   }
 
   const onReady = () => {
     if (sessionId !== currentPlaybackSessionId) return;
+    if (typeof resumeMusicEqContext === 'function') resumeMusicEqContext();
     // Em segundo plano o primeiro play() pode ter sido rejeitado; tenta de novo quando houver buffer
     if (spotifyPreviewAudio.paused && !window.isUserIntentionallyPaused) {
-      spotifyPreviewAudio.play().catch(() => {});
+      spotifyPreviewAudio.play().catch((err) => {
+        if (err && err.name === 'NotAllowedError') {
+          updateBottomPlayerState(false);
+          if (spMiniBubbleBadge) spMiniBubbleBadge.textContent = 'Toque ▶ para ouvir';
+          scheduleAutoplayRetryOnGesture();
+        }
+      });
     }
     stopLoadingIfCurrent();
-    updateBottomPlayerState(true);
+    updateBottomPlayerState(!spotifyPreviewAudio.paused);
     preloadNextTrackStream(currentTrackIndex + 1);
   };
 
   if (spotifyPreviewAudio.readyState >= 2) onReady();
   else spotifyPreviewAudio.addEventListener('canplay', onReady, { once: true });
+
+  // Watchdog: se o stream completo travar sem carregar por 14s, cai para preview de áudio (se disponível)
+  if (!syncOffline && track.preview) {
+    setTimeout(() => {
+      if (sessionId !== currentPlaybackSessionId || window.isUserIntentionallyPaused) return;
+      if (spotifyPreviewAudio.readyState < 2 && spotifyPreviewAudio.paused && !String(spotifyPreviewAudio.src || '').includes('/api/audio-preview')) {
+        console.warn('[DJ AUDIO] Stream completo demorou demais; ativando fallback de preview.');
+        spotifyPreviewAudio.src = resolveMediaUrl(track.preview);
+        spotifyPreviewAudio.currentTime = 0;
+        spotifyPreviewAudio.play().catch(() => {});
+      }
+    }, 14000);
+  }
 
   // 2. Em paralelo, se não estava no cache síncrono, checa se tem no disco ou indexedDB
   if (!syncOffline) {
@@ -1989,7 +2036,8 @@ if (btnSpPlayPause && spotifyPreviewAudio) {
 
   spotifyPreviewAudio.addEventListener('error', (e) => {
     console.warn('Alerta no elemento de áudio:', e);
-    const track = currentTracksList[currentTrackIndex];
+    const actList = window.playingTracksList || currentTracksList || [];
+    const track = actList[currentTrackIndex];
     const src = String(spotifyPreviewAudio.src || '');
     // Se o áudio completo falhou, tenta amostra somente se online e não for arquivo local
     const isOnline = typeof navigator === 'undefined' || navigator.onLine;
@@ -5786,11 +5834,46 @@ function djPlaylistCount() {
   return Math.max(1, Math.min(50, n));
 }
 
+// Desbloqueia o elemento <audio> sincronamente dentro de um gesto do usuário (clique/submit/voz)
+// para que playTrackAtIndex(0) após o await de /api/dj-chat não seja bloqueado pela política de autoplay.
+const SILENT_WAV_DATA_URI = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+function unlockAudioForAutoplay() {
+  try {
+    if (typeof resumeMusicEqContext === 'function') resumeMusicEqContext();
+    if (!spotifyPreviewAudio) return;
+    if (!spotifyPreviewAudio.paused && !spotifyPreviewAudio.ended) return;
+    const hadSrc = Boolean(spotifyPreviewAudio.getAttribute('src'));
+    const prevMuted = spotifyPreviewAudio.muted;
+    if (!hadSrc) {
+      spotifyPreviewAudio.muted = true;
+      spotifyPreviewAudio.src = SILENT_WAV_DATA_URI;
+      const up = spotifyPreviewAudio.play();
+      if (up && typeof up.then === 'function') {
+        up.then(() => {
+          if (spotifyPreviewAudio.src === SILENT_WAV_DATA_URI) {
+            spotifyPreviewAudio.pause();
+            spotifyPreviewAudio.removeAttribute('src');
+            spotifyPreviewAudio.muted = prevMuted;
+          }
+        }).catch(() => {
+          if (spotifyPreviewAudio.src === SILENT_WAV_DATA_URI) {
+            spotifyPreviewAudio.removeAttribute('src');
+            spotifyPreviewAudio.muted = prevMuted;
+          }
+        });
+      }
+    }
+  } catch (e) { swallowed(e, 'musica:unlockAudioForAutoplay'); }
+}
+
 if (spDjChatForm && spDjChatInput) {
   spDjChatForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     const message = spDjChatInput.value.trim();
     if (!message) return;
+
+    // Desbloqueia o player de áudio sincronamente durante o gesto de envio do usuário
+    unlockAudioForAutoplay();
 
     // Adiciona a mensagem do usuário no chat
     appendDjChatMessage('user', message);

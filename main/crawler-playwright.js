@@ -25,7 +25,9 @@ async function getBrowser() {
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-gpu',
-        '--no-zygote'
+        '--no-zygote',
+        '--proxy-server=socks5://127.0.0.1:9050',
+        '--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1, EXCLUDE localhost'
       ]
     });
   }

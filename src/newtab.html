@@ -25,12 +25,11 @@
   <meta name="twitter:title" content="Papaléguas BaixaTube - Vídeos Sem Anúncios e Downloads em MP4 e MP3">
   <meta name="twitter:description" content="Assista vídeos do YouTube sem anúncios, em segundo plano, e baixe direto em MP4 ou MP3 com alta velocidade no Papaléguas BaixaTube.">
   <meta name="twitter:image" content="https://papaleguas.app/og-banner.jpg">
-  <meta name="papaleguas-version" content="2026.11.07-v114">
+  <meta name="papaleguas-version" content="2026.11.18-v151">
   <!-- Feeds de Sindicatura Automática para Robôs, Agentes e Canais -->
   <link rel="alternate" type="application/rss+xml" title="Papaléguas BaixaTube RSS Feed" href="https://papaleguas.app/feed.xml">
   <link rel="alternate" type="application/feed+json" title="Papaléguas BaixaTube JSON Feed" href="https://papaleguas.app/feed.json">
-  <!-- Google tag (gtag.js) + AdSense: carregamento adiado (1ª interação ou 7s após o load) para não travar a thread principal -->
-  <meta name="google-adsense-account" content="ca-pub-5788322050130808">
+  <!-- Google tag (gtag.js): carregamento adiado (1ª interação ou 7s após o load) para não travar a thread principal -->
   <script>
     window.dataLayer = window.dataLayer || [];
     function gtag(){dataLayer.push(arguments);}
@@ -52,7 +51,6 @@
         done = true;
         evs.forEach(function (e) { window.removeEventListener(e, loadThirdParty, { passive: true }); });
         addScript('https://www.googletagmanager.com/gtag/js?id=G-3PPDLGKC46', false);
-        addScript('https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-5788322050130808', true);
       }
       evs.forEach(function (e) { window.addEventListener(e, loadThirdParty, { passive: true }); });
       window.addEventListener('load', function () { setTimeout(loadThirdParty, 7000); });
@@ -76,18 +74,12 @@
   <link rel="icon" type="image/png" sizes="512x512" href="icon-512.png?v=4">
   <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png?v=4">
   <link rel="apple-touch-icon" sizes="512x512" href="icon-512.png?v=4">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="preconnect" href="https://www.youtube-nocookie.com">
-  <link rel="preconnect" href="https://www.youtube.com">
-  <link rel="preconnect" href="https://googlevideo.com">
-  <link rel="dns-prefetch" href="https://www.youtube-nocookie.com">
-  <link rel="dns-prefetch" href="https://googlevideo.com">
-  <link rel="dns-prefetch" href="https://i.ytimg.com">
-  <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@300;400;500;600;700&display=swap">
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@300;400;500;600;700&display=swap" media="print" onload="this.media='all'">
-  <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@300;400;500;600;700&display=swap"></noscript>
-  <script defer src="hybrid-bridge.js"></script>
+  <link rel="preconnect" href="https://i.ytimg.com" crossorigin>
+  <link rel="dns-prefetch" href="https://fonts.googleapis.com">
+  <link rel="dns-prefetch" href="https://fonts.gstatic.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
+  <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap"></noscript>
+  <script defer src="hybrid-bridge.js?v=112"></script>
   <script>
     (function () {
       try {
@@ -3304,29 +3296,47 @@
   </style>
 </head>
 <body>
-  <button type="button" class="fs-home-btn" id="fs-home-btn" title="Minimizar (Sair da tela cheia)" onclick="goAppHome()">
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M10 14l-7 7"/></svg>
-    <span>Minimizar</span>
-  </button>
-
   <!-- ÍCONE PAPALÉGUAS COM BALÃO DE BOAS-VINDAS NO CANTO DIREITO NO TOPO -->
   <aside class="papaleguas-welcome-anchor" id="papaleguas-welcome-anchor" aria-label="Apresentação e Ajuda Papaléguas">
     <button type="button" class="papaleguas-mascot-btn" id="papaleguas-mascot-btn" title="O que é esta página? Clique para ver ou arraste para fechar" aria-expanded="false">
-      <img src="papaleguas_icon.png" alt="Papaléguas" class="papaleguas-mascot-img" />
+      <img src="icon-192.png" alt="Papaléguas" width="56" height="56" decoding="async" fetchpriority="high" class="papaleguas-mascot-img" onerror="this.onerror=null;this.src='papaleguas_icon.png';" />
       <span class="papaleguas-pulse-ring"></span>
     </button>
     <div class="papaleguas-mascot-drag-hint" id="papaleguas-mascot-drag-hint" title="Arraste para fechar">↔ Arraste p/ fechar</div>
 
     <div class="papaleguas-speech-bubble" id="papaleguas-speech-bubble" role="dialog" aria-modal="false">
+      <style>
+        .pl-agent-chat-wrap { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; }
+        .pl-agent-status-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px; border-radius: 10px; background: rgba(56, 189, 248, 0.09); border: 1px solid rgba(56, 189, 248, 0.25); font-size: 11.5px; color: #bae6fd; }
+        .pl-agent-status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 8px #22c55e; margin-right: 6px; }
+        .pl-agent-messages { display: flex; flex-direction: column; gap: 8px; max-height: 250px; min-height: 150px; overflow-y: auto; padding: 10px; border-radius: 12px; background: rgba(8, 12, 22, 0.72); border: 1px solid rgba(148, 163, 184, 0.16); }
+        .pl-agent-msg { max-width: 92%; padding: 9px 12px; border-radius: 12px; font-size: 12.8px; line-height: 1.48; white-space: pre-line; word-break: break-word; }
+        .pl-agent-msg.agent { align-self: flex-start; background: rgba(30, 41, 59, 0.92); border: 1px solid rgba(56, 189, 248, 0.25); color: #f1f5f9; border-bottom-left-radius: 4px; }
+        .pl-agent-msg.user { align-self: flex-end; background: linear-gradient(135deg, #0284c7, #2563eb); color: #fff; border-bottom-right-radius: 4px; }
+        .pl-agent-msg.is-saved { border-color: rgba(34, 197, 94, 0.5); }
+        .pl-agent-fb-tag { display: inline-block; margin-top: 6px; padding: 2px 7px; border-radius: 999px; font-size: 10.5px; font-weight: 700; background: rgba(34, 197, 94, 0.16); color: #86efac; border: 1px solid rgba(34, 197, 94, 0.4); }
+        .pl-agent-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+        .pl-agent-chip { background: rgba(15, 23, 42, 0.92); border: 1px solid rgba(56, 189, 248, 0.35); color: #e0f2fe; border-radius: 999px; padding: 5px 10px; font-size: 11.5px; font-weight: 600; cursor: pointer; transition: all 0.16s ease; }
+        .pl-agent-chip:hover { background: rgba(56, 189, 248, 0.22); border-color: #38bdf8; color: #fff; }
+        .pl-agent-form { display: flex; gap: 6px; align-items: center; }
+        .pl-agent-input { flex: 1; min-width: 0; background: rgba(15, 23, 42, 0.95); border: 1px solid rgba(148, 163, 184, 0.3); color: #f8fafc; border-radius: 10px; padding: 9px 11px; font-size: 13px; outline: none; }
+        .pl-agent-input:focus { border-color: #38bdf8; box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2); }
+        .pl-agent-send { background: linear-gradient(135deg, #06b6d4, #2563eb); border: none; color: #fff; border-radius: 10px; padding: 9px 13px; font-size: 12.5px; font-weight: 700; cursor: pointer; white-space: nowrap; }
+        .pl-agent-send:disabled { opacity: 0.55; cursor: wait; }
+        .pl-agent-mini-links { display: flex; gap: 6px; flex-wrap: wrap; padding-top: 6px; border-top: 1px solid rgba(148, 163, 184, 0.14); }
+        .pl-agent-mini-btn { flex: 1 1 80px; display: inline-flex; align-items: center; justify-content: center; gap: 4px; padding: 6px 8px; border-radius: 8px; background: rgba(15, 23, 42, 0.85); border: 1px solid rgba(148, 163, 184, 0.22); color: #cbd5e1; font-size: 11.5px; font-weight: 600; cursor: pointer; }
+        .pl-agent-mini-btn:hover { border-color: #38bdf8; color: #fff; }
+      </style>
+
       <div class="papaleguas-bubble-header" id="papaleguas-bubble-header">
         <div class="papaleguas-drag-handle" id="papaleguas-drag-handle" title="Arraste para fechar">
           <span class="papaleguas-drag-bar"></span>
-          <span class="papaleguas-drag-hint">↔ Arraste para fechar</span>
+          <span class="papaleguas-drag-hint">↔ Arraste p/ fechar</span>
         </div>
         <div class="papaleguas-bubble-header-main">
           <div class="papaleguas-bubble-avatar-title">
-            <span class="papaleguas-badge-chip">⚡ Conheça o Navegador</span>
-            <h3 class="papaleguas-bubble-title">Papaléguas BaixaTube</h3>
+            <span class="papaleguas-badge-chip">⚡ Agente Oficial • Humanos &amp; Robôs</span>
+            <h3 class="papaleguas-bubble-title">Agente Papaléguas IA</h3>
           </div>
           <button type="button" class="papaleguas-bubble-close" id="papaleguas-bubble-close" onclick="dismissPapaleguasBubble(event)" title="Fechar balão" aria-label="Fechar">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
@@ -3334,114 +3344,118 @@
         </div>
       </div>
 
-      <p class="papaleguas-bubble-intro">
-        Sua central completa de entretenimento com <strong>velocidade máxima</strong> e <strong>zero anúncios</strong>! Acesse os menus principais:
-      </p>
+      <div class="pl-agent-chat-wrap" id="pl-agent-chat-wrap">
+        <div class="pl-agent-status-bar">
+          <span><span class="pl-agent-status-dot"></span>Online • Motor PPL + IA</span>
+          <span title="Robôs e agentes externos podem conversar via GET/POST /api/site-agent" style="opacity:0.9;">🤖 /api/site-agent</span>
+        </div>
 
-      <!-- BOTÕES DE ATALHO RÁPIDO COM EFEITOS NEON E SHIMMER -->
-      <div class="papaleguas-portal-grid">
-        <button type="button" class="papaleguas-portal-btn portal-btn-youtube" id="btn-portal-youtube" title="Abrir BaixaTube">
-          <span class="papaleguas-portal-icon">📺</span>
-          <span class="papaleguas-portal-name">BaixaTube</span>
-          <span class="papaleguas-portal-tag">Vídeos & Downloads</span>
-        </button>
+        <div class="pl-agent-messages" id="pl-agent-messages" aria-live="polite">
+          <div class="pl-agent-msg agent">Olá! ⚡ Sou o <strong>Agente Papaléguas</strong>. Posso te explicar tudo o que o site faz (BaixaTube, Músicas com DJ IA, Filmes Online, Busca Privada com nosso Motor PPL) e adoraria ouvir seu <strong>feedback para melhorias</strong>!
 
-        <button type="button" class="papaleguas-portal-btn portal-btn-music" id="btn-portal-music" title="Abrir Papaléguas Music">
-          <span class="papaleguas-portal-icon">🎵</span>
-          <span class="papaleguas-portal-name">Papaléguas Music</span>
-          <span class="papaleguas-portal-tag">Músicas & DJ</span>
-        </button>
+🤖 Até robôs e agentes externos podem conversar comigo em <code>/api/site-agent</code>. Como posso te ajudar hoje?</div>
+        </div>
 
-        <button type="button" class="papaleguas-portal-btn portal-btn-movies" id="btn-portal-movies" title="Abrir Filmes Online">
-          <span class="papaleguas-portal-icon">🎬</span>
-          <span class="papaleguas-portal-name">Filmes Online</span>
-          <span class="papaleguas-portal-tag">Cinema & Séries</span>
-        </button>
+        <div class="pl-agent-chips" id="pl-agent-chips">
+          <button type="button" class="pl-agent-chip" data-msg="O que o site Papaléguas faz?">🚀 O que o site faz?</button>
+          <button type="button" class="pl-agent-chip" data-msg="Quero enviar um feedback de melhoria para o site">💡 Dar feedback</button>
+          <button type="button" class="pl-agent-chip" data-msg="Como funciona o motor próprio PPL?">⚡ Motor PPL</button>
+          <button type="button" class="pl-agent-chip" data-msg="Como robôs e agentes externos podem conversar com você?">🤖 API p/ Robôs</button>
+        </div>
+
+        <form class="pl-agent-form" id="pl-agent-form" data-no-ppl="1" autocomplete="off">
+          <input type="text" class="pl-agent-input" id="pl-agent-input" placeholder="Converse ou envie um feedback de melhoria..." maxlength="600" />
+          <button type="submit" class="pl-agent-send" id="pl-agent-send">Enviar</button>
+        </form>
+
+        <div class="pl-agent-mini-links">
+          <button type="button" class="pl-agent-mini-btn" id="btn-portal-youtube" title="Abrir BaixaTube">📺 BaixaTube</button>
+          <button type="button" class="pl-agent-mini-btn" id="btn-portal-music" title="Abrir Papaléguas Music">🎵 Música</button>
+          <button type="button" class="pl-agent-mini-btn" id="btn-portal-movies" title="Abrir Filmes Online">🎬 Filmes</button>
+          <button type="button" class="pl-agent-mini-btn" id="btn-portal-install-app" title="Baixar App Papaléguas">⬇️ Baixar App</button>
+        </div>
       </div>
 
-      <!-- BOTÃO MULTIPLATAFORMA DE BAIXAR APP (WINDOWS, ANDROID, IOS, LINUX) -->
-      <button type="button" class="papaleguas-install-app-banner" id="btn-portal-install-app" title="Baixar e Instalar Super Navegador Papaléguas (Windows, Android, iOS, Linux)">
-        <div class="install-banner-icon-wrap">
-          <img src="icon-192.png" alt="Papaléguas" class="install-banner-mascot" onerror="this.onerror=null;this.src='papaleguas_icon.png';" />
-          <span class="install-pulse-dot"></span>
-        </div>
-        <div class="install-banner-text">
-          <div class="install-banner-title">
-            <strong id="install-banner-main-title">Baixar Super Navegador</strong>
-            <span class="install-banner-badge" id="install-banner-badge">Rust v2.0</span>
-          </div>
-          <span class="install-banner-desc" id="install-banner-main-desc">Disponível para Windows, Android, iOS e Linux com zero anúncios</span>
-        </div>
-        <div class="install-banner-action">
-          <span class="install-action-btn" id="install-banner-action-label">Baixar</span>
-        </div>
-      </button>
+      <script>
+        (function initPapaleguasSiteAgentChat() {
+          const form = document.getElementById('pl-agent-form');
+          const input = document.getElementById('pl-agent-input');
+          const sendBtn = document.getElementById('pl-agent-send');
+          const msgsEl = document.getElementById('pl-agent-messages');
+          const chipsEl = document.getElementById('pl-agent-chips');
+          if (!form || !input || !msgsEl) return;
 
-      <ul class="papaleguas-feature-list">
-        <li class="papaleguas-feature-item">
-          <span class="papaleguas-feat-icon">🌐</span>
-          <div class="papaleguas-feat-text">
-            <strong>Barra de URL & Detector Inteligente</strong>
-            <span>
-              • <strong>Detecção de sites .onion:</strong> Digite ou cole qualquer endereço da rede Tor (.onion) e o navegador abrirá com roteamento anônimo e segurança máxima.<br>
-              • <strong>Captura de Vídeos (Video Sniffer):</strong> Detecta fluxos de vídeo em qualquer site para assistir sem anúncios ou baixar em MP4/MP3.<br>
-              • <strong>IA GPT Astra:</strong> Faça perguntas em linguagem natural direto na barra superior.
-            </span>
-          </div>
-        </li>
+          const agentHistory = [];
 
-        <li class="papaleguas-feature-item">
-          <span class="papaleguas-feat-icon">🔍</span>
-          <div class="papaleguas-feat-text">
-            <strong>Campo de Pesquisa do BaixaTube</strong>
-            <span>Pesquise músicas, artistas, canais, podcasts ou notícias. Use o seletor ao lado (<em>Últimas Horas, Hoje, Semana ou Mês</em>) para filtrar novidades recém-postadas.</span>
-            <button type="button" class="papaleguas-search-try-btn" id="btn-bubble-try-search" title="Ir para o campo de busca">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-              <span>Experimentar Busca Agora</span>
-            </button>
-          </div>
-        </li>
+          function appendMsg(role, text, feedbackSaved) {
+            const div = document.createElement('div');
+            div.className = 'pl-agent-msg ' + role + (feedbackSaved ? ' is-saved' : '');
+            div.textContent = text;
+            if (feedbackSaved && role === 'agent') {
+              const br = document.createElement('br');
+              const tag = document.createElement('span');
+              tag.className = 'pl-agent-fb-tag';
+              tag.textContent = '✓ Feedback registrado para melhorias';
+              div.appendChild(br);
+              div.appendChild(tag);
+            }
+            msgsEl.appendChild(div);
+            msgsEl.scrollTop = msgsEl.scrollHeight;
+            return div;
+          }
 
-        <li class="papaleguas-feature-item">
-          <span class="papaleguas-feat-icon">🎵</span>
-          <div class="papaleguas-feat-text">
-            <strong>Menu Papaléguas Music</strong>
-            <span>Catálogo com milhões de músicas e álbuns sem propagandas. Inclui modo DJ, controle de fila, player flutuante em segundo plano e download em MP3.</span>
-          </div>
-        </li>
+          async function sendAgentMessage(rawText) {
+            const msg = String(rawText || '').trim();
+            if (!msg) return;
+            appendMsg('user', msg, false);
+            agentHistory.push({ role: 'user', content: msg });
+            input.value = '';
+            input.disabled = true;
+            if (sendBtn) sendBtn.disabled = true;
 
-        <li class="papaleguas-feature-item">
-          <span class="papaleguas-feat-icon">🍿</span>
-          <div class="papaleguas-feat-text">
-            <strong>Menu Filmes Online & TV</strong>
-            <span>Lançamentos dublados, filmes completos, séries e canais de TV ao vivo gratuitos. Permite transmitir direto para sua Smart TV via Chromecast!</span>
-          </div>
-        </li>
+            const typingEl = appendMsg('agent', 'Pensando...', false);
+            try {
+              const res = await fetch('/api/site-agent', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  message: msg,
+                  history: agentHistory.slice(-8),
+                  senderType: 'human'
+                })
+              });
+              const data = await res.json();
+              if (typingEl && typingEl.parentNode) typingEl.remove();
+              const reply = (data && data.reply) ? data.reply : 'Obrigado pela mensagem! Me conte o que mais podemos melhorar no Papaléguas.';
+              appendMsg('agent', reply, Boolean(data && data.feedbackSaved));
+              agentHistory.push({ role: 'assistant', content: reply });
+            } catch (err) {
+              if (typingEl && typingEl.parentNode) typingEl.remove();
+              appendMsg('agent', 'Opa, houve uma instabilidade momentânea. Tente enviar sua mensagem ou feedback novamente!', false);
+            } finally {
+              input.disabled = false;
+              if (sendBtn) sendBtn.disabled = false;
+              input.focus();
+            }
+          }
 
-        <li class="papaleguas-feature-item">
-          <span class="papaleguas-feat-icon">⚡</span>
-          <div class="papaleguas-feat-text">
-            <strong>BaixaTube Sem Propagandas</strong>
-            <span>Assista a vídeos do YouTube livre de anúncios e baixe em alta resolução nos formatos <strong>MP4 (Vídeo)</strong> ou <strong>MP3 (Áudio)</strong> com 1 clique.</span>
-          </div>
-        </li>
+          form.addEventListener('submit', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            sendAgentMessage(input.value);
+          });
 
-        <li class="papaleguas-feature-item">
-          <span class="papaleguas-feat-icon">🛡️</span>
-          <div class="papaleguas-feat-text">
-            <strong>Privacidade, AdBlock & Rede Tor</strong>
-            <span>Bloqueio de rastreadores, escudo contra vazamento de WebRTC/IP real e navegação criptografada por múltiplos nós na rede Tor.</span>
-          </div>
-        </li>
-      </ul>
-
-      <div class="papaleguas-bubble-footer">
-        <button type="button" class="papaleguas-bubble-action-btn" id="papaleguas-bubble-action-btn">
-          <span>Explorar o Navegador</span>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"></polyline></svg>
-        </button>
-        <span class="papaleguas-bubble-hint">💡 Role para baixo dentro do balão para ver todo o conteúdo. Clique no ícone do Papaléguas para rever esta ajuda.</span>
-      </div>
+          if (chipsEl) {
+            chipsEl.addEventListener('click', function (e) {
+              const btn = e.target && e.target.closest ? e.target.closest('.pl-agent-chip') : null;
+              if (!btn) return;
+              e.stopPropagation();
+              const q = btn.getAttribute('data-msg') || btn.textContent;
+              sendAgentMessage(q);
+            });
+          }
+        })();
+      </script>
     </div>
   </aside>
 
@@ -3616,7 +3630,19 @@
           window[parentMethod]('');
           return;
         }
-        window.location.href = '/';
+        try {
+          if (window.torBrowserAPI && typeof window.torBrowserAPI.sendToHost === 'function' && url) {
+            window.torBrowserAPI.sendToHost('navigate-current-tab', url);
+            return;
+          }
+        } catch (e) {}
+        try {
+          if (window.parent && window.parent !== window && url) {
+            window.parent.postMessage({ type: 'navigate-current-tab', url: url }, '*');
+            return;
+          }
+        } catch (e) {}
+        window.location.href = url || '/';
       }
 
       // ========================================================================
@@ -4163,15 +4189,12 @@
     <section class="home-player-section" id="home-player-section" style="display: none;">
       <div class="home-player-scale" id="home-player-scale">
         <div class="home-player-box" id="home-player-box">
-          <iframe id="home-yt-iframe" src="about:blank" sandbox="allow-scripts allow-same-origin allow-presentation allow-forms allow-popups allow-popups-to-escape-sandbox" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen referrerpolicy="origin"></iframe>
-          <video id="home-native-video" controls playsinline webkit-playsinline style="display:none;position:absolute;inset:0;width:100%;height:100%;background:#000;z-index:2;object-fit:contain;"></video>
+          <iframe id="home-yt-iframe" src="about:blank" sandbox="allow-scripts allow-same-origin allow-presentation allow-forms allow-popups allow-popups-to-escape-sandbox" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; web-share" allowfullscreen referrerpolicy="origin"></iframe>
+          <video id="home-native-video" controls playsinline webkit-playsinline disablepictureinpicture style="display:none;position:absolute;inset:0;width:100%;height:100%;background:#000;z-index:2;object-fit:contain;"></video>
           <div id="home-native-loading" style="display:none;position:absolute;inset:0;z-index:3;background:rgba(7,11,20,0.82);backdrop-filter:blur(6px);flex-direction:column;align-items:center;justify-content:center;gap:12px;color:#e2e8f0;font-size:13px;font-weight:600;pointer-events:none;">
             <div class="agent-spinner"></div>
             <span id="home-native-loading-text">Iniciando reprodução direta sem bloqueio...</span>
           </div>
-          <button type="button" class="home-minimize-btn" id="home-minimize-btn" onclick="toggleHomePictureInPicture()" title="Picture-in-Picture (PiP)">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19 7h-8v6h8V7zm2-4H3a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zm0 16H3V5h18v14z"/></svg>
-          </button>
           <button type="button" class="home-minimize-fs-btn" id="home-minimize-fs-btn" onclick="exitVideoFullscreen()" title="Minimizar (Sair da tela cheia)">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M10 14l-7 7"/></svg>
             <span>Minimizar</span>
@@ -4308,21 +4331,87 @@
   <video id="yt-pip-video" playsinline webkit-playsinline style="position:fixed;width:160px;height:90px;right:8px;bottom:8px;opacity:0.01;pointer-events:none;z-index:0;"></video>
 
   <script defer src="fab-drag.js?v=1"></script>
-  <script defer src="client-cast.js?v=13"></script>
-  <script defer src="cast-hub.js?v=9"></script>
+  <script defer src="client-cast.js?v=14"></script>
+  <script src="ppl-net-crypto.js?v=2"></script>
+  <script defer src="ppl-client-offload.js?v=1"></script>
+  <script defer src="cast-hub.js?v=10"></script>
   <script>
-    // Polyfill de fetch para ambiente local Electron (file://) rotear requisições /api/ para http://localhost:8080
-    if (window.location.protocol === 'file:') {
+    // Criptografia PPL (WebAssembly + stream cipher 64-bit) para todos os campos de pesquisa e feeds
+    (function installPplFetchCrypto() {
       const _origFetch = window.fetch;
-      window.fetch = function(input, init) {
-        if (typeof input === 'string' && (input.startsWith('/api/') || input.startsWith('/youtube') || input.startsWith('/search') || input.startsWith('/filmes'))) {
-          input = 'http://localhost:8080' + input;
-        } else if (input instanceof URL && input.protocol === 'file:' && input.pathname.startsWith('/api/')) {
-          input = new URL('http://localhost:8080' + input.pathname + input.search);
+      const MASK_64 = (1n << 64n) - 1n;
+      function pplKeystreamByteClient(nonce, idx) {
+        const wasm = window.__pplClientWasm;
+        if (wasm && typeof wasm.ppl_keystream_byte === 'function') {
+          try { return Number(wasm.ppl_keystream_byte(BigInt(nonce >>> 0), BigInt(idx))) & 0xFF; } catch (e) {}
         }
+        const seed = (BigInt(nonce >>> 0) ^ 0x50504C5F32303236n) & MASK_64;
+        let z = (seed + (((BigInt(idx) + 1n) * 0x9E3779B97F4A7C15n) & MASK_64)) & MASK_64;
+        z = ((z ^ (z >> 30n)) * 0xBF58476D1CE4E5B9n) & MASK_64;
+        z = ((z ^ (z >> 27n)) * 0x94D049BB133111EBn) & MASK_64;
+        z = (z ^ (z >> 31n)) & MASK_64;
+        return Number(z & 0xFFn);
+      }
+      function encryptPplObj(obj) {
+        const arr = new Uint32Array(1);
+        if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(arr);
+        else arr[0] = (Math.random() * 0xFFFFFFFF) >>> 0;
+        const nonce = arr[0] >>> 0;
+        const plain = new TextEncoder().encode(JSON.stringify(obj || {}));
+        const out = new Uint8Array(plain.length);
+        for (let i = 0; i < plain.length; i++) {
+          out[i] = plain[i] ^ pplKeystreamByteClient(nonce, i);
+        }
+        let bin = '';
+        for (let i = 0; i < out.length; i++) bin += String.fromCharCode(out[i]);
+        const b64 = btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+        return nonce.toString(16).padStart(8, '0') + '.' + b64;
+      }
+      window.__pplEncryptPayload = encryptPplObj;
+      window.__pplEncryptUrl = function(rawUrl) {
+        try {
+          const isFile = window.location && window.location.protocol === 'file:';
+          const u = new URL(rawUrl, isFile ? 'http://localhost:8080' : window.location.origin);
+          if (u.search && !u.searchParams.has('ppl')) {
+            const payload = {};
+            u.searchParams.forEach((v, k) => { payload[k] = v; });
+            const prefix = (typeof rawUrl === 'string' && rawUrl.startsWith('http')) ? u.origin : (isFile ? 'http://localhost:8080' : '');
+            return prefix + u.pathname + '?ppl=' + encodeURIComponent(encryptPplObj(payload));
+          }
+        } catch (e) {}
+        return rawUrl;
+      };
+
+      const ENCRYPTED_PATHS = /^\/api\/(?:youtube-recent|youtube-trending|youtube-liked-feed|youtube-suggest|suggest|google-trends|curator-recommendations|country-detect|url-suggest|search-picks|search-rich|search-images|search-videos|search|ai-answer|preview-img|ipcam-frame|video-preferences|video-feedback)\b/;
+
+      window.fetch = function(input, init) {
+        let urlStr = typeof input === 'string' ? input : (input && input.url ? input.url : '');
+        try {
+          const parsed = new URL(urlStr, window.location.origin === 'null' || window.location.protocol === 'file:' ? 'http://localhost:8080' : window.location.origin);
+          if (ENCRYPTED_PATHS.test(parsed.pathname) && parsed.search && !parsed.searchParams.has('ppl')) {
+            const payload = {};
+            parsed.searchParams.forEach((v, k) => { payload[k] = v; });
+            const token = encryptPplObj(payload);
+            const prefix = (window.location.protocol === 'file:') ? 'http://localhost:8080' : '';
+            urlStr = prefix + parsed.pathname + '?ppl=' + encodeURIComponent(token);
+            input = (typeof input === 'string') ? urlStr : new Request(urlStr, input);
+          } else if (window.location.protocol === 'file:') {
+            if (typeof input === 'string' && (input.startsWith('/api/') || input.startsWith('/youtube') || input.startsWith('/search') || input.startsWith('/filmes'))) {
+              input = 'http://localhost:8080' + input;
+            } else if (input instanceof URL && input.protocol === 'file:' && input.pathname.startsWith('/api/')) {
+              input = new URL('http://localhost:8080' + input.pathname + input.search);
+            }
+          }
+          if (ENCRYPTED_PATHS.test(parsed.pathname) && init && typeof init.body === 'string' && init.body.trim().startsWith('{')) {
+            const bodyObj = JSON.parse(init.body);
+            if (bodyObj && !bodyObj.ppl) {
+              init = Object.assign({}, init, { body: JSON.stringify({ ppl: encryptPplObj(bodyObj) }) });
+            }
+          }
+        } catch (e) {}
         return _origFetch.call(this, input, init);
       };
-    }
+    })();
 
     // =========================================================================
     // 1. VARIÁVEIS E BUSCA COM PAPALÉGUAS AI NO TOPO
@@ -4432,7 +4521,10 @@
 
       const linkAnchors = [];
       const makeAnchor = (rawHref, label) => {
-        const href = /^https?:/i.test(rawHref) ? rawHref : 'http://' + rawHref;
+        let href = String(rawHref || '').trim();
+        if (!/^https?:/i.test(href) && !href.startsWith('/')) {
+          href = 'http://' + href;
+        }
         const safeHref = href.replace(/'/g, '');
         const id = '___LINK_' + linkAnchors.length + '___';
         linkAnchors.push('<a href="' + safeHref + '" onclick="openLinkTab(event, \'' + safeHref + '\')" style="color:#38bdf8;text-decoration:underline;font-weight:600;">' + label + '</a>');
@@ -4485,7 +4577,9 @@
         return;
       }
 
-      const searchUrl = '/search?q=' + encodeURIComponent(query);
+      const searchUrl = (typeof window.__pplEncryptPayload === 'function')
+        ? '/search?ppl=' + encodeURIComponent(window.__pplEncryptPayload({ q: query }))
+        : '/search?q=' + encodeURIComponent(query);
       const fullSearchUrl = origin + searchUrl;
 
       try {
@@ -4884,6 +4978,52 @@
       return isHomeAnyPipActive();
     }
 
+    function restoreHomePlayerToMedium() {
+      videoFsArmed = false;
+      userRequestedFs = false;
+      phoneLandscapeActive = false;
+      userPinnedMini = false;
+      document.documentElement.classList.remove('video-true-fs', 'phone-landscape-fs');
+      document.body.classList.remove('video-true-fs', 'phone-landscape-fs');
+      try {
+        if (document.fullscreenElement || document.webkitFullscreenElement) {
+          const exitFs = document.exitFullscreen || document.webkitExitFullscreen;
+          if (exitFs) exitFs.call(document);
+        }
+      } catch (e) {}
+      try { syncFullscreenUi(false); } catch (e) {}
+      try { notifyShellVideoFullscreen(false); } catch (e) {}
+      const section = document.getElementById('home-player-section');
+      if (section) {
+        section.style.display = 'flex';
+        section.classList.remove('mini-mode', 'pip-system');
+      }
+      const box = document.getElementById('home-player-box');
+      const dock = document.getElementById('home-player-dock');
+      const ph = document.getElementById('home-player-box-pip-ph');
+      if (box && dock) {
+        if (ph && ph.parentNode) {
+          ph.parentNode.insertBefore(box, ph);
+          ph.parentNode.removeChild(ph);
+        } else if (box.parentNode !== dock) {
+          dock.appendChild(box);
+        }
+        box.style.width = '';
+        box.style.height = '';
+        box.style.maxWidth = '';
+        box.style.maxHeight = '';
+        box.style.margin = '';
+        box.style.borderRadius = '';
+      }
+      markHomeSystemPip(false);
+      try { window.focus(); } catch (e) {}
+      try {
+        if (section && typeof section.scrollIntoView === 'function') {
+          section.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      } catch (e) {}
+    }
+
     async function exitHomePictureInPicture() {
       if (window.parent && window.parent !== window) {
         try {
@@ -4900,28 +5040,14 @@
       if (pipEl && pipEl.webkitPresentationMode === 'picture-in-picture') {
         try { pipEl.webkitSetPresentationMode('inline'); } catch (e) {}
       }
-      markHomeSystemPip(false);
+      restoreHomePlayerToMedium();
       sendYtIframeCommand('unMute');
       sendYtIframeCommand('playVideo');
     }
 
     async function toggleHomePictureInPicture() {
-      const isExpanded = document.documentElement.classList.contains('video-true-fs') || isDocFullscreen();
-      if (isExpanded) {
-        videoFsArmed = false;
-        userRequestedFs = false;
-        phoneLandscapeActive = false;
-        document.documentElement.classList.remove('video-true-fs');
-        document.body.classList.remove('video-true-fs');
-        syncFullscreenUi(false);
-        notifyShellVideoFullscreen(false);
-      }
-
-      if (isPipActiveCurrently()) {
-        await exitHomePictureInPicture();
-      } else {
-        await enterHomePictureInPicture();
-      }
+      // Janela Picture-in-Picture removida: volta sempre para a tela média
+      restoreHomePlayerToMedium();
     }
     window.toggleHomePictureInPicture = toggleHomePictureInPicture;
     window.minimizeHomeVideo = toggleHomePictureInPicture;
@@ -5181,20 +5307,45 @@
         updatedAt: Date.now()
       };
       const serialized = JSON.stringify(payload);
-      try {
-        localStorage.setItem(YT_PREFS_STORAGE_KEY, serialized);
-      } catch (e) {}
+      // Zero rastros: mantém preferências apenas na sessão ativa (apagadas ao fechar o navegador)
+      try { sessionStorage.setItem(YT_PREFS_STORAGE_KEY, serialized); } catch (e) {}
+      try { localStorage.removeItem(YT_PREFS_STORAGE_KEY); } catch (e) {}
       try {
         if (window.parent && window.parent !== window && window.parent.localStorage) {
-          window.parent.localStorage.setItem(YT_PREFS_STORAGE_KEY, serialized);
+          window.parent.localStorage.removeItem(YT_PREFS_STORAGE_KEY);
         }
       } catch (e) {}
-      try {
-        document.cookie = `papaleguas_device_id=${encodeURIComponent(currentDeviceId)}; path=/; max-age=315360000; SameSite=Lax`;
-      } catch (e) {}
-      savePrefsToIndexedDB(payload).catch(() => {});
       updateLikedChipCount();
     }
+
+    // Limpeza automática de rastros de pesquisa e histórico ao abrir e ao fechar o navegador
+    (function setupZeroSearchTraceCleanup() {
+      const TRACE_KEYS = [
+        'papaleguas_active_theme',
+        'papaleguas_yt_prefs_v1',
+        'papaleguas_fast_feed_cache_v1',
+        'papaleguas_recent_searches',
+        'papaleguas_search_history',
+        'papaleguas_bt_recent_ids',
+        'papaleguas_bt_refresh_seq'
+      ];
+      function wipeTraces(clearSession) {
+        try {
+          TRACE_KEYS.forEach((k) => {
+            try { localStorage.removeItem(k); } catch (e) {}
+            if (clearSession) { try { sessionStorage.removeItem(k); } catch (e) {} }
+          });
+          if (clearSession) {
+            try { sessionStorage.clear(); } catch (e) {}
+          }
+          try { document.cookie = 'papaleguas_device_id=; path=/; max-age=0; SameSite=Lax'; } catch (e) {}
+          try { if (window.indexedDB) window.indexedDB.deleteDatabase('papaleguas_yt_prefs_db'); } catch (e) {}
+        } catch (e) {}
+      }
+      wipeTraces(false);
+      window.addEventListener('beforeunload', () => wipeTraces(true));
+      window.addEventListener('pagehide', () => wipeTraces(true));
+    })();
 
     function refreshAllRenderedCardsFeedbackState() {
       try {
@@ -5304,7 +5455,8 @@
               const map = JSON.parse(raw);
               if (map && map['curtidos']) {
                 delete map['curtidos'];
-                localStorage.setItem(FAST_FEED_CACHE_KEY, JSON.stringify(map));
+                try { sessionStorage.setItem(FAST_FEED_CACHE_KEY, JSON.stringify(map)); } catch (e) {}
+                try { localStorage.removeItem(FAST_FEED_CACHE_KEY); } catch (e) {}
               }
             }
           } catch (e) {}
@@ -5649,7 +5801,8 @@
           likedRelatedVideos: (payload.likedRelatedVideos || []).slice(0, 8),
           countryCode: payload.countryCode || ''
         };
-        localStorage.setItem(FAST_FEED_CACHE_KEY, JSON.stringify(map));
+        try { sessionStorage.setItem(FAST_FEED_CACHE_KEY, JSON.stringify(map)); } catch (e) {}
+        try { localStorage.removeItem(FAST_FEED_CACHE_KEY); } catch (e) {}
       } catch (e) {}
     }
 
@@ -5714,6 +5867,55 @@
       return fetch(url, { ...opts, signal: ctrl.signal }).finally(() => clearTimeout(t));
     }
 
+    // Motor WebAssembly PPL (.ppl.wasm) na Página Inicial para ranquear feed em sandbox
+    window.__pplClientWasm = null;
+    (async function loadHomePplWasm() {
+      try {
+        if (typeof WebAssembly === 'undefined') return;
+        const res = await fetch('/api/ppl-wasm?module=client_guard');
+        if (!res.ok) return;
+        const bytes = await res.arrayBuffer();
+        const inst = await WebAssembly.instantiate(bytes, {});
+        if (inst && inst.instance && inst.instance.exports) {
+          window.__pplClientWasm = inst.instance.exports;
+        }
+      } catch (e) {}
+    })();
+
+    function estimateHomeAgeHours(pub) {
+      const s = String(pub || '').toLowerCase();
+      if (!s) return 12n;
+      if (/ao vivo|live|agora|now/i.test(s)) return 0n;
+      const m = s.match(/(\d+)/);
+      const n = m ? BigInt(parseInt(m[1], 10) || 1) : 1n;
+      if (/min|seg/i.test(s)) return 1n;
+      if (/hora|hour|\bh\b/i.test(s)) return n;
+      if (/dia|day/i.test(s)) return n * 24n;
+      if (/semana|week/i.test(s)) return n * 168n;
+      if (/m[eê]s|month/i.test(s)) return n * 720n;
+      if (/ano|year/i.test(s)) return n * 8760n;
+      return 24n;
+    }
+
+    function sortHomeVideosWithPplWasm(list) {
+      const wasm = window.__pplClientWasm;
+      if (!wasm || typeof wasm.score_home_feed_item !== 'function' || !Array.isArray(list) || list.length <= 1) {
+        return list;
+      }
+      return list.map((v, idx) => {
+        const isLive = /ao vivo|live/i.test(String(v && v.publishedAt || '') + ' ' + String(v && v.duration || '')) ? 1 : 0;
+        const isTrend = v && v.isGoogleTrend ? 1 : 0;
+        const isLikedRel = v && (v.relatedToLiked || v.liked) ? 1 : 0;
+        const ageH = estimateHomeAgeHours(v && v.publishedAt);
+        const hasThumb = (v && (v.thumbnail || v.id)) ? 1 : 0;
+        let s = 0;
+        try {
+          s = Number(wasm.score_home_feed_item(isLive, isTrend, isLikedRel, ageH, hasThumb)) || 0;
+        } catch (e) {}
+        return { v, s, idx };
+      }).sort((a, b) => (b.s - a.s) || (a.idx - b.idx)).map((x) => x.v);
+    }
+
     async function loadRecentYouTubeFeed(query = 'noticias', isUserSearch = false, forceRefresh = false) {
       if (autoRefreshFloatingPill) {
         autoRefreshFloatingPill.style.opacity = '0';
@@ -5728,7 +5930,8 @@
       searchTheme = query;
       try {
         if (query && String(query).trim()) {
-          localStorage.setItem('papaleguas_active_theme', String(query).trim());
+          try { sessionStorage.setItem('papaleguas_active_theme', String(query).trim()); } catch (e) {}
+          try { localStorage.removeItem('papaleguas_active_theme'); } catch (e) {}
         }
       } catch (e) {}
       try {
@@ -5930,21 +6133,58 @@
         return;
       }
 
+      const isBrowserReload = (() => {
+        try {
+          if (window.__plConsumedReloadFlag) return false;
+          const nav = performance && typeof performance.getEntriesByType === 'function' ? performance.getEntriesByType('navigation')[0] : null;
+          if (nav && nav.type === 'reload') {
+            window.__plConsumedReloadFlag = true;
+            return true;
+          }
+        } catch (e) {}
+        return false;
+      })();
+      const effectiveForceRefresh = Boolean(forceRefresh || isBrowserReload);
+
+      const getRecentShownIds = () => {
+        try {
+          const raw = sessionStorage.getItem('papaleguas_bt_recent_ids');
+          const arr = raw ? JSON.parse(raw) : [];
+          return Array.isArray(arr) ? arr.filter(Boolean).slice(0, 50) : [];
+        } catch (e) { return []; }
+      };
+      const recordRecentShownIds = (list) => {
+        try {
+          const prev = getRecentShownIds();
+          const fresh = (list || []).map((v) => v && v.id).filter(Boolean).slice(0, 24);
+          const merged = Array.from(new Set([...fresh, ...prev])).slice(0, 60);
+          sessionStorage.setItem('papaleguas_bt_recent_ids', JSON.stringify(merged));
+        } catch (e) {}
+      };
+      const nextRefreshSeq = () => {
+        try {
+          const next = (parseInt(sessionStorage.getItem('papaleguas_bt_refresh_seq') || '0', 10) || 0) + 1;
+          sessionStorage.setItem('papaleguas_bt_refresh_seq', String(next));
+          return next;
+        } catch (e) { return Math.floor(Date.now() / 1000) % 1000; }
+      };
+
+      const hasSsrCards = Boolean(homeYtGrid && homeYtGrid.querySelector('.yt-card[data-ssr="1"]'));
       if (cachedEntry && homeYtGrid) {
-        // Com "Novos Vídeos" / puxar para atualizar: mantém os vídeos atuais esmaecidos sob o loading
+        // Com "Novos Vídeos" / puxar para atualizar / F5: mantém os vídeos atuais esmaecidos sob o loading
         // (sem tela vazia) e só troca quando os novos chegarem.
-        if (!forceRefresh) {
+        if (!effectiveForceRefresh) {
           homeYtGrid.innerHTML = '';
           cachedEntry.videos.forEach((v) => {
             if (!isVideoBlockedByDislike(v)) renderVideoCard(v);
           });
         }
         renderedFromFastCache = true;
-        if (!forceRefresh && Date.now() - (cachedEntry.ts || 0) < 90000 && !isUserSearch) {
+        if (!effectiveForceRefresh && Date.now() - (cachedEntry.ts || 0) < 90000 && !isUserSearch) {
           isLoadingFeed = false;
           return;
         }
-      } else if (homeYtGrid) {
+      } else if (homeYtGrid && (!hasSsrCards || effectiveForceRefresh || isUserSearch)) {
         homeYtGrid.innerHTML = `
           <div class="yt-skeleton-card"><div class="yt-skeleton-thumb"></div><div class="yt-skeleton-info"><div class="yt-skeleton-line" style="width: 85%;"></div><div class="yt-skeleton-line" style="width: 50%;"></div></div></div>
           <div class="yt-skeleton-card"><div class="yt-skeleton-thumb"></div><div class="yt-skeleton-info"><div class="yt-skeleton-line" style="width: 85%;"></div><div class="yt-skeleton-line" style="width: 50%;"></div></div></div>
@@ -5953,11 +6193,11 @@
         `;
       }
 
-      if (forceRefresh) {
+      if (effectiveForceRefresh) {
         if (homeYtGrid && homeYtGrid.children.length > 0 && renderedFromFastCache) homeYtGrid.classList.add('feed-refreshing');
         try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (e) { window.scrollTo(0, 0); }
         setFeedRefreshing(true, 'Carregando novos vídeos...');
-      } else if (!renderedFromFastCache) {
+      } else if (!renderedFromFastCache && !hasSsrCards) {
         setFeedRefreshing(true, 'Carregando vídeos...');
       }
 
@@ -5973,8 +6213,15 @@
         const reqCountry = getEffectiveCountryParam();
         const isManual = isManualCountryMode();
         const manualParam = isManual ? '&manual=1' : '&manual=0';
+        const recentShown = getRecentShownIds();
+        const currentDomIds = homeYtGrid
+          ? Array.from(homeYtGrid.querySelectorAll('.yt-card[data-vid]')).map((el) => el.getAttribute('data-vid')).filter(Boolean)
+          : [];
+        const excludeIds = Array.from(new Set([...currentDomIds, ...recentShown])).slice(0, 45);
+        const excludeParam = excludeIds.length > 0 ? `&exclude=${encodeURIComponent(excludeIds.join(','))}` : '';
+        const rseqParam = effectiveForceRefresh ? `&refresh=1&rseq=${nextRefreshSeq()}` : '';
 
-        let resp = await fetchFeedWithTimeout(`/api/youtube-recent?q=${encodeURIComponent(query)}&time=${currentTimeFilter}&country=${encodeURIComponent(reqCountry)}${manualParam}${devIpParam}${devIdParam}&_t=${timestamp}${forceRefresh ? '&refresh=1' : ''}`, {
+        let resp = await fetchFeedWithTimeout(`/api/youtube-recent?q=${encodeURIComponent(query)}&time=${currentTimeFilter}&country=${encodeURIComponent(reqCountry)}${manualParam}${devIpParam}${devIdParam}${excludeParam}${rseqParam}&_t=${timestamp}`, {
           cache: 'no-store',
           headers: { 'Cache-Control': 'no-cache', ...devHeaders }
         });
@@ -6021,9 +6268,11 @@
 
           updateFeedHeading(query);
 
-          data.videos.forEach(v => {
+          const orderedVideos = effectiveForceRefresh ? data.videos : sortHomeVideosWithPplWasm(data.videos);
+          orderedVideos.forEach(v => {
             renderVideoCard(v);
           });
+          recordRecentShownIds(orderedVideos);
           if (isUserSearch) {
             const targetHeader = document.getElementById('home-feed-header') || homeYtGrid;
             if (targetHeader) {
@@ -6368,7 +6617,7 @@
         ? window.location.origin
         : 'http://localhost:8080';
       const { lang, country } = getDetectedAudioLangInfo();
-      return origin + '/api/stream-audio?v=' + encodeURIComponent(id) + '&lang=' + encodeURIComponent(lang) + '&country=' + encodeURIComponent(country);
+      return window.__pplEncryptUrl(origin + '/api/stream-audio?v=' + encodeURIComponent(id) + '&lang=' + encodeURIComponent(lang) + '&country=' + encodeURIComponent(country));
     }
 
     function isElectronHost() {
@@ -6502,7 +6751,7 @@
       }
       const origin = (window.location.origin && window.location.origin.indexOf('http') === 0) ? window.location.origin : 'http://localhost:8080';
       const { lang, country, hl } = getDetectedAudioLangInfo();
-      const streamUrl = origin + '/api/stream-video?v=' + encodeURIComponent(targetId) + '&lang=' + encodeURIComponent(lang) + '&country=' + encodeURIComponent(country);
+      const streamUrl = window.__pplEncryptUrl(origin + '/api/stream-video?v=' + encodeURIComponent(targetId) + '&lang=' + encodeURIComponent(lang) + '&country=' + encodeURIComponent(country));
       homeNativeVideo.style.display = 'block';
       homeNativeVideo.lang = hl;
       homeNativeVideo.poster = 'https://i.ytimg.com/vi/' + encodeURIComponent(targetId) + '/hqdefault.jpg';
@@ -6756,13 +7005,14 @@
         return;
       }
 
-      // Se for link externo para a web, .onion ou target=_blank, intercepta e abre via Tor no aplicativo
+      // Se for link externo para a web, .onion, /proxy ou target=_blank / clique modificado, intercepta e abre em nova aba no aplicativo
       const target = (a.getAttribute('target') || '').toLowerCase().trim();
       const href = a.href || rawHref;
-      if (href.startsWith('http://') || href.startsWith('https://') || target === '_blank') {
+      const wantsNewTab = target === '_blank' || ev.button === 1 || ev.ctrlKey || ev.metaKey;
+      if (href.startsWith('http://') || href.startsWith('https://') || href.startsWith('/proxy') || wantsNewTab) {
         try {
           const u = new URL(href, window.location.origin);
-          if (u.origin !== window.location.origin || u.pathname.startsWith('/proxy')) {
+          if (u.origin !== window.location.origin || u.pathname.startsWith('/proxy') || wantsNewTab) {
             ev.preventDefault();
             ev.stopPropagation();
             openLinkTab(ev, href);
@@ -6775,6 +7025,17 @@
           return;
         }
       }
+    }, true);
+
+    document.addEventListener('auxclick', (ev) => {
+      if (ev.button !== 1) return;
+      const a = ev.target && ev.target.closest ? ev.target.closest('a') : null;
+      if (!a) return;
+      const rawHref = a.getAttribute('href') || a.href || '';
+      if (!rawHref || rawHref.startsWith('#') || rawHref.startsWith('javascript:')) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      openLinkTab(ev, a.href || rawHref);
     }, true);
 
     function playNextVideo() {
@@ -6987,6 +7248,11 @@
       document.body.classList.add('video-true-fs');
       syncFullscreenUi(true);
       try {
+        if (window.history && typeof window.history.pushState === 'function') {
+          window.history.pushState({ plVideoFs: true }, '');
+        }
+      } catch (e) {}
+      try {
         if (window.parent && window.parent !== window) {
           window.parent.postMessage({ type: 'enter-video-fullscreen' }, '*');
         }
@@ -7028,6 +7294,11 @@
       }
     }
     window.exitVideoFullscreen = exitVideoFullscreen;
+    window.addEventListener('popstate', function () {
+      if (document.documentElement.classList.contains('video-true-fs') || document.body.classList.contains('video-true-fs')) {
+        exitVideoFullscreen();
+      }
+    });
 
     function toggleExpandHomeVideo() {
       const isFs = document.documentElement.classList.contains('video-true-fs') || isDocFullscreen();
@@ -7212,12 +7483,9 @@
         let canL = document.querySelector('link[rel="canonical"]');
         if (canL) canL.href = `https://papaleguas.app/baixatube?v=${encodeURIComponent(id)}`;
 
+        // Zero rastros: não grava título nem ID de vídeo/pesquisa na URL do histórico do navegador
         if (window.history && typeof window.history.replaceState === 'function') {
-          const u = new URL(window.location.href);
-          u.searchParams.set('v', id);
-          u.searchParams.set('title', cleanVidTitle);
-          u.searchParams.delete('q');
-          window.history.replaceState(null, videoPageTitle, u.pathname + u.search);
+          try { window.history.replaceState(null, 'Papaléguas BaixaTube', window.location.pathname || '/baixatube'); } catch (e) {}
         }
       } catch (e) {}
 
@@ -7276,7 +7544,7 @@
       if (v.dataset.vid === id && v.dataset.lang === lang && v.readyState >= 1) return;
       try {
         const origin = (window.location.origin && window.location.origin.indexOf('http') === 0) ? window.location.origin : 'http://localhost:8080';
-        v.src = origin + '/api/stream-video?v=' + encodeURIComponent(id) + '&lang=' + encodeURIComponent(lang) + '&country=' + encodeURIComponent(country);
+        v.src = window.__pplEncryptUrl(origin + '/api/stream-video?v=' + encodeURIComponent(id) + '&lang=' + encodeURIComponent(lang) + '&country=' + encodeURIComponent(country));
         v.dataset.vid = id;
         v.dataset.lang = lang;
         v.preload = 'metadata';
@@ -7318,202 +7586,7 @@
     }
 
     async function enterHomePictureInPicture() {
-      if (!currentActiveVideoId) return false;
-
-      // 1. Electron Desktop
-      if (window.torBrowserAPI && typeof window.torBrowserAPI.offerYoutubePip === 'function') {
-        try {
-          window.torBrowserAPI.offerYoutubePip({
-            videoId: currentActiveVideoId,
-            title: currentActiveTitle,
-            currentTime: ytCurrentTime || 0,
-            isPlaying: true
-          });
-          sendYtIframeCommand('pauseVideo');
-          markHomeSystemPip(true);
-          return true;
-        } catch (e) {}
-      }
-
-      // 2. Desktop Moderno: W3C Document Picture-in-Picture (mantém o iframe original rodando fluido, sem reiniciar nem pausar)
-      if ('documentPictureInPicture' in window && !isPhoneClient()) {
-        try {
-          const docPip = window.documentPictureInPicture;
-          if (docPip.window && !docPip.window.closed) {
-            return true;
-          }
-          const box = document.getElementById('home-player-box');
-          const dock = document.getElementById('home-player-dock');
-          if (box && dock) {
-            const pipWin = await docPip.requestWindow({
-              width: 560,
-              height: 315
-            });
-
-            try {
-              [...document.styleSheets].forEach((styleSheet) => {
-                try {
-                  if (styleSheet.cssRules) {
-                    const newStyleEl = document.createElement('style');
-                    for (const cssRule of styleSheet.cssRules) {
-                      newStyleEl.appendChild(document.createTextNode(cssRule.cssText));
-                    }
-                    pipWin.document.head.appendChild(newStyleEl);
-                  } else if (styleSheet.href) {
-                    const newLinkEl = document.createElement('link');
-                    newLinkEl.rel = 'stylesheet';
-                    newLinkEl.href = styleSheet.href;
-                    pipWin.document.head.appendChild(newLinkEl);
-                  }
-                } catch (e) {}
-              });
-            } catch (e) {}
-
-            pipWin.document.body.style.margin = '0';
-            pipWin.document.body.style.padding = '0';
-            pipWin.document.body.style.background = '#0a0d14';
-            pipWin.document.body.style.overflow = 'hidden';
-            pipWin.document.body.style.display = 'flex';
-            pipWin.document.body.style.alignItems = 'center';
-            pipWin.document.body.style.justifyContent = 'center';
-            pipWin.document.body.style.height = '100vh';
-
-            let ph = document.getElementById('home-player-box-pip-ph');
-            if (!ph) {
-              ph = document.createElement('div');
-              ph.id = 'home-player-box-pip-ph';
-              ph.style.width = '100%';
-              ph.style.height = '100%';
-              ph.style.minHeight = '240px';
-              ph.style.display = 'flex';
-              ph.style.alignItems = 'center';
-              ph.style.justifyContent = 'center';
-              ph.style.background = 'rgba(10, 13, 20, 0.85)';
-              ph.style.borderRadius = '14px';
-              ph.style.border = '1px solid rgba(255,255,255,0.08)';
-              ph.style.color = '#7c90b0';
-              ph.style.fontSize = '13px';
-              ph.innerHTML = '<span style="display:flex;align-items:center;gap:8px;">📺 Reproduzindo em Picture-in-Picture</span>';
-            }
-            dock.insertBefore(ph, box);
-
-            box.style.width = '100%';
-            box.style.height = '100%';
-            box.style.maxWidth = '100%';
-            box.style.maxHeight = '100%';
-            box.style.margin = '0';
-            box.style.borderRadius = '0';
-            pipWin.document.body.appendChild(box);
-            markHomeSystemPip(true);
-            if (audioAnchor) {
-              try { audioAnchor.pause(); } catch (e) {}
-              audioAnchor.muted = true;
-            }
-            homeNotifOn = false;
-            broadcastHomeYtState();
-
-            setTimeout(() => {
-              sendYtIframeCommand('unMute');
-              sendYtIframeCommand('playVideo');
-            }, 60);
-
-            pipWin.addEventListener('pagehide', () => {
-              if (ph && ph.parentNode) ph.parentNode.insertBefore(box, ph);
-              else dock.appendChild(box);
-              if (ph && ph.parentNode) ph.parentNode.removeChild(ph);
-              box.style.width = '';
-              box.style.height = '';
-              box.style.maxWidth = '';
-              box.style.maxHeight = '';
-              box.style.margin = '';
-              box.style.borderRadius = '';
-              markHomeSystemPip(false);
-              sendYtIframeCommand('unMute');
-              sendYtIframeCommand('playVideo');
-              setTimeout(broadcastHomeYtState, 50);
-            });
-
-            return true;
-          }
-        } catch (e) {
-          console.warn('Document Picture-in-Picture falhou ou foi bloqueado, tentando fallback:', e);
-        }
-      }
-
-      // 3. Mobile / PWA nativo: <video id="yt-pip-video">
-      const v = document.getElementById('yt-pip-video');
-      if (!v || !currentActiveVideoId) return false;
-      try {
-        const origin = (window.location.origin && window.location.origin.indexOf('http') === 0) ? window.location.origin : 'http://localhost:8080';
-        v.setAttribute('playsinline', 'true');
-        v.setAttribute('webkit-playsinline', 'true');
-        v.playsInline = true;
-        v.loop = false;
-        v.disablePictureInPicture = false;
-        v.muted = true;
-        v.volume = 1.0;
-        v.poster = 'https://i.ytimg.com/vi/' + encodeURIComponent(currentActiveVideoId) + '/hqdefault.jpg';
-
-        if (v.readyState < 1 && (!v.srcObject || v.dataset.vid !== currentActiveVideoId)) {
-          // Prepara imediatamente o canvas para que v tenha frames prontos e não perca o gesto do usuário
-          createPipCanvasTrack(v, currentActiveVideoId, currentActiveTitle);
-        } else if (!v.src || v.dataset.vid !== currentActiveVideoId) {
-          v.src = origin + '/api/stream-video?v=' + encodeURIComponent(currentActiveVideoId);
-          v.dataset.vid = currentActiveVideoId;
-        }
-
-        try {
-          if (typeof ytCurrentTime === 'number' && ytCurrentTime > 1 && v.readyState >= 1 && !v.srcObject) {
-            if (Math.abs((v.currentTime || 0) - ytCurrentTime) > 2) v.currentTime = ytCurrentTime;
-          }
-        } catch (e) {}
-
-        v.muted = true;
-        await v.play().catch(() => {});
-
-        let pipSuccess = false;
-        if (document.pictureInPictureEnabled && typeof v.requestPictureInPicture === 'function') {
-          if (document.pictureInPictureElement !== v) await v.requestPictureInPicture();
-          pipSuccess = (document.pictureInPictureElement === v);
-        } else if (v.webkitSupportsPresentationMode && typeof v.webkitSetPresentationMode === 'function') {
-          v.webkitSetPresentationMode('picture-in-picture');
-          pipSuccess = true;
-        }
-
-        if (pipSuccess) {
-          silenceIframeForPip();
-          markHomeSystemPip(true);
-          if (v.srcObject) {
-            if (audioAnchor) {
-              audioAnchor.muted = false;
-              audioAnchor.play().catch(() => {});
-            }
-          } else {
-            v.muted = false;
-            v.volume = 1.0;
-          }
-          updatePlaybackState(true);
-          updateYtMediaSession(currentActiveVideoId, currentActiveTitle, currentActiveChannel);
-          if (window.parent && window.parent !== window) {
-            try { window.parent.postMessage({ type: 'youtube-pip-active', active: true }, '*'); } catch (e) {}
-          }
-          return true;
-        } else {
-          try { v.pause(); } catch (e) {}
-          v.muted = true;
-          sendYtIframeCommand('unMute');
-          sendYtIframeCommand('playVideo');
-          markHomeSystemPip(false);
-          return false;
-        }
-      } catch (e) {
-        console.warn('Fallback Picture-in-Picture erro:', e);
-        try { v.pause(); } catch (err) {}
-        v.muted = true;
-        sendYtIframeCommand('unMute');
-        sendYtIframeCommand('playVideo');
-        markHomeSystemPip(false);
-      }
+      // Tela Picture-in-Picture removida do BaixaTube
       return false;
     }
 
@@ -7559,6 +7632,7 @@
             broadcastHomeYtState();
           }
         } else {
+          restoreHomePlayerToMedium();
           sendYtIframeCommand('unMute');
           sendYtIframeCommand('playVideo');
           broadcastHomeYtState();
@@ -7588,7 +7662,7 @@
         setTimeout(() => {
           if (!isHomeVideoPipActive() || !currentActiveVideoId || pipEl.dataset.vid === currentActiveVideoId) return;
           const origin = (window.location.origin && window.location.origin.indexOf('http') === 0) ? window.location.origin : 'http://localhost:8080';
-          pipEl.src = origin + '/api/stream-video?v=' + encodeURIComponent(currentActiveVideoId);
+          pipEl.src = window.__pplEncryptUrl(origin + '/api/stream-video?v=' + encodeURIComponent(currentActiveVideoId));
           pipEl.dataset.vid = currentActiveVideoId;
           pipEl.muted = false;
           pipEl.play().catch(() => {});
@@ -7706,6 +7780,8 @@
             playPrevVideo();
           } else if (action === 'enter-mini') {
             toggleHomePictureInPicture();
+          } else if (action === 'exit-fullscreen') {
+            exitVideoFullscreen();
           }
           return;
         }
@@ -8048,9 +8124,14 @@
       if (isLiked) card.setAttribute('data-user-liked', 'true');
       if (v.isGoogleTrend) card.setAttribute('data-google-trend', 'true');
 
+      const isEagerCard = homeYtGrid && homeYtGrid.children.length < 2;
+      const optThumb = v.id
+        ? `https://i.ytimg.com/vi_webp/${encodeURIComponent(v.id)}/mqdefault.webp`
+        : (v.thumbnail || '');
+      const fallbackThumb = `https://i.ytimg.com/vi/${encodeURIComponent(v.id)}/mqdefault.jpg`;
       card.innerHTML = `
         <div class="yt-thumb-box">
-          <img src="${v.thumbnail || `https://i.ytimg.com/vi/${encodeURIComponent(v.id)}/hqdefault.jpg`}" class="yt-thumb" alt="${safeTitle}" loading="lazy" decoding="async" width="320" height="180" onerror="this.src='https://i.ytimg.com/vi/${encodeURIComponent(v.id)}/hqdefault.jpg'">
+          <img src="${optThumb}" class="yt-thumb" alt="${safeTitle}" loading="${isEagerCard ? 'eager' : 'lazy'}" fetchpriority="${isEagerCard ? 'high' : 'low'}" decoding="async" width="320" height="180" onerror="this.onerror=null;this.src='${fallbackThumb}'">
           ${v.isLive ? `<span class="yt-dur yt-dur-live">AO VIVO</span>` : (v.duration ? `<span class="yt-dur">${escapeHtml(v.duration)}</span>` : '')}
           <div class="yt-play-overlay">
             <div class="yt-play-circle">
@@ -8968,7 +9049,7 @@
         videoId: id,
         title: cleanTitle,
         url: id ? ('https://www.youtube.com/watch?v=' + id) : window.location.href,
-        streamUrl: id ? (origin + '/api/stream-video?v=' + encodeURIComponent(id)) : ''
+        streamUrl: id ? window.__pplEncryptUrl(origin + '/api/stream-video?v=' + encodeURIComponent(id)) : ''
       };
     }
 
@@ -9076,12 +9157,13 @@
         }
       }
       if (typeof setupInfiniteScrollObserver === 'function') setupInfiniteScrollObserver();
-      // Sincroniza preferências salvas no servidor para este dispositivo sem recarregar a grade
-      syncDevicePrefsWithServer().catch(() => {});
-      // Detecta o país pelo IP da conexão e carrega os 10 assuntos mais pesquisados no Google Trends do país detectado
-      detectAndApplyCountry()
-        .then(() => loadGoogleTrendsBar(detectedCountry || getEffectiveCountryParam() || 'auto'))
-        .catch(() => loadGoogleTrendsBar('auto'));
+      // Sincroniza preferências e Google Trends em segundo plano para não competir com o LCP
+      setTimeout(() => {
+        syncDevicePrefsWithServer().catch(() => {});
+        detectAndApplyCountry()
+          .then(() => loadGoogleTrendsBar(detectedCountry || getEffectiveCountryParam() || 'auto'))
+          .catch(() => loadGoogleTrendsBar('auto'));
+      }, 1200);
 
       // Atualização periódica da página BaixaTube e Google Trends a cada 30 minutos (1.800.000 ms) trazendo novos vídeos
       const AUTO_REFRESH_INTERVAL_MS = 30 * 60 * 1000;

@@ -19,12 +19,77 @@ const requestGuard = createRequestGuard({
 });
 const telegramBot = require('./telegram-bot');
 const nativeCore = require('./native-core');
+let pplRuntime = null;
+try {
+  pplRuntime = require('../papaleguas-lang/runtime');
+  if (pplRuntime && typeof pplRuntime.warmupNativeModules === 'function') {
+    pplRuntime.warmupNativeModules([
+      'auto_tuner', 'search_rank', 'search_index', 'video_stream',
+      'shield_guard', 'url_filter', 'privacy_shield', 'media_guard',
+      'net_router', 'rate_guard', 'bm25_engine', 'adblock_engine', 'crypto_engine'
+    ]);
+  }
+} catch (e) { swallowed(e, 'server:require-ppl-runtime'); }
+const pplUrlFilterStats = { checked: 0, blockedTracker: 0, blockedUnsafe: 0 };
+function checkPplUrlFilter(rawUrl) {
+  if (!pplRuntime || typeof pplRuntime.loadNativeModule !== 'function') return null;
+  try {
+    const mod = pplRuntime.loadNativeModule('url_filter');
+    if (!mod) return null;
+    pplUrlFilterStats.checked += 1;
+    const str = String(rawUrl || '');
+    const lower = str.toLowerCase();
+    if (typeof mod.is_unsafe_scheme === 'function' && mod.is_unsafe_scheme(lower)) {
+      pplUrlFilterStats.blockedUnsafe += 1;
+      return 'unsafe_scheme';
+    }
+    if (typeof mod.is_ad_domain_or_keyword === 'function' && mod.is_ad_domain_or_keyword(lower)) {
+      pplUrlFilterStats.blockedTracker += 1;
+      return 'blocked_tracker';
+    }
+    if (typeof mod.is_blocked_tracker === 'function' && mod.is_blocked_tracker(lower)) {
+      pplUrlFilterStats.blockedTracker += 1;
+      return 'blocked_tracker';
+    }
+  } catch (e) { swallowed(e, 'server:ppl-url-filter'); }
+  return null;
+}
+function tryOffloadToNativePpl(req, res, targetPath, extraHeaders, onFallback) {
+  // Modo unificado na porta 8080: atende direto in-process sem salto TCP para :8081
+  onFallback();
+}
 const botCommander = require('./bot-commander');
 const { searchOnionLinks, crawlOnionSublinks, crawlWebForOnionLinks, setTorCountry, checkOnionAlive, startBackgroundUptimeScanner, getOnionStatusSync } = require('./onion-search');
-const { createLruCache } = require('./lru-cache');
-const { sanitizeSearchText, scoreSearchRelevance, computeAntiSpamPenalty, suggestQueryCorrection } = require('./search-utils');
+const { createLruCache, applyHardwareTunerToCaches } = require('./lru-cache');
+let lastPplCacheTune = null;
+function runPplCacheAutoTune() {
+  if (!pplRuntime || typeof pplRuntime.loadNativeModule !== 'function') return null;
+  try {
+    const hw = pplRuntime.loadNativeModule('hw_probe');
+    const tuner = pplRuntime.loadNativeModule('auto_tuner');
+    if (!hw || !tuner) return null;
+    const pressure = typeof hw.memory_pressure_pct === 'function' ? Number(hw.memory_pressure_pct()) : 0;
+    const recLimit = typeof tuner.recommended_cache_limit === 'function' ? Number(tuner.recommended_cache_limit()) : 5000;
+    const shed = typeof tuner.should_shed_load === 'function' ? Boolean(tuner.should_shed_load(pressure)) : false;
+    lastPplCacheTune = Object.assign({ pressurePct: pressure, at: new Date().toISOString() }, applyHardwareTunerToCaches(recLimit, shed));
+    return lastPplCacheTune;
+  } catch (e) { swallowed(e, 'server:ppl-cache-autotune'); return null; }
+}
+const pplCacheTuneTimer = setInterval(runPplCacheAutoTune, 30000);
+if (pplCacheTuneTimer && typeof pplCacheTuneTimer.unref === 'function') pplCacheTuneTimer.unref();
+const { sanitizeSearchText, scoreSearchRelevance, computeAntiSpamPenalty, computePplBatchBoost, suggestQueryCorrection } = require('./search-utils');
 const { sendCompressed } = require('./compression');
-const { parseSuggestPayload, filterOffTopic: filterOffTopicHelper, spreadResultsByHost: spreadResultsByHostHelper } = require('./search-engines');
+const { searchPublicIpCameras: searchPublicIpCamerasImpl } = require('./ipcam-search');
+const { buildIpCamLiveHtml } = require('./routes/ipcam-live');
+const { encryptPplPayload, hydrateRequestWithPpl } = require('./ppl-crypto');
+const {
+  parseSuggestPayload,
+  filterOffTopic: filterOffTopicHelper,
+  spreadResultsByHost: spreadResultsByHostHelper,
+  parseBingVideosHtml,
+  parseDailymotionVideosJson,
+  filterAndRankTopicVideos
+} = require('./search-engines');
 
 // Controle em tempo real e persistente de logs do servidor no terminal (console.log / console.info)
 let serverConsoleLogsPaused = typeof papaleguasTracker.isServerLogsPaused === 'function' ? papaleguasTracker.isServerLogsPaused() : false;
@@ -395,7 +460,7 @@ function renderBlockedIpPaymentNotice(clientIp) {
 const MEDIA_DOWNLOADS_DIR = path.join(os.homedir(), '.papaleguas_downloads');
 try { fs.mkdirSync(MEDIA_DOWNLOADS_DIR, { recursive: true }); } catch (e) { swallowed(e, 'server:top@164'); }
 
-let SERVER_BUILD_VERSION = '2026.11.12-v139';
+let SERVER_BUILD_VERSION = '2026.11.18-v151';
 function getServerBuildVersion() {
   try {
     const swPath = path.join(__dirname, '../src/sw.js');
@@ -1217,6 +1282,60 @@ ${schemaJson}
     );
   }
 
+  // Pre-renderização SSR dos primeiros cards de vídeo (LCP instantâneo governado por video_stream.ppl)
+  let ssrFeedSource = Array.isArray(seoData.ssrVideos) && seoData.ssrVideos.length > 0
+    ? seoData.ssrVideos
+    : (Array.isArray(mixedNewsCache) && mixedNewsCache.length > 0 ? mixedNewsCache : []);
+  if (ssrFeedSource.length === 0 && global.__plRecentFeedFastCache && global.__plRecentFeedFastCache.size > 0) {
+    for (const entry of global.__plRecentFeedFastCache.values()) {
+      if (entry && Array.isArray(entry.videos) && entry.videos.length > 0) {
+        ssrFeedSource = entry.videos;
+        break;
+      }
+    }
+  }
+  if (ssrFeedSource.length === 0 && typeof CURATED_YOUTUBE_VIDEOS !== 'undefined' && Array.isArray(CURATED_YOUTUBE_VIDEOS.noticias)) {
+    ssrFeedSource = CURATED_YOUTUBE_VIDEOS.noticias;
+  }
+  if (ssrFeedSource.length > 0 && !seoData.isVideo) {
+    const vsMod = pplRuntime ? pplRuntime.loadNativeModule('video_stream') : null;
+    const isMob = Boolean(seoData.isMobile);
+    const ssrLimit = (vsMod && typeof vsMod.optimal_ssr_card_limit === 'function')
+      ? (Number(vsMod.optimal_ssr_card_limit(isMob)) || 6)
+      : (isMob ? 6 : 8);
+    const ssrCardsHtml = ssrFeedSource.slice(0, ssrLimit).map((v, idx) => {
+      if (!v || !v.id) return '';
+      const vidSafe = escapeHtml(v.id);
+      const titleSafe = escapeHtml(v.title || 'Vídeo');
+      const chSafe = escapeHtml(v.channel || 'BaixaTube');
+      const durSafe = v.isLive
+        ? '<span class="yt-dur yt-dur-live">AO VIVO</span>'
+        : (v.duration ? `<span class="yt-dur">${escapeHtml(v.duration)}</span>` : '');
+      const isEager = (vsMod && typeof vsMod.should_eager_load_card === 'function')
+        ? Boolean(vsMod.should_eager_load_card(idx))
+        : (idx < 2);
+      const thumbWebp = `https://i.ytimg.com/vi_webp/${encodeURIComponent(v.id)}/mqdefault.webp`;
+      const thumbJpg = `https://i.ytimg.com/vi/${encodeURIComponent(v.id)}/mqdefault.jpg`;
+      return `<div class="yt-card" data-id="${vidSafe}" data-title="${titleSafe}" data-ssr="1" onclick="if(typeof playVideoInHomePlayer==='function')playVideoInHomePlayer('${vidSafe}',this.getAttribute('data-title'),'${chSafe}',true)">
+        <div class="yt-thumb-box">
+          <img src="${thumbWebp}" class="yt-thumb" alt="${titleSafe}" width="320" height="180" loading="${isEager ? 'eager' : 'lazy'}" fetchpriority="${isEager ? 'high' : 'low'}" decoding="async" onerror="this.onerror=null;this.src='${thumbJpg}';">
+          ${durSafe}
+          <div class="yt-play-overlay"><div class="yt-play-circle"><svg width="18" height="18" viewBox="0 0 24 24" fill="#fff"><polygon points="5 3 19 12 5 21 5 3"/></svg></div></div>
+        </div>
+        <div class="yt-details">
+          <div class="yt-card-title" title="${titleSafe}">${titleSafe}</div>
+          <div class="yt-card-meta-row"><span class="yt-card-channel">${chSafe}</span></div>
+        </div>
+      </div>`;
+    }).filter(Boolean).join('\n      ');
+    if (ssrCardsHtml) {
+      modifiedHtml = modifiedHtml.replace(
+        /(<div\s+class="yt-grid"\s+id="home-yt-grid"[^>]*>)[\s\S]*?(<\/div>\s*<!--\s*Loader de Scroll Infinito)/i,
+        `$1\n      ${ssrCardsHtml}\n    $2`
+      );
+    }
+  }
+
   return modifiedHtml;
 }
 
@@ -1397,7 +1516,11 @@ async function lookupOutboundIp(forceTor) {
 
 function isPrivateIpAddress(ip) {
   if (!ip) return true;
-  const clean = String(ip).trim().replace(/^::ffff:/, '');
+  const clean = String(ip).trim().replace(/^::ffff:/, '').toLowerCase();
+  const shieldMod = pplRuntime ? pplRuntime.loadNativeModule('shield_guard') : null;
+  if (shieldMod && typeof shieldMod.is_private_ip === 'function') {
+    return Boolean(shieldMod.is_private_ip(clean));
+  }
   if (clean === '127.0.0.1' || clean === '::1' || clean === 'localhost' || clean.startsWith('127.')) return true;
   if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(clean)) return true;
   if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(clean)) return true;
@@ -1407,8 +1530,7 @@ function isPrivateIpAddress(ip) {
     const oct = parseInt(match172[1], 10);
     if (oct >= 16 && oct <= 31) return true;
   }
-  const lower = clean.toLowerCase();
-  if (lower.startsWith('fc') || lower.startsWith('fd') || lower.startsWith('fe80:')) return true;
+  if (clean.startsWith('fc') || clean.startsWith('fd') || clean.startsWith('fe80:')) return true;
   return false;
 }
 
@@ -1617,7 +1739,7 @@ function buildProxyBaseHref(clientId, origin) {
 }
 
 function wrapProxyAbs(url, clientId) {
-  return '/proxy?url=' + encodeURIComponent(url) + '&clientId=' + encodeURIComponent(clientId || 'client_default');
+  return '/proxy?ppl=' + encodeURIComponent(encryptPplPayload({ url, clientId: clientId || 'client_default' }));
 }
 
 function rewriteMetaRefresh(html, clientId, pageUrl, headerRefresh = null) {
@@ -1767,12 +1889,12 @@ function rewriteProxiedCss(css, clientId, cssUrl) {
   return String(css || '')
     .replace(/url\(\s*(["']?)([^"')]+)\1\s*\)/gi, (all, quote, raw) => {
       const value = String(raw).trim();
-      if (!value || /^(data:|blob:|about:|#)/i.test(value) || value.indexOf('/proxy?url=') === 0) return all;
+      if (!value || /^(data:|blob:|about:|#)/i.test(value) || value.indexOf('/proxy?') === 0) return all;
       const full = toAbsolute(value);
       return full ? 'url(' + quote + wrapProxyAbs(full, clientId) + quote + ')' : all;
     })
     .replace(/@import\s+(["'])([^"']+)\1/gi, (all, quote, raw) => {
-      if (String(raw).indexOf('/proxy?url=') === 0) return all;
+      if (String(raw).indexOf('/proxy?') === 0) return all;
       const full = toAbsolute(raw);
       return full ? '@import ' + quote + wrapProxyAbs(full, clientId) + quote : all;
     });
@@ -1785,12 +1907,14 @@ function rewriteProxiedHtml(html, clientId, pageOrigin) {
   let out = String(html || '');
   // Remove qualquer meta tag interna que force bloqueio de iframe (CSP frame-ancestors ou X-Frame-Options)
   out = out.replace(/<meta[^>]+http-equiv=["']?(?:content-security-policy|x-frame-options)["']?[^>]*>/gi, '');
+  // Neutraliza target="_blank" / "_top" / "_parent" em links, áreas, formulários e <base> para impedir fuga do proxy em nova aba nativa
+  out = out.replace(/(<(?:a|area|form|base)\b[^>]*?)\starget=(["']?)(?:_blank|_top|_parent|_new)\2/gi, '$1 target="_self" data-pl-target="_blank"');
   out = out.replace(/\s(src|href|action|poster|data-src)=(["'])(https?:\/\/[^"']+)\2/gi, (all, attr, quote, url) => {
-    if (url.indexOf('/proxy?url=') !== -1 || url.indexOf('/proxy-base/') !== -1) return all;
+    if (url.indexOf('/proxy?') !== -1 || url.indexOf('/proxy-base/') !== -1) return all;
     return ' ' + attr + '=' + quote + wrapAbs(url) + quote;
   });
   out = out.replace(/\s(src|href|action|poster|data-src)=(["'])(\/\/[^"']+)\2/gi, (all, attr, quote, url) => {
-    if (url.indexOf('/proxy?url=') !== -1) return all;
+    if (url.indexOf('/proxy?') !== -1) return all;
     return ' ' + attr + '=' + quote + wrapAbs('https:' + url) + quote;
   });
   out = out.replace(/\s(src|href|action|poster|data-src)=(["'])(\/[^"']*)\2/gi, (all, attr, quote, path) => {
@@ -1802,7 +1926,7 @@ function rewriteProxiedHtml(html, clientId, pageOrigin) {
     const candidates = value.split(',').map((part) => {
       const pieces = part.trim().split(/\s+/);
       const url = decodeAttrUrl(pieces[0] || '');
-      if (!url || /^data:/i.test(url) || url.indexOf('/proxy?url=') === 0) return part.trim();
+      if (!url || /^data:/i.test(url) || url.indexOf('/proxy?') === 0) return part.trim();
       let full = url;
       if (url.indexOf('//') === 0) full = 'https:' + url;
       else if (url.charAt(0) === '/') full = origin + url;
@@ -1875,6 +1999,29 @@ function buildProxyLeakShield(clientId, pageUrl, pageOrigin, torLocale = null) {
                   }
                   killWebRTC();
 
+                  function pplEncProxy(targetUrl) {
+                    try {
+                      var obj = { url: targetUrl, clientId: CLIENT_ID };
+                      var arr = new Uint32Array(1);
+                      if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(arr);
+                      else arr[0] = (Math.random() * 0xFFFFFFFF) >>> 0;
+                      var nonce = arr[0] >>> 0, MASK = (1n << 64n) - 1n;
+                      var plain = new TextEncoder().encode(JSON.stringify(obj));
+                      var out = new Uint8Array(plain.length);
+                      for (var i = 0; i < plain.length; i++) {
+                        var seed = (BigInt(nonce) ^ 0x50504C5F32303236n) & MASK;
+                        var z = (seed + (((BigInt(i) + 1n) * 0x9E3779B97F4A7C15n) & MASK)) & MASK;
+                        z = ((z ^ (z >> 30n)) * 0xBF58476D1CE4E5B9n) & MASK;
+                        z = ((z ^ (z >> 27n)) * 0x94D049BB133111EBn) & MASK;
+                        out[i] = plain[i] ^ Number(((z ^ (z >> 31n)) & MASK) & 0xFFn);
+                      }
+                      var bin = ''; for (var j = 0; j < out.length; j++) bin += String.fromCharCode(out[j]);
+                      return '/proxy?ppl=' + encodeURIComponent(nonce.toString(16).padStart(8, '0') + '.' + btoa(bin).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/g, ''));
+                    } catch (e) {
+                      return '/proxy?url=' + encodeURIComponent(targetUrl) + '&clientId=' + encodeURIComponent(CLIENT_ID);
+                    }
+                  }
+
                   function toProxy(url) {
                     if (!url || typeof url !== 'string') return url;
                     var raw = url.trim();
@@ -1885,9 +2032,9 @@ function buildProxyLeakShield(clientId, pageUrl, pageOrigin, torLocale = null) {
                       if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return url;
                       if (abs.origin === location.origin && (abs.pathname.indexOf('/proxy') === 0 || abs.pathname.indexOf('/api/') === 0)) return url;
                       if (abs.origin === location.origin) {
-                        return '/proxy?url=' + encodeURIComponent(PAGE_ORIGIN + abs.pathname + abs.search + abs.hash) + '&clientId=' + encodeURIComponent(CLIENT_ID);
+                        return pplEncProxy(PAGE_ORIGIN + abs.pathname + abs.search + abs.hash);
                       }
-                      return '/proxy?url=' + encodeURIComponent(abs.href) + '&clientId=' + encodeURIComponent(CLIENT_ID);
+                      return pplEncProxy(abs.href);
                     } catch (e) {
                       return url;
                     }
@@ -1943,6 +2090,76 @@ function buildProxyLeakShield(clientId, pageUrl, pageOrigin, torLocale = null) {
                         set: function(v) { imgDesc.set.call(this, toProxy(v)); }
                       });
                     }
+                    var scrDesc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src');
+                    if (scrDesc && scrDesc.set) {
+                      Object.defineProperty(HTMLScriptElement.prototype, 'src', {
+                        configurable: true,
+                        get: function() { return scrDesc.get.call(this); },
+                        set: function(v) { scrDesc.set.call(this, toProxy(v)); }
+                      });
+                    }
+                    var ifrDesc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'src');
+                    if (ifrDesc && ifrDesc.set) {
+                      Object.defineProperty(HTMLIFrameElement.prototype, 'src', {
+                        configurable: true,
+                        get: function() { return ifrDesc.get.call(this); },
+                        set: function(v) { ifrDesc.set.call(this, toProxy(v)); }
+                      });
+                    }
+                    var ancDesc = window.HTMLAnchorElement && Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype, 'href');
+                    if (ancDesc && ancDesc.set) {
+                      Object.defineProperty(HTMLAnchorElement.prototype, 'href', {
+                        configurable: true,
+                        get: function() { return ancDesc.get.call(this); },
+                        set: function(v) { ancDesc.set.call(this, toProxy(String(v || ''))); }
+                      });
+                    }
+                    var ancTargetDesc = window.HTMLAnchorElement && Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype, 'target');
+                    if (ancTargetDesc && ancTargetDesc.set) {
+                      Object.defineProperty(HTMLAnchorElement.prototype, 'target', {
+                        configurable: true,
+                        get: function() { return this.getAttribute('data-pl-target') || ancTargetDesc.get.call(this); },
+                        set: function(v) {
+                          var t = String(v || '').trim().toLowerCase();
+                          if (t && t !== '_self') {
+                            try { this.setAttribute('data-pl-target', '_blank'); } catch (e) {}
+                            ancTargetDesc.set.call(this, '_self');
+                          } else {
+                            ancTargetDesc.set.call(this, v);
+                          }
+                        }
+                      });
+                    }
+                    var formActDesc = window.HTMLFormElement && Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, 'action');
+                    if (formActDesc && formActDesc.set) {
+                      Object.defineProperty(HTMLFormElement.prototype, 'action', {
+                        configurable: true,
+                        get: function() { return formActDesc.get.call(this); },
+                        set: function(v) { formActDesc.set.call(this, toProxy(String(v || ''))); }
+                      });
+                    }
+                    var nativeElClick = window.HTMLElement && HTMLElement.prototype.click;
+                    if (nativeElClick) {
+                      HTMLElement.prototype.click = function() {
+                        try {
+                          var tag = (this.tagName || '').toUpperCase();
+                          if ((tag === 'A' || tag === 'AREA') && this.href) {
+                            var proxiedHref = toProxy(this.href || this.getAttribute('href') || '');
+                            if (!this.isConnected) {
+                              window.location.href = proxiedHref;
+                              return;
+                            }
+                            this.setAttribute('target', '_self');
+                            this.href = proxiedHref;
+                          }
+                        } catch (e) {}
+                        return nativeElClick.apply(this, arguments);
+                      };
+                    }
+                    if (window.EventSource) {
+                      var NativeES = window.EventSource;
+                      window.EventSource = function(url, cfg) { return new NativeES(toProxy(String(url || '')), cfg); };
+                    }
                   } catch (e) {}
 
                   try {
@@ -1951,6 +2168,12 @@ function buildProxyLeakShield(clientId, pageUrl, pageOrigin, torLocale = null) {
                       var n = String(name || '').toLowerCase();
                       if ((n === 'src' || n === 'href' || n === 'action' || n === 'poster' || n === 'data-src') && typeof value === 'string') {
                         value = toProxy(value);
+                      } else if (n === 'target' && typeof value === 'string') {
+                        var tv = value.trim().toLowerCase();
+                        if (tv && tv !== '_self') {
+                          try { setAttr.call(this, 'data-pl-target', '_blank'); } catch (e) {}
+                          value = '_self';
+                        }
                       }
                       return setAttr.call(this, name, value);
                     };
@@ -1975,14 +2198,9 @@ function buildProxyLeakShield(clientId, pageUrl, pageOrigin, torLocale = null) {
                     window.open = function(url, target, features) {
                       if (!url || url === 'about:blank') return null;
                       var proxied = toProxy(String(url));
-                      try {
-                        if (window.parent && window.parent !== window) {
-                          window.parent.postMessage({ type: 'open-new-tab', url: proxied }, '*');
-                          return null;
-                        }
-                      } catch (err) {}
+                      // Mantém 100% na própria janela dentro da rede Tor (bloqueia abertura de abas externas)
                       location.href = proxied;
-                      return null;
+                      return window;
                     };
                   } catch (e) {}
 
@@ -1992,17 +2210,11 @@ function buildProxyLeakShield(clientId, pageUrl, pageOrigin, torLocale = null) {
                       if (!a) return;
                       var rawHref = a.getAttribute('href');
                       if (!rawHref || rawHref.charAt(0) === '#' || /^(javascript|data|blob|mailto|tel):/i.test(rawHref)) return;
-                      var target = (a.getAttribute('target') || '').toLowerCase().trim();
+                      var target = (a.getAttribute('data-pl-target') || a.getAttribute('target') || '').toLowerCase().trim();
                       var proxied = toProxy(a.href || rawHref);
                       if (target === '_blank' || target === '_new' || ev.ctrlKey || ev.metaKey) {
                         ev.preventDefault();
                         ev.stopPropagation();
-                        try {
-                          if (window.parent && window.parent !== window) {
-                            window.parent.postMessage({ type: 'open-new-tab', url: proxied }, '*');
-                            return;
-                          }
-                        } catch (err) {}
                         location.href = proxied;
                         return;
                       }
@@ -2931,7 +3143,7 @@ async function openHttp2Session(targetUrl, useTor) {
   return http2.connect(targetUrl.origin, options);
 }
 
-async function fetchBrowserText(url, { headers = {}, useTor = false, timeoutMs = 9000, hops = 0 } = {}) {
+async function fetchBrowserText(url, { headers = {}, useTor = true, timeoutMs = 9000, hops = 0 } = {}) {
   let target;
   try {
     target = new URL(url);
@@ -3466,12 +3678,12 @@ async function searchGoogleHtml(query, useTor = false) {
 // diretamente relacionados ao tema pesquisado.
 // ----------------------------------------------------
 
-async function fetchWikiTopicSummary(query) {
+async function fetchWikiTopicSummary(query, useTor = true) {
   const q = String(query || '').trim();
   if (!q || q.length < 2) return null;
   try {
     const openUrl = 'https://pt.wikipedia.org/w/api.php?action=opensearch&search=' + encodeURIComponent(q) + '&limit=3&namespace=0&format=json';
-    const textOpen = await fetchBrowserText(openUrl, { timeoutMs: 3500 });
+    const textOpen = await fetchBrowserText(openUrl, { timeoutMs: 3500, useTor });
     let titles = [];
     try {
       const parsed = JSON.parse(textOpen);
@@ -3480,7 +3692,7 @@ async function fetchWikiTopicSummary(query) {
 
     const targetTitle = titles[0] || q;
     const summaryUrl = 'https://pt.wikipedia.org/api/rest_v1/page/summary/' + encodeURIComponent(targetTitle.replace(/\s+/g, '_'));
-    const sumText = await fetchBrowserText(summaryUrl, { timeoutMs: 3500 });
+    const sumText = await fetchBrowserText(summaryUrl, { timeoutMs: 3500, useTor });
     let sumData = null;
     try { sumData = JSON.parse(sumText); } catch (e) { swallowed(e, 'server:fetchWikiTopicSummary@3220'); }
     if (!sumData || (!sumData.extract && !sumData.description)) return null;
@@ -3497,12 +3709,12 @@ async function fetchWikiTopicSummary(query) {
   }
 }
 
-async function searchWikipediaArticles(query, limit = 4) {
+async function searchWikipediaArticles(query, limit = 4, useTor = true) {
   const q = String(query || '').trim();
   if (!q) return [];
   try {
     const url = 'https://pt.wikipedia.org/w/api.php?action=query&list=search&srsearch=' + encodeURIComponent(q) + '&utf8=&format=json&srlimit=' + limit;
-    const text = await fetchBrowserText(url, { timeoutMs: 4000 });
+    const text = await fetchBrowserText(url, { timeoutMs: 4000, useTor });
     const data = JSON.parse(text);
     const items = data?.query?.search || [];
     return items.map((it) => ({
@@ -3516,12 +3728,12 @@ async function searchWikipediaArticles(query, limit = 4) {
   }
 }
 
-async function searchGoogleNewsRss(query, limit = 8) {
+async function searchGoogleNewsRss(query, limit = 8, useTor = true) {
   // Substitui feed com redirecionamento bloqueado do news.google por notícias com links diretos dos portais
-  return searchBingNews(query, false, limit);
+  return searchBingNews(query, useTor, limit);
 }
 
-async function searchComprehensiveNews(query, useTor = false) {
+async function searchComprehensiveNews(query, useTor = true) {
   const q = String(query || '').trim();
   if (!q) return [];
   const safe = (p) => p.catch(() => []);
@@ -3571,16 +3783,33 @@ function getLocalMoviesCatalog() {
   return cachedLocalMoviesCatalog;
 }
 
+function parseMovieDurationMins(dur) {
+  const parts = String(dur || '').trim().split(':').map((p) => parseInt(p, 10));
+  if (parts.some((n) => Number.isNaN(n))) return -1;
+  if (parts.length >= 3) return parts[0] * 60 + parts[1];
+  if (parts.length === 2) return parts[0];
+  return -1;
+}
+
 function searchLocalMovies(query, limit = 4) {
   const q = String(query || '').toLowerCase().trim();
   if (!q || q.length < 3) return [];
   const catalog = getLocalMoviesCatalog();
   const tokens = q.split(/\s+/).filter((t) => t.length >= 2);
+  const rankMod = pplRuntime ? pplRuntime.loadNativeModule('search_rank') : null;
+  const hasNativeMovieRank = Boolean(rankMod && typeof rankMod.score_filme_candidate === 'function');
   const matches = [];
   for (const m of catalog) {
-    const name = (m.name || '').toLowerCase();
+    const rawName = String(m.name || '');
+    const name = rawName.toLowerCase();
     const desc = (m.description || '').toLowerCase();
     let score = 0;
+    if (hasNativeMovieRank) {
+      try {
+        const nativeScore = Number(rankMod.score_filme_candidate(rawName, '', 'Cinema', q, -1, -1)) || 0;
+        if (nativeScore > 0) score += Math.floor(nativeScore / 4);
+      } catch (e) {}
+    }
     if (name.includes(q)) score += 10;
     tokens.forEach((tok) => {
       if (name.includes(tok)) score += 4;
@@ -3589,7 +3818,7 @@ function searchLocalMovies(query, limit = 4) {
     if (score >= 4) {
       matches.push({
         score,
-        title: (m.name || '').replace(/^[^\w\s]+/, '').trim(),
+        title: rawName.replace(/^[^\w\s]+/, '').trim(),
         url: m.url || m.pageUrl,
         poster: m.logo || '',
         description: m.description || '',
@@ -3637,10 +3866,16 @@ async function fetchRawYoutubeQuery(targetQuery) {
 
           function walk(node) {
             if (!node || typeof node !== 'object') return;
+            if (node.shelfRenderer) {
+              const shelfTitle = (node.shelfRenderer.title?.runs || []).map(r => r.text).join('') || node.shelfRenderer.title?.simpleText || '';
+              if (/pessoas tamb[eé]m|people also|para voc[eê]|for you|assistidos anteriormente|previously watched/i.test(shelfTitle)) {
+                return;
+              }
+            }
             if (node.videoRenderer) {
               const v = node.videoRenderer;
               const id = v.videoId;
-              const title = v.title?.runs?.[0]?.text || v.title?.simpleText || '';
+              const title = (v.title?.runs || []).map(r => r.text).join('') || v.title?.simpleText || '';
               const dur = v.lengthText?.simpleText || '';
               const ch = v.ownerText?.runs?.[0]?.text || v.shortBylineText?.runs?.[0]?.text || '';
               const views = v.viewCountText?.simpleText || (v.viewCountText?.runs || []).map(r => r.text).join('') || '';
@@ -3660,7 +3895,9 @@ async function fetchRawYoutubeQuery(targetQuery) {
               const l = node.lockupViewModel;
               const id = l.rendererContext?.commandContext?.onTap?.innertubeCommand?.watchEndpoint?.videoId || '';
               const title = l.metadata?.lockupMetadataViewModel?.title?.content || '';
-              add(id, title, '', 'YouTube', '', `https://i.ytimg.com/vi/${id}/hqdefault.jpg`);
+              const metaRows = l.metadata?.lockupMetadataViewModel?.metadata?.contentMetadataViewModel?.metadataRows || [];
+              const ch = metaRows?.[0]?.metadataParts?.[0]?.text?.content || 'YouTube';
+              add(id, title, '', ch, '', `https://i.ytimg.com/vi/${id}/hqdefault.jpg`);
             }
             for (const k of Object.keys(node)) {
               if (typeof node[k] === 'object') walk(node[k]);
@@ -3679,30 +3916,20 @@ async function fetchRawYoutubeQuery(targetQuery) {
   });
 }
 
-async function fetchBingVideosFallback(q, pageNum = 0) {
+async function fetchBingVideosFallback(q, pageNum = 0, useTor = true) {
   try {
     const bingUrl = 'https://www.bing.com/videos/search?q=' + encodeURIComponent(q) + '&first=' + (pageNum * 15);
     const bHtml = await fetchBrowserText(bingUrl, {
       timeoutMs: 3500,
-      useTor: false,
+      useTor,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
       }
     });
-    const ytIds = new Set();
-    const matches = bHtml.matchAll(/(?:youtube\.com\/watch\?v=|youtu\.be\/|vi\/)([a-zA-Z0-9_-]{11})/g);
-    for (const m of matches) ytIds.add(m[1]);
-    if (ytIds.size > 0) {
-      return Array.from(ytIds).map((id) => ({
-        id,
-        title: q,
-        duration: '',
-        channel: 'YouTube',
-        views: '',
-        thumbnail: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
-        url: 'https://www.youtube.com/watch?v=' + id
-      }));
-    }
+    const parsed = parseBingVideosHtml(bHtml, '', safeHostname, 20)
+      .filter((v) => v && v.isYoutube && v.id)
+      .map((v) => ({ ...v, _origin: 'bing' }));
+    return filterAndRankTopicVideos(parsed, q);
   } catch (e) {
     swallowed(e, 'server:searchYoutubeVideosForTopic@fallback');
   }
@@ -3720,7 +3947,8 @@ async function searchYoutubeVideosForTopic(query, limit = 8, page = 0) {
   if (cached && (Date.now() - cached.timestamp < YT_CACHE_TTL) && cached.videos.length > 0) {
     videos = cached.videos;
   } else {
-    videos = await fetchRawYoutubeQuery(q);
+    const rawYt = (await fetchRawYoutubeQuery(q) || []).map((v) => ({ ...v, _origin: 'youtube' }));
+    videos = filterAndRankTopicVideos(rawYt, q);
     if (!videos || videos.length === 0) {
       videos = await fetchBingVideosFallback(q, 0);
     }
@@ -3746,10 +3974,14 @@ async function searchYoutubeVideosForTopic(query, limit = 8, page = 0) {
       q + ' tutorial'
     ];
     const nextQuery = variations[pageNum % variations.length] || (q + ' ' + pageNum);
-    const [extraYt, extraBing] = await Promise.all([
+    const [extraYtRaw, extraBing] = await Promise.all([
       fetchRawYoutubeQuery(nextQuery).catch(() => []),
       fetchBingVideosFallback(q, pageNum).catch(() => [])
     ]);
+    const extraYt = filterAndRankTopicVideos(
+      (extraYtRaw || []).map((v) => ({ ...v, _origin: 'youtube' })),
+      q
+    );
     const seen = new Set(videos.map(v => v.id));
     for (const v of [...extraYt, ...extraBing]) {
       if (v && v.id && !seen.has(v.id)) {
@@ -3768,9 +4000,103 @@ async function searchYoutubeVideosForTopic(query, limit = 8, page = 0) {
   return resultSlice;
 }
 
+const topicVideosCache = createLruCache({ maxEntries: 300, ttlMs: 15 * 60 * 1000 });
+
+async function searchTopicVideos(query, limit = 16, page = 0, useTor = true) {
+  const q = String(query || '').trim();
+  if (!q) return [];
+  const pageNum = Math.max(0, parseInt(page, 10) || 0);
+  const maxItems = Math.max(1, Math.min(36, parseInt(limit, 10) || 16));
+  const cacheKey = `${q.toLowerCase()}:${pageNum}:${maxItems}`;
+  const cached = topicVideosCache.get(cacheKey);
+  if (cached && (Date.now() - cached.time < 300000) && cached.list.length > 0) {
+    return cached.list;
+  }
+
+  const vsMod = getPplVideoStreamMod();
+  const bingTimeoutMs = (vsMod && typeof vsMod.optimal_search_timeout_ms === 'function')
+    ? Number(vsMod.optimal_search_timeout_ms(6, Boolean(useTor))) || 2100
+    : (useTor ? 2100 : 1500);
+  const dmTimeoutMs = (vsMod && typeof vsMod.optimal_search_timeout_ms === 'function')
+    ? Number(vsMod.optimal_search_timeout_ms(4, Boolean(useTor))) || 2400
+    : (useTor ? 2400 : 1800);
+
+  const bingUrl = 'https://www.bing.com/videos/search?q=' + encodeURIComponent(q) + '&first=' + (pageNum * 15);
+  const dmUrl = 'https://api.dailymotion.com/videos?search=' + encodeURIComponent(q)
+    + '&fields=id,title,url,thumbnail_480_url,duration,owner.screenname,views_total&limit=12&page=' + (pageNum + 1);
+
+  const [bingHtml, dmJson, ytVideos] = await Promise.all([
+    fetchBrowserText(bingUrl, {
+      timeoutMs: bingTimeoutMs,
+      useTor,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8'
+      }
+    }).catch(() => ''),
+    fetchBrowserText(dmUrl, {
+      timeoutMs: dmTimeoutMs,
+      useTor,
+      headers: { 'User-Agent': 'Papaleguas/1.0 (Mozilla/5.0)' }
+    }).catch(() => ''),
+    searchYoutubeVideosForTopic(q, maxItems, pageNum).catch(() => [])
+  ]);
+
+  const ytList = (ytVideos || []).map((v) => ({
+    ...v,
+    _origin: 'youtube',
+    isYoutube: Boolean(v && v.id),
+    source: 'youtube.com',
+    host: 'youtube.com',
+    url: v.url || (v.id ? 'https://www.youtube.com/watch?v=' + v.id : '')
+  })).filter((v) => v.url);
+
+  const dmList = parseDailymotionVideosJson(dmJson, 12).map((v) => ({
+    ...v,
+    _origin: 'dailymotion'
+  }));
+
+  const bingList = parseBingVideosHtml(bingHtml, '', safeHostname, 20).map((v) => ({
+    ...v,
+    _origin: 'bing'
+  }));
+
+  // Prioriza YouTube (metadados reais + busca direta), seguido de Dailymotion e Bing,
+  // deduplicando antes e filtrando estritamente pelo tema pesquisado.
+  const combined = [...ytList, ...dmList, ...bingList];
+  const deduped = [];
+  const seen = new Set();
+  for (const v of combined) {
+    if (!v || !v.url) continue;
+    const key = v.id ? 'yt:' + v.id : v.url.split('#')[0];
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(v);
+  }
+
+  const onTopicRanked = filterAndRankTopicVideos(deduped, q);
+  const diversified = spreadResultsByHostHelper(onTopicRanked, safeHostname, 6).slice(0, maxItems);
+  if (diversified.length > 0) {
+    topicVideosCache.set(cacheKey, { time: Date.now(), list: diversified });
+    if (pageNum === 0) {
+      prewarmVideoStreams(diversified, 'pt', 3);
+    }
+  }
+  return diversified;
+}
+
 const topicImagesCache = createLruCache({ maxEntries: 300, ttlMs: 15 * 60 * 1000 });
 
-async function searchTopicImages(query, useTor = false, page = 0) {
+function optimizeBingThumbUrl(rawThumb, targetWidth = 240) {
+  const u = String(rawThumb || '').trim();
+  if (!u) return u;
+  if (/(?:bing\.net|bing\.com)\/th\?id=/i.test(u) && !/[?&]w=\d+/i.test(u)) {
+    return `${u}&w=${targetWidth}&h=180&c=7&qlt=80`;
+  }
+  return u;
+}
+
+async function searchTopicImages(query, useTor = true, page = 0) {
   const q = String(query || '').trim();
   if (!q) return [];
   const pageNum = Math.max(0, parseInt(page, 10) || 0);
@@ -3779,6 +4105,14 @@ async function searchTopicImages(query, useTor = false, page = 0) {
   if (cached && (Date.now() - cached.time < 300000) && cached.list.length > 0) {
     return cached.list;
   }
+
+  const vsMod = getPplVideoStreamMod();
+  const thumbWidth = (vsMod && typeof vsMod.optimal_thumb_width === 'function')
+    ? Number(vsMod.optimal_thumb_width(false, false)) || 240
+    : 240;
+  const imgTimeoutMs = (vsMod && typeof vsMod.optimal_search_timeout_ms === 'function')
+    ? Number(vsMod.optimal_search_timeout_ms(2, Boolean(useTor))) || 2800
+    : (useTor ? 2800 : 2000);
 
   const list = [];
   const seen = new Set();
@@ -3792,7 +4126,7 @@ async function searchTopicImages(query, useTor = false, page = 0) {
         const decoded = match[1].replace(/&quot;/g, '"').replace(/&amp;/g, '&');
         const obj = JSON.parse(decoded);
         const img = obj.murl || obj.turl;
-        const thumb = obj.turl || obj.murl;
+        const thumb = optimizeBingThumbUrl(obj.turl || obj.murl, thumbWidth);
         if (img && !seen.has(img)) {
           seen.add(img);
           list.push({
@@ -3843,13 +4177,13 @@ async function searchTopicImages(query, useTor = false, page = 0) {
   if (pageNum === 0) {
     const bingUrl1 = 'https://www.bing.com/images/search?q=' + encodeURIComponent(q) + '&form=HDRSC2';
     const bingUrl2 = 'https://www.bing.com/images/async?q=' + encodeURIComponent(q) + '&first=35&count=35&mmasync=1';
-    const commUrl = 'https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch=' + encodeURIComponent(q) + '&gsrnamespace=6&gsrlimit=20&prop=imageinfo&iiprop=url&iiurlwidth=400&format=json';
+    const commUrl = 'https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch=' + encodeURIComponent(q) + '&gsrnamespace=6&gsrlimit=20&prop=imageinfo&iiprop=url&iiurlwidth=320&format=json';
 
     try {
       const [html1, html2, commJson] = await Promise.all([
-        fetchBrowserText(bingUrl1, { timeoutMs: 4000, useTor: false, headers: bingHeaders }).catch(() => ''),
-        fetchBrowserText(bingUrl2, { timeoutMs: 4000, useTor: false, headers: bingHeaders }).catch(() => ''),
-        fetchBrowserText(commUrl, { timeoutMs: 3500, useTor: false, headers: { 'User-Agent': 'Papaleguas/1.0 (Mozilla/5.0)' } }).catch(() => '')
+        fetchBrowserText(bingUrl1, { timeoutMs: imgTimeoutMs, useTor, headers: bingHeaders }).catch(() => ''),
+        fetchBrowserText(bingUrl2, { timeoutMs: imgTimeoutMs, useTor, headers: bingHeaders }).catch(() => ''),
+        fetchBrowserText(commUrl, { timeoutMs: Math.min(2500, imgTimeoutMs), useTor, headers: { 'User-Agent': 'Papaleguas/1.0 (Mozilla/5.0)' } }).catch(() => '')
       ]);
 
       parseBingHtml(html1, 35);
@@ -3862,12 +4196,12 @@ async function searchTopicImages(query, useTor = false, page = 0) {
     const firstOffset = (pageNum + 1) * 35;
     const bingUrl = 'https://www.bing.com/images/async?q=' + encodeURIComponent(q) + '&first=' + firstOffset + '&count=35&mmasync=1';
     const commOffset = pageNum * 15;
-    const commUrl = 'https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch=' + encodeURIComponent(q) + '&gsrnamespace=6&gsroffset=' + commOffset + '&gsrlimit=15&prop=imageinfo&iiprop=url&iiurlwidth=400&format=json';
+    const commUrl = 'https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch=' + encodeURIComponent(q) + '&gsrnamespace=6&gsroffset=' + commOffset + '&gsrlimit=15&prop=imageinfo&iiprop=url&iiurlwidth=320&format=json';
 
     try {
       const [html, commJson] = await Promise.all([
-        fetchBrowserText(bingUrl, { timeoutMs: 4000, useTor: false, headers: bingHeaders }).catch(() => ''),
-        fetchBrowserText(commUrl, { timeoutMs: 3500, useTor: false, headers: { 'User-Agent': 'Papaleguas/1.0 (Mozilla/5.0)' } }).catch(() => '')
+        fetchBrowserText(bingUrl, { timeoutMs: imgTimeoutMs, useTor, headers: bingHeaders }).catch(() => ''),
+        fetchBrowserText(commUrl, { timeoutMs: Math.min(2500, imgTimeoutMs), useTor, headers: { 'User-Agent': 'Papaleguas/1.0 (Mozilla/5.0)' } }).catch(() => '')
       ]);
       parseBingHtml(html, 35);
       parseCommonsJson(commJson, 50);
@@ -3913,13 +4247,13 @@ function enqueueRustSpiderUrls(urls) {
 }
 
 async function runRustSpiderStep() {
-  if (!rustSpiderQueue.length) return;
+  if (!rustSpiderQueue.length || !isAppTorEnabled()) return;
   const targetUrl = rustSpiderQueue.shift();
   if (!targetUrl) return;
   try {
     const isOnion = /\.onion(\/|$)/i.test(targetUrl);
     const html = await fetchBrowserText(targetUrl, {
-      useTor: isOnion && isAppTorEnabled(),
+      useTor: true,
       timeoutMs: isOnion ? 12000 : 6500
     });
     if (html && html.length > 200) {
@@ -3948,19 +4282,41 @@ setInterval(() => {
   runRustSpiderStep().catch(() => {});
 }, 25000).unref();
 
+const ADULT_QUERY_RE = /\b(porn|porno|pornografia|xvideos|xnxx|pornhub|redtube|xhamster|youporn|brazzers|spankbang|eporner|sexo\s+explicito|putaria|hentai|xxx)\b/i;
+const ADULT_RESULT_RE = /\b(xvideos|xnxx|pornhub|redtube|xhamster|youporn|brazzers|spankbang|eporner|chaturbate|stripchat|cam4|bongacams|porno|pornografia)\b/i;
+
+function isAdultSearchQuery(q) {
+  return ADULT_QUERY_RE.test(String(q || ''));
+}
+
+function isAdultSearchResult(item) {
+  if (!item) return false;
+  const hay = `${item.url || ''} ${item.title || ''} ${item.snippet || ''} ${item.host || ''}`;
+  return ADULT_RESULT_RE.test(hay);
+}
+
 // Junta o Índice Nativo em Rust (BM25) + fontes públicas sem cookies e auto-indexa novos resultados em tempo real
 async function searchWebSources(query, useTor = false) {
   const q = String(query || '').trim();
   if (!q) return [];
   const viaTor = Boolean(useTor && isAppTorEnabled());
-  const engineTimeoutMs = viaTor ? 7000 : 3200;
+  const allowAdult = isAdultSearchQuery(q);
+  const queryTokens = searchQueryTokens(q);
+  const engineTimeoutMs = viaTor ? 2600 : 2200;
   const safe = (promise) => Promise.race([
     promise.catch(() => []),
     new Promise((resolve) => setTimeout(() => resolve([]), engineTimeoutMs))
   ]);
   try {
-    // 1. Consulta instantânea (< 1ms) ao Motor de Busca Nativo em Rust (BM25 + Inverted Index)
-    const rustLocalHits = nativeCore.searchLocalIndex(q, 18, false);
+    // 1. Consulta instantânea (< 1ms) ao Motor de Busca Nativo PPL (BM25 + Inverted Index)
+    const rawRustHits = (nativeCore.searchLocalIndex(q, 18, false) || []).map((item) => ({
+      ...item,
+      source: 'ppl-engine'
+    }));
+    const rustLocalHits = filterOffTopic(
+      rawRustHits.filter((item) => allowAdult || !isAdultSearchResult(item)),
+      queryTokens
+    );
 
     const [bingHtml, duck, duckLite, instant, brave, yandex, yahoo, google, wikiArticles, newsArticles] = await Promise.all([
       safe(searchBingHtml(q, viaTor)),
@@ -3980,8 +4336,9 @@ async function searchWebSources(query, useTor = false) {
     const pushAll = (list) => {
       (list || []).forEach((item) => {
         if (!item || !item.url || !/^https?:\/\//i.test(item.url)) return;
+        if (!allowAdult && isAdultSearchResult(item)) return;
         const cleanUrl = nativeCore.stripTrackingParams(item.url);
-        if (isMediaStreamingUrl(cleanUrl) || nativeCore.isTrackerOrAd(cleanUrl)) return;
+        if (isOnionHref(cleanUrl) || isMediaStreamingUrl(cleanUrl) || nativeCore.isTrackerOrAd(cleanUrl)) return;
         const key = normalizeSearchUrl(cleanUrl);
         const srcName = item.source || 'web';
         if (seenMap.has(key)) {
@@ -4040,7 +4397,16 @@ async function searchWebSources(query, useTor = false) {
     pushAll((wikiArticles || []).slice(0, 4));
     pushAll(newsArticles);
 
-    if (results.length < 10) {
+    if (results.length < 5 && viaTor) {
+      const fastDirect = await Promise.all([
+        Promise.race([searchBingHtml(q, false).catch(() => []), new Promise((r) => setTimeout(() => r([]), 2200))]),
+        Promise.race([searchDuckDuckGoHtml(q, false).catch(() => []), new Promise((r) => setTimeout(() => r([]), 2200))]),
+        Promise.race([searchWikipediaArticles(q, 4).catch(() => []), new Promise((r) => setTimeout(() => r([]), 1800))]),
+        Promise.race([searchBingRss(q, false).catch(() => []), new Promise((r) => setTimeout(() => r([]), 1800))]),
+        Promise.race([searchGoogleNewsRss(q, 6).catch(() => []), new Promise((r) => setTimeout(() => r([]), 1800))])
+      ]);
+      interleaveEngines(fastDirect);
+    } else if (results.length < 10) {
       pushAll(await safe(searchBingRss(q, viaTor)));
     }
 
@@ -4071,6 +4437,9 @@ function searchQueryTokens(query) {
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\b(?:filetype|site|inurl|intitle|ext):[^\s)]+/gi, ' ')
+    .replace(/(?:^|\s)-[a-z0-9.]+/gi, ' ')
+    .replace(/\b(?:or|and)\b/gi, ' ')
     .split(/[^a-z0-9]+/)
     .filter((w) => w.length >= 2 && !SEARCH_STOPWORDS.has(w));
 }
@@ -4172,6 +4541,9 @@ function scoreSearchResult(item, tokens, rawQuery = '') {
   // Filtro anti-SEO-farm, anti-clickbait e anti-phishing
   score += computeAntiSpamPenalty(item);
 
+  // Boost nativo PPL de indexação/frescor (search_index.batch_slot_score)
+  score += computePplBatchBoost(item);
+
   if (typeof item.rank === 'number') {
     score += Math.max(0, 8 - item.rank * 0.35);
   }
@@ -4181,8 +4553,20 @@ function scoreSearchResult(item, tokens, rawQuery = '') {
 
 const webSuggestCache = createLruCache({ maxEntries: 400, ttlMs: 10 * 60 * 1000 });
 
-async function fetchSuggestPhrases(query, useTor = false) {
-  const q = String(query || '').trim();
+function sanitizeSearchFieldInput(raw) {
+  const str = String(raw || '').trim();
+  if (!str) return '';
+  const rankMod = pplRuntime ? pplRuntime.loadNativeModule('search_rank') : null;
+  if (rankMod && typeof rankMod.sanitize_search_query === 'function') {
+    try {
+      return String(rankMod.sanitize_search_query(str) || '').trim();
+    } catch (e) {}
+  }
+  return str.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 240);
+}
+
+async function fetchSuggestPhrases(query, useTor = true) {
+  const q = sanitizeSearchFieldInput(query);
   if (!q) return [];
   const agent = getOutboundAgent(useTor);
   const sources = [
@@ -4190,6 +4574,7 @@ async function fetchSuggestPhrases(query, useTor = false) {
     { hostname: 'duckduckgo.com', path: '/ac/?q=' + encodeURIComponent(q) + '&kl=br-pt&type=list' },
     { hostname: 'suggestqueries.google.com', path: '/complete/search?client=firefox&hl=pt-BR&q=' + encodeURIComponent(q) }
   ];
+  const rankMod = pplRuntime ? pplRuntime.loadNativeModule('search_rank') : null;
   for (const source of sources) {
     const text = await fetchHttpsText({
       ...source,
@@ -4198,12 +4583,21 @@ async function fetchSuggestPhrases(query, useTor = false) {
       headers: { 'Accept': '*/*', 'User-Agent': BROWSER_UA }
     }, null, useTor ? 7000 : 4500);
     const phrases = parseSuggestPayload(text);
-    if (phrases.length) return phrases;
+    if (phrases.length) {
+      if (rankMod && typeof rankMod.score_search_phrase === 'function') {
+        return phrases
+          .map((p) => ({ p, s: Number(rankMod.score_search_phrase(String(p), q)) || 0 }))
+          .filter((x) => x.s > -50)
+          .sort((a, b) => b.s - a.s)
+          .map((x) => x.p);
+      }
+      return phrases;
+    }
   }
   return [];
 }
 
-async function getWebSearchPool(query, useTor = false) {
+async function getWebSearchPool(query, useTor = true) {
   const q = String(query || '').trim();
   const torOn = Boolean(useTor && isAppTorEnabled());
   const key = q.toLowerCase() + (torOn ? ':tor' : ':direct');
@@ -4226,7 +4620,9 @@ async function getWebSearchPool(query, useTor = false) {
   const onTopic = filterOffTopic(items, tokens);
   onTopic.sort((a, b) => scoreSearchResult(b, tokens, q) - scoreSearchResult(a, tokens, q));
   const ordered = spreadResultsByHost(onTopic);
-  webSuggestCache.set(key, { t: Date.now(), items: ordered });
+  if (ordered.length > 0) {
+    webSuggestCache.set(key, { t: Date.now(), items: ordered });
+  }
   return ordered;
 }
 
@@ -4242,53 +4638,226 @@ const richSearchCache = createLruCache({ maxEntries: 250, ttlMs: 10 * 60 * 1000 
 
 // Reúne tudo que o buscador consegue extrair de uma pesquisa:
 // resultados com descrição, resumo de contexto, notícias recentes, conhecimento enciclopédico, vídeos, músicas e filmes.
-async function getRichSearchData(query, useTor = false) {
+const publicIpCamCache = createLruCache({ maxEntries: 150, ttlMs: 5 * 60 * 1000 });
+
+async function searchPublicIpCameras(query, limit = 24, page = 0) {
+  return searchPublicIpCamerasImpl(query, limit, page, publicIpCamCache);
+}
+
+async function getRichSearchData(query, useTor = true, filter = 'all') {
   const q = String(query || '').trim();
-  if (!q) return { q, results: [], onion: [], news: [], related: [], sources: [], wiki: null, videos: [], images: [], music: [], movies: [] };
+  const mode = ['web', 'images', 'videos', 'tor', 'news', 'pdf', 'ipcam'].includes(String(filter || '').toLowerCase())
+    ? String(filter).toLowerCase()
+    : 'all';
+  if (!q) return { q, mode, results: [], onion: [], news: [], related: [], sources: [], wiki: null, videos: [], images: [], music: [], movies: [] };
   const torOn = Boolean((useTor || isTorRoutingEnabled(null)) && isAppTorEnabled());
-  const key = q.toLowerCase() + (torOn ? ':tor' : ':direct');
+  const key = q.toLowerCase() + (torOn ? ':tor' : ':direct') + ':' + mode;
   const cached = richSearchCache.get(key);
   if (cached && (Date.now() - cached.t < 180000)) return cached.data;
 
-  const safe = (promise, fallback) => promise.catch(() => fallback);
-  const webPromise = Promise.race([
-    safe(getWebSearchPool(q, torOn), []),
-    new Promise((resolve) => setTimeout(() => resolve([]), torOn ? 14000 : 8000))
-  ]);
-  const newsPromise = Promise.race([
-    safe(searchComprehensiveNews(q, torOn), []),
-    new Promise((resolve) => setTimeout(() => resolve([]), torOn ? 9000 : 5000))
-  ]);
-  const onionPromise = Promise.race([
-    safe(searchOnionLinks(q), []),
-    new Promise((resolve) => setTimeout(() => resolve([]), torOn ? 9000 : 6500))
-  ]);
-  const wikiPromise = Promise.race([
-    safe(fetchWikiTopicSummary(q), null),
-    new Promise((resolve) => setTimeout(() => resolve(null), 5000))
-  ]);
-  const videosPromise = Promise.race([
-    safe(searchYoutubeVideosForTopic(q, 8), []),
-    new Promise((resolve) => setTimeout(() => resolve([]), 8000))
-  ]);
-  const imagesPromise = Promise.race([
-    safe(searchTopicImages(q, torOn), []),
-    new Promise((resolve) => setTimeout(() => resolve([]), 8000))
-  ]);
+  // Fast-path no motor nativo Rust BM25 quando o usuário seleciona explicitamente Web ou .onion
+  let rustFastResults = [];
+  const allowAdult = isAdultSearchQuery(q);
+  const queryTokens = searchQueryTokens(q);
+  if ((mode === 'web' || mode === 'all') && nativeCore && nativeCore.isRustActive) {
+    try {
+      const hits = nativeCore.searchLocalIndex(q, 24, false) || [];
+      const seenRust = new Set();
+      rustFastResults = [];
+      for (const h of hits) {
+        if (!h || !h.url || isOnionHref(h.url)) continue;
+        if (!allowAdult && isAdultSearchResult(h)) continue;
+        const normKey = normalizeSearchUrl(h.url);
+        if (!normKey || seenRust.has(normKey)) continue;
+        seenRust.add(normKey);
+        rustFastResults.push({
+          title: h.title || q,
+          url: h.url,
+          snippet: h.snippet || h.description || '',
+          source: 'ppl-engine',
+          host: safeHostname(h.url),
+        });
+      }
+      rustFastResults = spreadResultsByHost(filterOffTopic(rustFastResults, queryTokens), 2);
+      if (mode === 'web' && rustFastResults.length >= 3) {
+        const fastData = {
+          q,
+          mode,
+          pplFastPath: true,
+          rustFastPath: true,
+          viaTor: torOn,
+          wiki: null,
+          videos: [],
+          images: [],
+          music: [],
+          movies: [],
+          onion: [],
+          news: [],
+          related: [],
+          results: rustFastResults,
+          sources: ['ppl-engine']
+        };
+        richSearchCache.set(key, { t: Date.now(), data: fastData });
+        return fastData;
+      }
+    } catch (e) {}
+  }
 
-  const [results, news, related, onionResults, wikiResult, videosResult, imagesResult] = await Promise.all([
+  const safe = (promise, fallback) => promise.catch(() => fallback);
+  const runAll = mode === 'all';
+  const vsMod = getPplVideoStreamMod();
+  const pplTimeout = (modeCode, fallbackMs) => {
+    if (vsMod && typeof vsMod.optimal_search_timeout_ms === 'function') {
+      try {
+        return Number(vsMod.optimal_search_timeout_ms(modeCode, torOn)) || fallbackMs;
+      } catch (e) {}
+    }
+    return fallbackMs;
+  };
+  const isDirectPublicIp = /^(\d{1,3}\.){3}\d{1,3}(:\d{1,5})?(\/.*)?$/.test(q)
+    && !/^(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|0\.|169\.254\.)/.test(q);
+  const effectiveWebQuery = mode === 'pdf'
+    ? (/\bfiletype:pdf\b/i.test(q) ? q : `${q} filetype:pdf`)
+    : (mode === 'ipcam'
+      ? (isDirectPublicIp ? q : `${q} (inurl:"view/index.shtml" OR inurl:"ViewerFrame?Mode=" OR inurl:"axis-cgi/mjpg" OR inurl:"MultiCameraFrame") -apk -play.google`)
+      : q);
+  const ipCamPromise = (mode === 'ipcam')
+    ? Promise.race([
+        safe(searchPublicIpCameras(q, 24, 0, null, torOn ? getOutboundAgent(true) : undefined), []),
+        new Promise((resolve) => setTimeout(() => resolve([]), 6500))
+      ])
+    : Promise.resolve([]);
+  const webPromise = (runAll || mode === 'web' || mode === 'pdf' || mode === 'ipcam')
+    ? Promise.race([
+        safe(getWebSearchPool(effectiveWebQuery, torOn), rustFastResults),
+        new Promise((resolve) => setTimeout(() => resolve(rustFastResults), mode === 'ipcam' ? 3500 : pplTimeout(0, 2900)))
+      ])
+    : Promise.resolve([]);
+  const newsPromise = (runAll || mode === 'news')
+    ? Promise.race([
+        safe(searchComprehensiveNews(q, torOn), []),
+        new Promise((resolve) => setTimeout(() => resolve([]), mode === 'news' ? 3500 : pplTimeout(4, 2400)))
+      ])
+    : Promise.resolve([]);
+  const onionPromise = (runAll || mode === 'tor')
+    ? Promise.race([
+        safe(searchOnionLinks(q), []),
+        new Promise((resolve) => setTimeout(() => resolve([]), mode === 'tor' ? 4000 : 2500))
+      ])
+    : Promise.resolve([]);
+  const wikiPromise = runAll
+    ? Promise.race([
+        safe(fetchWikiTopicSummary(q, torOn), null),
+        new Promise((resolve) => setTimeout(() => resolve(null), pplTimeout(5, 1600)))
+      ])
+    : Promise.resolve(null);
+  const videosPromise = (runAll || mode === 'videos')
+    ? Promise.race([
+        safe(searchTopicVideos(q, mode === 'videos' ? 20 : 16, 0, torOn), []),
+        new Promise((resolve) => setTimeout(() => resolve([]), mode === 'videos' ? 3500 : pplTimeout(1, 2800)))
+      ])
+    : Promise.resolve([]);
+  const imagesPromise = (runAll || mode === 'images')
+    ? Promise.race([
+        safe(searchTopicImages(q, torOn), []),
+        new Promise((resolve) => setTimeout(() => resolve([]), mode === 'images' ? 3500 : pplTimeout(2, 2800)))
+      ])
+    : Promise.resolve([]);
+  const relatedPromise = (runAll || mode === 'web')
+    ? Promise.race([
+        safe(fetchSuggestPhrases(q, false), []),
+        new Promise((resolve) => setTimeout(() => resolve([]), 1000))
+      ])
+    : Promise.resolve([]);
+
+  const [results, news, related, onionResults, wikiResult, videosResult, imagesResult, ipCamResults] = await Promise.all([
     webPromise,
     newsPromise,
-    safe(fetchSuggestPhrases(q, torOn), []),
+    relatedPromise,
     onionPromise,
     wikiPromise,
     videosPromise,
-    imagesPromise
+    imagesPromise,
+    ipCamPromise
   ]);
 
   const newsUrls = new Set((news || []).map((item) => normalizeSearchUrl(item.url)));
+  const mergedWebAndPpl = [];
+  const seenMerged = new Set();
+  for (const item of [...(rustFastResults || []), ...(results || [])]) {
+    if (!item || !item.url) continue;
+    const mk = normalizeSearchUrl(item.url);
+    if (!mk || seenMerged.has(mk)) continue;
+    seenMerged.add(mk);
+    mergedWebAndPpl.push(item);
+  }
+  let finalResults = spreadResultsByHost(
+    mergedWebAndPpl.filter((item) => !newsUrls.has(normalizeSearchUrl(item.url))),
+    2
+  );
+  if (finalResults.length < 5 && Array.isArray(news) && news.length > 0) {
+    const seenFinal = new Set(finalResults.map((item) => normalizeSearchUrl(item.url)));
+    for (const n of news) {
+      if (!n || !n.url) continue;
+      const nk = normalizeSearchUrl(n.url);
+      if (!nk || seenFinal.has(nk)) continue;
+      seenFinal.add(nk);
+      finalResults.push({
+        title: n.title || n.url,
+        url: n.url,
+        snippet: n.snippet || '',
+        date: n.date || '',
+        source: 'ppl-engine',
+        host: safeHostname(n.url)
+      });
+      if (finalResults.length >= 10) break;
+    }
+  }
+  if (mode === 'pdf') {
+    const isPdfItem = (item) => /\.pdf(?:[?#]|$)/i.test(String(item && item.url || '')) || /\bpdf\b/i.test(String(item && item.title || '') + ' ' + String(item && item.snippet || ''));
+    const pdfOnly = finalResults.filter(isPdfItem);
+    pdfOnly.sort((a, b) => {
+      const aExt = /\.pdf(?:[?#]|$)/i.test(String(a.url || '')) ? 1 : 0;
+      const bExt = /\.pdf(?:[?#]|$)/i.test(String(b.url || '')) ? 1 : 0;
+      return bExt - aExt;
+    });
+    finalResults = pdfOnly;
+  } else if (mode === 'ipcam') {
+    const blockedAppHosts = /(?:apkmirror|apkpure|play\.google\.com|browsercam|github\.com|uptodown|softonic|malavida|wikipedia\.org)/i;
+    const scoreIpCam = (item) => {
+      const u = String(item && item.url || '');
+      const txt = `${item && item.title || ''} ${item && item.snippet || ''} ${u}`;
+      let s = 0;
+      if (/https?:\/\/\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?/i.test(u)) s += 10;
+      if (/view\/index\.shtml|mjpg|video\.mjpg|snapshot\.cgi|axis-cgi|viewerframe|insecam|opentopia|oneshotimage|nphmotionjpeg/i.test(txt)) s += 5;
+      if (/cam|camera|câmera|ao vivo|live/i.test(txt)) s += 1;
+      return s;
+    };
+    const webCamFiltered = finalResults.filter((item) => !blockedAppHosts.test(String(item && item.url || '')) && scoreIpCam(item) >= 5);
+    const combinedIpCams = [...(ipCamResults || []), ...webCamFiltered];
+    const seenCam = new Set();
+    finalResults = combinedIpCams.filter((item) => {
+      const k = normalizeSearchUrl(item && item.url || '');
+      if (!k || seenCam.has(k)) return false;
+      seenCam.add(k);
+      return true;
+    }).sort((a, b) => scoreIpCam(b) - scoreIpCam(a));
+    if (isDirectPublicIp) {
+      const directCamUrl = `http://${q.replace(/^https?:\/\//i, '')}`;
+      if (!finalResults.some((item) => String(item.url || '').includes(q))) {
+        finalResults.unshift({
+          title: `📹 Câmera IP acessível (${q})`,
+          url: directCamUrl,
+          snippet: 'Acesso direto ao endereço IP público informado pelo usuário.',
+          source: 'ip-direct',
+          host: safeHostname(directCamUrl) || q,
+        });
+      }
+    }
+  }
   const data = {
     q,
+    mode,
     viaTor: torOn,
     wiki: wikiResult,
     videos: videosResult || [],
@@ -4298,12 +4867,39 @@ async function getRichSearchData(query, useTor = false) {
     onion: onionResults || [],
     news: news || [],
     related: (related || []).filter((phrase) => String(phrase).toLowerCase() !== q.toLowerCase()).slice(0, 10),
-    results: (results || []).filter((item) => !newsUrls.has(normalizeSearchUrl(item.url))),
+    results: finalResults,
     sources: Array.from(new Set((results || []).map((item) => item.source).filter(Boolean)))
   };
   // Guardar uma busca com conteúdo no cache por 3 minutos
-  if (data.results.length || data.wiki || data.videos.length || data.images.length) {
+  if (data.results.length || data.wiki || data.videos.length || data.images.length || data.onion.length || data.news.length) {
     richSearchCache.set(key, { t: Date.now(), data });
+  }
+  // Pré-aquece os 2 primeiros links .onion em segundo plano via tor_proxy.ppl
+  if (Array.isArray(data.onion) && data.onion.length > 0 && onionSearch && typeof onionSearch.checkOnionAlive === 'function') {
+    setImmediate(() => {
+      data.onion.slice(0, 2).forEach((item) => {
+        if (item && item.url && item.url.includes('.onion')) {
+          onionSearch.checkOnionAlive(item.url, 3200).catch(() => {});
+        }
+      });
+    });
+  }
+  // Auto-alimenta o índice BM25 em Rust em segundo plano (sem bloquear a resposta e sem guardar dados do usuário)
+  if ((mode === 'all' || mode === 'web') && Array.isArray(finalResults) && finalResults.length > 0) {
+    setImmediate(() => {
+      try {
+        const docsToIndex = finalResults
+          .filter((item) => item && item.url && /^https?:\/\//i.test(item.url) && !isOnionHref(item.url))
+          .slice(0, 15)
+          .map((item) => ({
+            url: nativeCore.stripTrackingParams(item.url),
+            title: item.title || '',
+            snippet: item.snippet || '',
+            source: item.source || 'web'
+          }));
+        if (docsToIndex.length > 0) nativeCore.indexDocumentsBatch(docsToIndex);
+      } catch (e) {}
+    });
   }
   return data;
 }
@@ -4685,7 +5281,7 @@ function ensureAbsoluteUrl(url) {
   let s = String(url || '').trim();
   if (!s) return '';
   if (!/^https?:\/\//i.test(s)) s = 'https://' + s.replace(/^\/+/, '');
-  return s;
+  return nativeCore.stripTrackingParams(s);
 }
 
 function normalizeSearchUrl(url) {
@@ -4697,13 +5293,178 @@ function normalizeSearchUrl(url) {
   }
 }
 
-async function getUrlSuggestions({ query, page = 0, useTor = false }) {
+async function searchWebPageOffset(query, pageNum = 1, useTor = false) {
   const q = String(query || '').trim();
+  if (!q) return [];
+  const p = Math.max(1, parseInt(pageNum, 10) || 1);
+  const viaTor = Boolean(useTor && isAppTorEnabled());
+  const allowAdult = isAdultSearchQuery(q);
+  const b1 = p * 14 + 1;
+  const b2 = p * 14 + 8;
+  const bingFirst = p * 10 + 1;
+  const yahooBase = 'https://br.search.yahoo.com/search?p=' + encodeURIComponent(q) + '&ei=UTF-8';
+  const reqOpts = {
+    headers: {
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+      'User-Agent': BROWSER_UA
+    },
+    useTor: viaTor,
+    timeoutMs: viaTor ? 3500 : 3500
+  };
+  try {
+    let [yh1, yh2, bingHtml] = await Promise.all([
+      fetchBrowserText(`${yahooBase}&b=${b1}`, reqOpts).catch(() => ''),
+      fetchBrowserText(`${yahooBase}&b=${b2}`, reqOpts).catch(() => ''),
+      fetchBrowserText(bingSearchUrl('/search', q, `&first=${bingFirst}`), reqOpts).catch(() => '')
+    ]);
+    let raw = [
+      ...parseYahooHtml(yh1),
+      ...parseYahooHtml(yh2),
+      ...(parseBingHtml(bingHtml) || [])
+    ];
+    if (raw.length < 5 && viaTor) {
+      const proxyRetryOpts = { ...reqOpts, useTor: true, timeoutMs: 3800 };
+      const [dyh1, dBing, dDuck] = await Promise.all([
+        fetchBrowserText(`${yahooBase}&b=${b1}`, proxyRetryOpts).catch(() => ''),
+        fetchBrowserText(bingSearchUrl('/search', q, `&first=${bingFirst}`), proxyRetryOpts).catch(() => ''),
+        searchDuckDuckGoHtml(q, true).catch(() => [])
+      ]);
+      raw = [
+        ...raw,
+        ...parseYahooHtml(dyh1),
+        ...(parseBingHtml(dBing) || []),
+        ...(Array.isArray(dDuck) ? dDuck : [])
+      ];
+    }
+    const seen = new Set();
+    const out = [];
+    for (const item of raw) {
+      if (!item || !item.url || !/^https?:\/\//i.test(item.url)) continue;
+      if (!allowAdult && isAdultSearchResult(item)) continue;
+      const cleanUrl = nativeCore.stripTrackingParams(item.url);
+      if (isOnionHref(cleanUrl) || isMediaStreamingUrl(cleanUrl) || nativeCore.isTrackerOrAd(cleanUrl)) continue;
+      const k = normalizeSearchUrl(cleanUrl);
+      if (!k || seen.has(k)) continue;
+      seen.add(k);
+      out.push({
+        ...item,
+        url: cleanUrl,
+        host: safeHostname(cleanUrl)
+      });
+    }
+    return out;
+  } catch (e) {
+    return [];
+  }
+}
+
+async function getUrlSuggestions({ query, page = 0, useTor = false, filter = 'all' }) {
+  const q = sanitizeSearchFieldInput(query);
   const p = Math.max(0, parseInt(page, 10) || 0);
+  const mode = String(filter || 'all').toLowerCase().trim();
   const suggestions = [];
   if (!q) return { success: true, q, page: p, hasMore: false, suggestions };
 
   const safe = (promise, fallback) => promise.catch(() => fallback);
+  const allowAdult = isAdultSearchQuery(q);
+  const queryTokens = searchQueryTokens(q);
+
+  // Modo exclusivo de Câmeras IP: carrega apenas câmeras IP públicas do tema/país/cidade pesquisado
+  if (mode === 'ipcam') {
+    const [cams, prevCams] = await Promise.all([
+      safe(searchPublicIpCameras(q, 18, p), []),
+      p > 0 ? safe(searchPublicIpCameras(q, 18, p - 1), []) : Promise.resolve([])
+    ]);
+    const prevUrls = new Set((prevCams || []).slice(0, p === 1 ? 10 : 18).map((c) => c && c.url).filter(Boolean));
+    (cams || []).forEach((cam) => {
+      if (!cam || !cam.url || prevUrls.has(cam.url)) return;
+      suggestions.push({
+        kind: 'ipcam',
+        isIpCam: true,
+        title: cam.title || `📹 Câmera IP (${cam.host || cam.url})`,
+        subtitle: cam.host || cam.url,
+        url: cam.url,
+        image: cam.image || cam.url,
+        snippet: cam.snippet || `IP acessível na internet: ${cam.url}`,
+        badge: '🟢 CÂMERA IP AO VIVO',
+        source: 'ip-cam'
+      });
+    });
+    if (p === 0 && suggestions.length === 0) {
+      const dorkQuery = `${q} (inurl:"view/index.shtml" OR inurl:"ViewerFrame?Mode=" OR inurl:"axis-cgi/mjpg" OR inurl:"MultiCameraFrame") -apk -play.google`;
+      const webPool = await Promise.race([
+        safe(getWebSearchPool(dorkQuery, false), []),
+        new Promise((resolve) => setTimeout(() => resolve([]), 3200))
+      ]);
+      const blockedHosts = /(?:apkmirror|apkpure|play\.google\.com|browsercam|github\.com|uptodown|softonic|malavida|wikipedia\.org)/i;
+      for (const item of (webPool || [])) {
+        const u = String(item && item.url || '');
+        if (!u || blockedHosts.test(u)) continue;
+        const txt = `${item && item.title || ''} ${item && item.snippet || ''} ${u}`;
+        if (!/https?:\/\/\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?|view\/index\.shtml|mjpg|video\.mjpg|snapshot\.cgi|axis-cgi|viewerframe|insecam|opentopia|oneshotimage|nphmotionjpeg/i.test(txt)) continue;
+        suggestions.push({
+          kind: 'ipcam',
+          isIpCam: true,
+          title: item.title || `📹 Câmera IP (${safeHostname(u) || u})`,
+          subtitle: item.host || safeHostname(u) || u,
+          url: u,
+          image: u,
+          snippet: item.snippet || `Stream ou página de câmera IP: ${u}`,
+          badge: '🟢 CÂMERA IP AO VIVO',
+          source: 'ip-cam'
+        });
+        if (suggestions.length >= 12) break;
+      }
+    }
+    return {
+      success: true,
+      q,
+      page: p,
+      hasMore: suggestions.length >= 2 && p < 12,
+      suggestions,
+      generatedByAi: false
+    };
+  }
+
+  // Modo exclusivo de PDF: carrega apenas documentos PDF relacionados ao tema pesquisado
+  if (mode === 'pdf') {
+    const pdfQuery = /\bfiletype:pdf\b/i.test(q) ? q : `${q} filetype:pdf`;
+    const isPdfItem = (item) => /\.pdf(?:[?#]|$)/i.test(String(item && item.url || '')) || /\bpdf\b/i.test(String(item && item.title || '') + ' ' + String(item && item.snippet || ''));
+    const [pool0, offsetPool] = await Promise.all([
+      p === 0 ? safe(getWebSearchPool(pdfQuery, false), []) : Promise.resolve([]),
+      safe(searchWebPageOffset(pdfQuery, Math.max(1, p), false), [])
+    ]);
+    const combinedPdf = [...(pool0 || []), ...(offsetPool || [])].filter(isPdfItem);
+    const pdfFiltered = filterOffTopic(combinedPdf, queryTokens);
+    const seenPdf = new Set();
+    pdfFiltered.forEach((r) => {
+      if (!r || !r.url) return;
+      if (!allowAdult && isAdultSearchResult(r)) return;
+      const normKey = normalizeSearchUrl(r.url);
+      if (!normKey || seenPdf.has(normKey)) return;
+      seenPdf.add(normKey);
+      const host = safeHostname(r.url) || r.url;
+      suggestions.push({
+        kind: 'pdf',
+        isPdf: true,
+        title: sanitizeSearchText(r.title || host, decodeHtmlEntities) || host,
+        subtitle: host,
+        url: r.url,
+        snippet: sanitizeSearchText(r.snippet || '', decodeHtmlEntities),
+        badge: '📄 DOCUMENTO PDF',
+        source: r.source || 'pdf'
+      });
+    });
+    return {
+      success: true,
+      q,
+      page: p,
+      hasMore: suggestions.length >= 2 && p < 12,
+      suggestions,
+      generatedByAi: false
+    };
+  }
 
   if (p === 0) {
     if (isOnionHref(q)) {
@@ -4741,17 +5502,17 @@ async function getUrlSuggestions({ query, page = 0, useTor = false }) {
     });
   }
 
-  // Na página 0, usa orçamento rápido para nunca travar o autocomplete no celular
+  // Sempre usa deadline para nunca travar o autocomplete nem o botão "Carregar mais resultados"
   const withDeadline = (promise, ms, fallback) => Promise.race([
     safe(promise, fallback),
     new Promise((resolve) => setTimeout(() => resolve(fallback), ms))
   ]);
   const poolPromise = (p === 0)
     ? withDeadline(getWebSearchPool(q, useTor), 2400, null)
-    : safe(getWebSearchPool(q, useTor), []);
+    : withDeadline(getWebSearchPool(q, useTor), 2800, []);
   const phrasesPromise = (p === 0)
     ? withDeadline(fetchSuggestPhrases(q, useTor), 1600, [])
-    : safe(fetchSuggestPhrases(q, useTor), []);
+    : withDeadline(fetchSuggestPhrases(q, useTor), 1400, []);
   const onionPromise = (p === 0) ? withDeadline(searchOnionLinks(q), 1500, []) : Promise.resolve([]);
   const wikiPromise = (p === 0) ? withDeadline(fetchWikiTopicSummary(q), 1500, null) : Promise.resolve(null);
   const newsPromise = (p === 0) ? withDeadline(searchGoogleNewsRss(q, 2), 1500, []) : Promise.resolve([]);
@@ -4764,9 +5525,23 @@ async function getUrlSuggestions({ query, page = 0, useTor = false }) {
     newsPromise
   ]);
 
-  const webPool = Array.isArray(pool)
-    ? pool
-    : (nativeCore.searchLocalIndex(q, 10, false) || []);
+  const pplLocalHits = (nativeCore.searchLocalIndex(q, 60, false) || []).map((h) => ({
+    ...h,
+    source: 'ppl-engine'
+  }));
+  const seenWebKey = new Set();
+  const rawWebPool = [];
+  for (const item of [...pplLocalHits, ...(Array.isArray(pool) ? pool : [])]) {
+    if (!item || !item.url) continue;
+    const k = normalizeSearchUrl(item.url);
+    if (!k || seenWebKey.has(k)) continue;
+    seenWebKey.add(k);
+    rawWebPool.push(item);
+  }
+  const webPool = filterOffTopic(
+    rawWebPool.filter((r) => allowAdult || !isAdultSearchResult(r)),
+    queryTokens
+  );
   const phraseList = Array.isArray(phrases) ? phrases : [];
   const onionList = Array.isArray(onionLinks) ? onionLinks : [];
 
@@ -4833,18 +5608,14 @@ async function getUrlSuggestions({ query, page = 0, useTor = false }) {
     let host = r.url;
     try { host = new URL(r.url).hostname.replace(/^www\./, ''); } catch (e) { swallowed(e, 'server:getUrlSuggestions@4236'); }
     const badgeMap = {
-      yahoo: 'Yahoo',
-      bing: 'Bing',
-      duckduckgo: 'Duck',
-      google: 'Google',
-      brave: 'Brave',
-      yandex: 'Yandex',
+      'ppl-engine': '⚡ Motor PPL',
+      'rust-bm25': '⚡ Motor PPL',
       wikipedia: 'Wiki'
     };
     const consensus = Number(r.consensusCount) || 1;
     const badge = consensus >= 2
-      ? `✓ ${consensus} fontes`
-      : (badgeMap[r.source] || '');
+      ? `✓ ${consensus} fontes (PPL)`
+      : (badgeMap[r.source] || '⚡ Motor PPL');
     const cachedPv = pagePreviewCache.get(r.url);
     const itemImg = (cachedPv && cachedPv.data && cachedPv.data.image) || r.image || '';
     const itemFav = (cachedPv && cachedPv.data && cachedPv.data.favicon) || r.favicon || '';
@@ -4866,41 +5637,79 @@ async function getUrlSuggestions({ query, page = 0, useTor = false }) {
     };
   }
 
+  const isOnTopicForQuery = (r) => {
+    if (!r || !r.url) return false;
+    if (!allowAdult && isAdultSearchResult(r)) return false;
+    if (queryTokens.length === 0) return true;
+    const text = normalizeForMatch(`${r.title || ''} ${r.snippet || ''} ${r.url || ''}`);
+    const matched = queryTokens.filter((tok) => {
+      if (text.includes(tok)) return true;
+      if (tok.length >= 5 && text.includes(tok.slice(0, tok.length - 1))) return true;
+      return false;
+    });
+    const minRequired = queryTokens.length >= 3 ? Math.ceil(queryTokens.length * 0.6) : queryTokens.length;
+    return matched.length >= minRequired;
+  };
+
   const webSlice = webPool.slice(start, start + pageSize);
   webSlice.forEach((r) => {
-    if (isOnionHref(r.url)) return;
+    if (isOnionHref(r.url) || !isOnTopicForQuery(r)) return;
     if (suggestions.some((s) => normalizeSearchUrl(s.url) === normalizeSearchUrl(r.url))) return;
     suggestions.push(formatSuggestSiteItem(r));
   });
 
   let hasMore = (start + pageSize) < webPool.length;
-  // Se o lote inicial tiver menos que pageSize ou o pool principal esgotar, busca termos derivados com filtro de relevância
-  if (suggestions.length < pageSize || !hasMore) {
-    const candidates = (phraseList || []).filter((ph) => String(ph).toLowerCase() !== q.toLowerCase());
-    const fallbackCandidates = [
-      q + ' site',
-      q + ' oficial',
-      q + ' 2026',
-      q + ' novidades',
-      q + ' brasil',
-      q + ' guia',
-      q + ' artigos'
-    ];
-    const poolOfPhrases = candidates.length ? candidates.concat(fallbackCandidates) : fallbackCandidates;
-    let phraseIndex = Math.max(0, p - Math.max(1, Math.floor(webPool.length / pageSize)));
+  // Quando precisar de mais páginas, pagina diretamente nos motores para a query exata mantendo 100% no tema
+  if (p >= 1 || suggestions.length < pageSize) {
+    const idxMod = pplRuntime ? pplRuntime.loadNativeModule('search_index') : null;
+    const rankMod = pplRuntime ? pplRuntime.loadNativeModule('search_rank') : null;
+    const urlKey = (u) => {
+      const norm = normalizeSearchUrl(u);
+      if (!norm) return '';
+      return (idxMod && typeof idxMod.url_hash_fnv1a === 'function') ? String(idxMod.url_hash_fnv1a(norm)) : norm;
+    };
+    const seenUrls = new Set(suggestions.map((s) => urlKey(s.url)).filter(Boolean));
+    webPool.slice(0, start).forEach((r) => {
+      const k = urlKey(r.url);
+      if (k) seenUrls.add(k);
+    });
+
+    if (p >= 1) {
+      const pagedItems = await withDeadline(searchWebPageOffset(q, p, useTor), 3500, []);
+      const onTopicPaged = pagedItems
+        .filter((r) => isOnTopicForQuery(r) && !(rankMod && typeof rankMod.is_spam_url === 'function' && rankMod.is_spam_url(String(r.url || ''))))
+        .map((r) => ({ r, rel: scoreSearchRelevance(r, q) }))
+        .filter((x) => x.rel >= 3)
+        .sort((a, b) => b.rel - a.rel);
+      onTopicPaged.forEach(({ r }) => {
+        if (suggestions.length >= pageSize) return;
+        const k = urlKey(r.url);
+        if (!k || seenUrls.has(k) || isOnionHref(r.url)) return;
+        seenUrls.add(k);
+        suggestions.push(formatSuggestSiteItem(r));
+      });
+    }
+
+    // Se ainda precisar complementar, usa apenas frases derivadas que contenham os termos da busca original
+    const onTopicPhrases = (phraseList || []).filter((ph) => {
+      const normPh = normalizeForMatch(ph);
+      if (!normPh || normPh === normalizeForMatch(q)) return false;
+      return queryTokens.every((tok) => normPh.includes(tok) || (tok.length >= 5 && normPh.includes(tok.slice(0, tok.length - 1))));
+    });
+
+    let phraseIndex = Math.max(0, p - 1);
     let extraHops = 0;
-    while (suggestions.length < pageSize && phraseIndex < poolOfPhrases.length && extraHops < 2) {
+    while (suggestions.length < pageSize && phraseIndex < onTopicPhrases.length && extraHops < 1) {
       extraHops += 1;
-      const extraQ = poolOfPhrases[phraseIndex];
+      const extraQ = onTopicPhrases[phraseIndex];
       phraseIndex += 1;
       if (!extraQ) break;
-      const extraRaw = await safe(getWebSearchPool(extraQ, useTor), []);
-      const scoredExtra = extraRaw
+      const extraRaw = await withDeadline(getWebSearchPool(extraQ, useTor), 2600, []);
+      const filteredExtra = (extraRaw || [])
+        .filter((r) => isOnTopicForQuery(r))
         .map((r) => ({ r, rel: scoreSearchRelevance(r, q) }))
+        .filter((x) => x.rel >= 4)
         .sort((a, b) => b.rel - a.rel);
-      const hasRelevant = scoredExtra.some((x) => x.rel > 0);
-      const filteredExtra = hasRelevant ? scoredExtra.filter((x) => x.rel > 0) : scoredExtra;
-      const seenUrls = new Set(suggestions.map((s) => normalizeSearchUrl(s.url)));
       filteredExtra.forEach(({ r }) => {
         if (suggestions.length >= pageSize) return;
         const k = normalizeSearchUrl(r.url);
@@ -4909,7 +5718,7 @@ async function getUrlSuggestions({ query, page = 0, useTor = false }) {
         suggestions.push(formatSuggestSiteItem(r));
       });
     }
-    hasMore = phraseIndex < poolOfPhrases.length;
+    hasMore = (suggestions.length > 0 && p < 15) || phraseIndex < onTopicPhrases.length;
   }
 
   return { success: true, q, page: p, hasMore, suggestions, generatedByAi: false };
@@ -4919,6 +5728,7 @@ async function getUrlSuggestions({ query, page = 0, useTor = false }) {
 // Lê as metatags OpenGraph/Twitter/description da página encontrada, sem cookies,
 // e devolve imagem de capa, descrição, nome do site e favicon. Fica em cache por algumas horas.
 const pagePreviewCache = createLruCache({ maxEntries: 1500, ttlMs: 6 * 60 * 60 * 1000 });
+const previewImgBinaryCache = createLruCache({ maxEntries: 250, ttlMs: 30 * 60 * 1000 });
 const pagePreviewInflight = new Map();
 const PAGE_PREVIEW_TTL = 6 * 60 * 60 * 1000;
 const PAGE_PREVIEW_FAIL_TTL = 20 * 60 * 1000;
@@ -5053,7 +5863,7 @@ function isPreviewableUrl(raw) {
   }
 }
 
-async function getPagePreview(rawUrl, useTor = false) {
+async function getPagePreview(rawUrl, useTor = true) {
   const target = isPreviewableUrl(rawUrl);
   if (!target) return null;
   const key = target.href;
@@ -5061,11 +5871,12 @@ async function getPagePreview(rawUrl, useTor = false) {
   if (cached && Date.now() - cached.t < (cached.data ? PAGE_PREVIEW_TTL : PAGE_PREVIEW_FAIL_TTL)) return cached.data;
   if (pagePreviewInflight.has(key)) return pagePreviewInflight.get(key);
 
+  const effectiveTor = Boolean(useTor || isAppTorEnabled());
   const job = (async () => {
     let html = '';
     try {
       if (target.protocol === 'https:') {
-        html = await fetchBrowserText(key, { useTor, timeoutMs: 6500 });
+        html = await fetchBrowserText(key, { useTor, timeoutMs: useTor ? 3500 : 2200 });
       } else {
         html = await fetchHttpsText({
           hostname: target.hostname,
@@ -5075,7 +5886,7 @@ async function getPagePreview(rawUrl, useTor = false) {
           protocol: 'http:',
           agent: getOutboundAgent(useTor),
           headers: webSourceHeaders()
-        }, null, 6500);
+        }, null, useTor ? 3500 : 2200);
       }
     } catch (e) {
       html = '';
@@ -6789,7 +7600,7 @@ function searchDeezer(query, limit = 30, order = 'RANKING', index = 0) {
               duration: item.duration || 0,
               preview: proxyPreviewUrl(item.preview || ''),
               rank: item.rank || 0,
-              fullStreamUrl: `/api/stream-audio?title=${encodeURIComponent(safeTitle)}&artist=${encodeURIComponent(safeArtist)}`
+              fullStreamUrl: `/api/stream-audio?ppl=${encodeURIComponent(encryptPplPayload({ title: safeTitle, artist: safeArtist }))}`
             };
           });
           results.sort((a, b) => (b.rank || 0) - (a.rank || 0));
@@ -6852,7 +7663,7 @@ function mapDeezerTrack(item, extra = {}) {
     duration: item.duration || 0,
     preview: proxyPreviewUrl(item.preview || ''),
     rank: item.rank || 0,
-    fullStreamUrl: `/api/stream-audio?title=${encodeURIComponent(safeTitle)}&artist=${encodeURIComponent(safeArtist)}`
+    fullStreamUrl: `/api/stream-audio?ppl=${encodeURIComponent(encryptPplPayload({ title: safeTitle, artist: safeArtist }))}`
   }, extra);
 }
 
@@ -6964,7 +7775,7 @@ function mapPlaylistTrack(item, playlistTitle) {
     artist,
     album: album.title || playlistTitle || '',
     cover: proxyCoverUrl(album.cover_medium || album.cover_big || album.cover_small || album.cover || ''),
-    fullStreamUrl: `/api/stream-audio?title=${encodeURIComponent(item.title)}&artist=${encodeURIComponent(artist)}`,
+    fullStreamUrl: `/api/stream-audio?ppl=${encodeURIComponent(encryptPplPayload({ title: item.title, artist }))}`,
     duration: item.duration || 0,
     preview: proxyPreviewUrl(item.preview || ''),
     rank: item.rank || 0
@@ -7038,7 +7849,7 @@ async function buildMegaPlaylist(seedTracks = [], userQuery = '', targetCount = 
       artist: safeArtist,
       cover: track.cover && !track.cover.includes('5f448b1112674e1d51b32d665fec7db5') ? track.cover : '/papaleguas_logo.png',
       aiReason: track.aiReason || reason,
-      fullStreamUrl: `/api/stream-audio?title=${encodeURIComponent(safeTitle)}&artist=${encodeURIComponent(safeArtist)}`
+      fullStreamUrl: `/api/stream-audio?ppl=${encodeURIComponent(encryptPplPayload({ title: safeTitle, artist: safeArtist }))}`
     });
   };
 
@@ -7107,9 +7918,9 @@ function getFullAudioStream({ title, artist }) {
   const ytdlpPath = process.platform === 'win32' ? 'yt-dlp' : (fs.existsSync('/home/nain/.local/bin/yt-dlp') ? '/home/nain/.local/bin/yt-dlp' : 'yt-dlp');
   const baseArgs = [
     ...ytdlpProxyArgs(),
+    '--js-runtimes', 'node',
     '--no-playlist',
-    '--extractor-args', 'youtube:player_client=android,web;player_skip=webpage,configs',
-    '-f', 'ba[ext=m4a]/140/ba/b',
+    '-f', '140/ba[ext=m4a]/ba[acodec!=none]/ba/b',
     '--no-warnings',
     '--socket-timeout', '12',
     '-g'
@@ -7138,11 +7949,57 @@ const audioStreamPending = new Map();
 const videoStreamUrlCache = createLruCache({ maxEntries: 500, ttlMs: 60 * 60 * 1000 });
 const videoStreamPending = new Map();
 const playUrlCache = createLruCache({ maxEntries: 400, ttlMs: 30 * 60 * 1000 });
+const videoStreamKeepAliveAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 30000, maxSockets: 32 });
+
+function getPplVideoStreamMod() {
+  return pplRuntime ? pplRuntime.loadNativeModule('video_stream') : null;
+}
+
+function prewarmVideoStreams(videos, lang = 'pt', maxCount = 4) {
+  if (!Array.isArray(videos) || videos.length === 0) return;
+  const langShort = String(lang || 'pt').split('-')[0].replace(/[^a-zA-Z]/g, '').toLowerCase() || 'pt';
+  const vsMod = getPplVideoStreamMod();
+  const candidates = [];
+  for (let i = 0; i < videos.length; i++) {
+    const v = videos[i];
+    const id = String(v && (v.id || v.videoId) || '').trim();
+    if (!id || !/^[a-zA-Z0-9_-]{6,20}$/.test(id)) continue;
+    const key = (vsMod && typeof vsMod.stream_cache_key === 'function')
+      ? String(vsMod.stream_cache_key(id, langShort))
+      : `${id}:${langShort}`;
+    if (videoStreamUrlCache.has(key) || videoStreamPending.has(key)) continue;
+    let prio = 100 - i * 10;
+    if (vsMod && typeof vsMod.score_prewarm_priority === 'function') {
+      try {
+        prio = Number(vsMod.score_prewarm_priority(Boolean(v && v.isGoogleTrend), Boolean(v && (v.liked || v.relatedToLiked)), i)) || 0;
+      } catch (e) {}
+    }
+    candidates.push({ id, prio });
+  }
+  candidates.sort((a, b) => b.prio - a.prio);
+  const ids = candidates.slice(0, maxCount).map((c) => c.id);
+  if (ids.length === 0) return;
+  // Executa no máximo 2 resoluções simultâneas em segundo plano para não competir com o player ativo
+  let cursor = 0;
+  const runWorker = async () => {
+    while (cursor < ids.length) {
+      const id = ids[cursor++];
+      await getFullVideoStreamByVideoId(id, langShort).catch(() => {});
+    }
+  };
+  setImmediate(() => {
+    const workers = Math.min(2, ids.length);
+    for (let i = 0; i < workers; i++) runWorker();
+  });
+}
 
 function getFullVideoStreamByVideoId(videoId, lang = 'pt') {
   if (!videoId) return Promise.resolve({ success: false, error: 'ID ausente' });
   const langShort = String(lang || 'pt').split('-')[0].replace(/[^a-zA-Z]/g, '').toLowerCase() || 'pt';
-  const cacheKey = `${videoId}:${langShort}`;
+  const vsMod = getPplVideoStreamMod();
+  const cacheKey = (vsMod && typeof vsMod.stream_cache_key === 'function')
+    ? String(vsMod.stream_cache_key(String(videoId), langShort))
+    : `${videoId}:${langShort}`;
   if (videoStreamUrlCache.has(cacheKey)) {
     const cached = videoStreamUrlCache.get(cacheKey);
     if (Date.now() - cached.timestamp < 4 * 60 * 60 * 1000) {
@@ -7156,17 +8013,20 @@ function getFullVideoStreamByVideoId(videoId, lang = 'pt') {
       ...ytdlpProxyArgs(),
       '--js-runtimes', 'node',
       '--no-playlist',
-      '--extractor-args', `youtube:player_client=default,android,ios;lang=${langShort}`,
+      '--extractor-args', `youtube:player_client=android,web;lang=${langShort}`,
       '-f', `b[language^=${langShort}][acodec!=none][vcodec!=none]/18[language^=${langShort}]/18/b[acodec!=none][vcodec!=none]/best[acodec!=none][vcodec!=none]/b/best`,
       '--no-warnings',
-      '--socket-timeout', '12',
+      '--socket-timeout', '8',
       '-g',
       'https://www.youtube.com/watch?v=' + encodeURIComponent(videoId)
-    ], { timeout: 15000 }, (error, stdout) => {
+    ], { timeout: 12000 }, (error, stdout) => {
       if (error) return resolve({ success: false, error: error.message });
       const lines = (stdout || '').trim().split('\n').map(l => l.trim()).filter(l => l.startsWith('http'));
       const streamUrl = lines[0] || '';
-      if (streamUrl && streamUrl.startsWith('http')) {
+      const isValid = (vsMod && typeof vsMod.is_valid_stream_url === 'function')
+        ? Boolean(vsMod.is_valid_stream_url(streamUrl))
+        : (streamUrl && streamUrl.startsWith('http'));
+      if (isValid) {
         videoStreamUrlCache.set(cacheKey, { url: streamUrl, timestamp: Date.now() });
         resolve({ success: true, streamUrl });
       } else {
@@ -7205,6 +8065,618 @@ function resolvePlayableMediaUrl(pageUrl) {
       resolve(data);
     });
   });
+}
+
+const externalVideoInfoCache = createLruCache({ maxEntries: 300, ttlMs: 20 * 60 * 1000 });
+
+function matchExternalVideoWatchUrl(inputUrl) {
+  let u = inputUrl;
+  if (typeof inputUrl === 'string') {
+    try { u = new URL(inputUrl); } catch (e) { return null; }
+  }
+  if (!u || !u.hostname) return null;
+  const host = String(u.hostname || '').toLowerCase();
+  const p = String(u.pathname || '');
+
+  // YouTube
+  if (/(?:^|\.)youtube\.com$/i.test(host)) {
+    const v = u.searchParams && u.searchParams.get('v');
+    if (p === '/watch' && v && /^[a-zA-Z0-9_-]{11}$/.test(v)) {
+      return { platform: 'youtube', videoId: v, href: u.href };
+    }
+    const sm = p.match(/^\/(?:shorts|embed|v)\/([a-zA-Z0-9_-]{11})/i);
+    if (sm) return { platform: 'youtube', videoId: sm[1], href: u.href };
+  }
+  if (/^youtu\.be$/i.test(host)) {
+    const ym = p.match(/^\/([a-zA-Z0-9_-]{11})/i);
+    if (ym) return { platform: 'youtube', videoId: ym[1], href: u.href };
+  }
+
+  // TikTok
+  if (/(?:^|\.)tiktok\.com$/i.test(host)) {
+    const tm = p.match(/\/(?:@[^/]+\/video|v|player\/v1|embed\/v2)\/(\d+)/i);
+    if (tm) return { platform: 'tiktok', videoId: tm[1], href: u.href };
+    if (/^\/t\/[a-zA-Z0-9]+/i.test(p)) return { platform: 'tiktok', videoId: '', href: u.href };
+  }
+  if (/^(?:vm|vt)\.tiktok\.com$/i.test(host) && p.length > 1) {
+    return { platform: 'tiktok', videoId: '', href: u.href };
+  }
+
+  // Dailymotion
+  if (/(?:^|\.)dailymotion\.com$/i.test(host)) {
+    const dm = p.match(/^\/(?:video|embed\/video)\/([a-zA-Z0-9]+)/i);
+    if (dm) return { platform: 'dailymotion', videoId: dm[1].split('_')[0], href: u.href };
+  }
+  if (/^dai\.ly$/i.test(host)) {
+    const dm = p.match(/^\/([a-zA-Z0-9]+)/i);
+    if (dm) return { platform: 'dailymotion', videoId: dm[1].split('_')[0], href: u.href };
+  }
+
+  // Vimeo
+  if (/(?:^|\.)vimeo\.com$/i.test(host)) {
+    const vm = p.match(/^\/(?:video\/)?(\d{5,})/i);
+    if (vm) return { platform: 'vimeo', videoId: vm[1], href: u.href };
+  }
+
+  // Kwai
+  if (/(?:^|\.)kwai\.com$/i.test(host) && /\/(?:photo|video)\/|\/@[^/]+\/video\//i.test(p)) {
+    return { platform: 'kwai', videoId: '', href: u.href };
+  }
+
+  return null;
+}
+
+function fetchJsonDirectFast(targetUrl, timeoutMs = 5000) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (val) => { if (!done) { done = true; resolve(val); } };
+    try {
+      const parsed = new URL(targetUrl);
+      const lib = parsed.protocol === 'http:' ? http : https;
+      const req = lib.get(parsed.href, {
+        agent: false,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept': 'application/json,text/plain,*/*'
+        }
+      }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          res.resume();
+          try {
+            const nextUrl = new URL(res.headers.location, parsed).href;
+            return fetchJsonDirectFast(nextUrl, timeoutMs).then(finish);
+          } catch (e) { return finish(null); }
+        }
+        if (res.statusCode !== 200) {
+          res.resume();
+          return finish(null);
+        }
+        let body = '';
+        res.on('data', (chunk) => {
+          body += chunk;
+          if (body.length > 512000) res.destroy();
+        });
+        res.on('end', () => {
+          try { finish(JSON.parse(body)); } catch (e) { finish(null); }
+        });
+      });
+      req.on('error', () => finish(null));
+      req.setTimeout(timeoutMs, () => { try { req.destroy(); } catch (e) {} finish(null); });
+    } catch (e) {
+      finish(null);
+    }
+  });
+}
+
+function runYtdlpDirectStream(targetUrl, timeoutMs = 12000) {
+  const ytdlpPath = process.platform === 'win32' ? 'yt-dlp' : (fs.existsSync('/home/nain/.local/bin/yt-dlp') ? '/home/nain/.local/bin/yt-dlp' : 'yt-dlp');
+  return new Promise((resolve) => {
+    execFile(ytdlpPath, [
+      '--no-playlist',
+      '--no-warnings',
+      '--socket-timeout', '10',
+      '-g',
+      targetUrl
+    ], { timeout: timeoutMs }, (err, stdout) => {
+      if (err) return resolve('');
+      const line = String(stdout || '').split('\n').map((s) => s.trim()).find((s) => /^https?:\/\//i.test(s)) || '';
+      resolve(line);
+    });
+  });
+}
+
+async function resolveExternalVideoInfo(rawUrl, fallbackTitle = '') {
+  const target = String(rawUrl || '').trim();
+  const matched = matchExternalVideoWatchUrl(target);
+  if (!matched) return null;
+
+  const cacheKey = `${matched.platform}:${matched.videoId || target}`;
+  const cached = externalVideoInfoCache.get(cacheKey);
+  if (cached && cached.streamUrl) return cached;
+
+  if (matched.platform === 'tiktok') {
+    const tikwmUrl = 'https://www.tikwm.com/api/?url=' + encodeURIComponent(target);
+    const json = await fetchJsonDirectFast(tikwmUrl, 5500);
+    if (json && json.code === 0 && json.data) {
+      const d = json.data;
+      const vidId = String(d.id || matched.videoId || '');
+      const streamUrl = String(d.play || d.hdplay || d.wmplay || '').trim();
+      const authorName = d.author ? (d.author.nickname || d.author.unique_id || 'TikTok') : 'TikTok';
+      const authorHandle = d.author && d.author.unique_id ? `@${d.author.unique_id}` : authorName;
+      const info = {
+        success: Boolean(streamUrl || vidId),
+        platform: 'tiktok',
+        platformLabel: 'TikTok',
+        videoId: vidId,
+        title: String(d.title || fallbackTitle || 'Vídeo do TikTok').trim(),
+        author: `${authorName} (${authorHandle})`,
+        poster: String(d.origin_cover || d.cover || '').trim(),
+        streamUrl,
+        streamType: 'mp4',
+        embedUrl: vidId ? `https://www.tiktok.com/player/v1/${vidId}?autoplay=1` : '',
+        originalUrl: target
+      };
+      if (info.streamUrl) externalVideoInfoCache.set(cacheKey, info);
+      return info;
+    }
+    const ytdlpStream = await runYtdlpDirectStream(target, 10000);
+    const vidId = matched.videoId || '';
+    const info = {
+      success: Boolean(ytdlpStream || vidId),
+      platform: 'tiktok',
+      platformLabel: 'TikTok',
+      videoId: vidId,
+      title: fallbackTitle || 'Vídeo do TikTok',
+      author: 'TikTok',
+      poster: '',
+      streamUrl: ytdlpStream,
+      streamType: /\.m3u8/i.test(ytdlpStream) ? 'hls' : 'mp4',
+      embedUrl: vidId ? `https://www.tiktok.com/player/v1/${vidId}?autoplay=1` : '',
+      originalUrl: target
+    };
+    if (info.streamUrl) externalVideoInfoCache.set(cacheKey, info);
+    return info;
+  }
+
+  if (matched.platform === 'dailymotion') {
+    const dmId = matched.videoId;
+    const cleanDmUrl = `https://www.dailymotion.com/video/${dmId}`;
+    const metaJson = await fetchJsonDirectFast(`https://www.dailymotion.com/player/metadata/video/${encodeURIComponent(dmId)}`, 2800);
+    let streamUrl = '';
+    if (metaJson && metaJson.qualities && typeof metaJson.qualities === 'object') {
+      const qualOrder = ['720', '480', '1080', '380', '240', 'auto'];
+      for (const qKey of qualOrder) {
+        const arr = metaJson.qualities[qKey];
+        if (Array.isArray(arr)) {
+          const mp4Item = arr.find((item) => item && item.url && /mp4/i.test(item.type || ''));
+          if (mp4Item && mp4Item.url) { streamUrl = mp4Item.url; break; }
+          const anyItem = arr.find((item) => item && item.url);
+          if (anyItem && anyItem.url && !streamUrl) streamUrl = anyItem.url;
+        }
+      }
+    }
+    if (!streamUrl) {
+      streamUrl = await runYtdlpDirectStream(cleanDmUrl, 10000);
+    }
+    const posters = (metaJson && metaJson.posters) || {};
+    const poster = posters['720'] || posters['480'] || posters['360'] || posters['240'] || '';
+    const ownerName = (metaJson && metaJson.owner && (metaJson.owner.screenname || metaJson.owner.username)) || 'Dailymotion';
+    const info = {
+      success: Boolean(streamUrl),
+      platform: 'dailymotion',
+      platformLabel: 'Dailymotion',
+      videoId: dmId,
+      title: String((metaJson && metaJson.title) || fallbackTitle || 'Vídeo Dailymotion').trim(),
+      author: ownerName,
+      poster: String(poster || '').trim(),
+      streamUrl: String(streamUrl || '').trim(),
+      streamType: /\.m3u8/i.test(streamUrl) ? 'hls' : 'mp4',
+      embedUrl: '',
+      originalUrl: cleanDmUrl
+    };
+    if (info.streamUrl) externalVideoInfoCache.set(cacheKey, info);
+    return info;
+  }
+
+  if (matched.platform === 'vimeo') {
+    const vimeoId = matched.videoId;
+    const streamUrl = await runYtdlpDirectStream(target, 10000);
+    const info = {
+      success: true,
+      platform: 'vimeo',
+      platformLabel: 'Vimeo',
+      videoId: vimeoId,
+      title: fallbackTitle || 'Vídeo Vimeo',
+      author: 'Vimeo',
+      poster: '',
+      streamUrl,
+      streamType: /\.m3u8/i.test(streamUrl) ? 'hls' : 'mp4',
+      embedUrl: vimeoId ? `https://player.vimeo.com/video/${vimeoId}?autoplay=1` : '',
+      originalUrl: target
+    };
+    if (info.streamUrl) externalVideoInfoCache.set(cacheKey, info);
+    return info;
+  }
+
+  const streamUrl = await runYtdlpDirectStream(target, 12000);
+  const info = {
+    success: Boolean(streamUrl),
+    platform: matched.platform,
+    platformLabel: matched.platform.toUpperCase(),
+    videoId: matched.videoId || '',
+    title: fallbackTitle || 'Vídeo',
+    author: matched.platformLabel || 'Web',
+    poster: '',
+    streamUrl,
+    streamType: /\.m3u8/i.test(streamUrl) ? 'hls' : 'mp4',
+    embedUrl: '',
+    originalUrl: target
+  };
+  if (info.streamUrl) externalVideoInfoCache.set(cacheKey, info);
+  return info;
+}
+
+function buildExternalVideoPlayerPage(info, clientId = 'client_default') {
+  const safeTitle = escapeHtml((info && info.title) || 'Reprodutor de Vídeo Papaléguas');
+  const safeAuthor = escapeHtml((info && info.author) || (info && info.platformLabel) || 'Vídeo');
+  const safePlatform = escapeHtml((info && info.platformLabel) || 'Vídeo');
+  const safeOriginalUrl = escapeHtml((info && info.originalUrl) || '');
+  const rawStreamUrl = String((info && info.streamUrl) || '').trim();
+  const proxiedStreamUrl = rawStreamUrl ? ('/api/external-video-stream?u=' + encodeURIComponent(rawStreamUrl)) : '';
+  const downloadStreamUrl = rawStreamUrl && info.streamType === 'mp4'
+    ? ('/api/external-video-stream?u=' + encodeURIComponent(rawStreamUrl) + '&dl=1')
+    : '';
+  const posterSrc = (info && info.poster)
+    ? ('/api/preview-img?ppl=' + encodeURIComponent(encryptPplPayload({ u: info.poster, clientId })))
+    : '';
+  const embedUrl = String((info && info.embedUrl) || '').trim();
+  const isVertical = info && (info.platform === 'tiktok' || info.platform === 'kwai');
+
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>🎬 ${safeTitle} • Papaléguas Video Player</title>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: radial-gradient(circle at 50% 20%, #111827 0%, #050811 100%);
+      color: #f8fafc;
+      font-family: 'Outfit', system-ui, -apple-system, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .vp-topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 18px;
+      background: rgba(10, 15, 28, 0.96);
+      border-bottom: 1px solid rgba(0, 240, 255, 0.2);
+      flex-wrap: wrap;
+    }
+    .vp-title-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+      flex: 1;
+    }
+    .vp-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 11px;
+      border-radius: 999px;
+      background: rgba(0, 240, 255, 0.16);
+      border: 1px solid rgba(0, 240, 255, 0.45);
+      color: #67e8f9;
+      font-size: 11.5px;
+      font-weight: 800;
+      letter-spacing: 0.4px;
+      white-space: nowrap;
+    }
+    .vp-title {
+      font-size: 14.5px;
+      font-weight: 700;
+      color: #fff;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .vp-controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .vp-btn {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      color: #e2e8f0;
+      padding: 7px 13px;
+      border-radius: 8px;
+      font-size: 12.5px;
+      font-weight: 600;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.18s;
+    }
+    .vp-btn:hover {
+      background: rgba(0, 240, 255, 0.18);
+      border-color: #38bdf8;
+      color: #fff;
+    }
+    .vp-btn.primary {
+      background: linear-gradient(135deg, #00f0ff 0%, #0284c7 100%);
+      color: #020617;
+      border-color: #38bdf8;
+      font-weight: 800;
+    }
+    .vp-stage {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+      gap: 14px;
+    }
+    .vp-player-box {
+      position: relative;
+      width: 100%;
+      max-width: ${isVertical ? '440px' : '1020px'};
+      background: #000;
+      border-radius: 16px;
+      overflow: hidden;
+      border: 1px solid rgba(0, 240, 255, 0.3);
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.85), 0 0 30px rgba(0, 240, 255, 0.12);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: ${isVertical ? '540px' : '420px'};
+    }
+    video#plExternalVideo {
+      width: 100%;
+      max-height: 78vh;
+      display: block;
+      background: #000;
+      outline: none;
+    }
+    iframe#plExternalEmbed {
+      width: 100%;
+      height: ${isVertical ? '720px' : '560px'};
+      max-height: 78vh;
+      border: 0;
+      display: none;
+      background: #000;
+    }
+    .vp-meta {
+      width: 100%;
+      max-width: ${isVertical ? '440px' : '1020px'};
+      background: rgba(15, 23, 42, 0.8);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .vp-author {
+      font-size: 13px;
+      color: #7dd3fc;
+      font-weight: 700;
+    }
+    .vp-status {
+      font-size: 12px;
+      color: #94a3b8;
+    }
+  </style>
+</head>
+<body>
+  <header class="vp-topbar">
+    <div class="vp-title-group">
+      <button type="button" class="vp-btn" onclick="if (window.parent && window.parent !== window) { window.parent.postMessage({ type: 'papaleguas-go-back' }, '*'); } else if (window.__plVideoGoBack) { window.__plVideoGoBack(); } else if (history.length > 1) { history.back(); } else { window.location.href='/search?filter=videos'; }">← Voltar</button>
+      <span class="vp-badge">▶ ${safePlatform}</span>
+      <span class="vp-title" title="${safeTitle}">${safeTitle}</span>
+    </div>
+    <div class="vp-controls">
+      ${embedUrl ? `<button type="button" class="vp-btn" id="btnToggleEmbed">📱 Alternar Player Embed</button>` : ''}
+      ${downloadStreamUrl ? `<a class="vp-btn primary" href="${escapeHtml(downloadStreamUrl)}" download>📥 Baixar MP4</a>` : ''}
+      <button type="button" class="vp-btn" id="btnFullscreen">⛶ Tela Cheia</button>
+    </div>
+  </header>
+  <main class="vp-stage">
+    <div class="vp-player-box" id="vpPlayerBox">
+      <video id="plExternalVideo" controls autoplay playsinline ${posterSrc ? `poster="${escapeHtml(posterSrc)}"` : ''}></video>
+      ${embedUrl ? `<iframe id="plExternalEmbed" src="about:blank" allow="autoplay; fullscreen; encrypted-media; picture-in-picture" allowfullscreen></iframe>` : ''}
+    </div>
+    <div class="vp-meta">
+      <div>
+        <div class="vp-author">${safeAuthor}</div>
+        <div style="font-size:13px;color:#e2e8f0;margin-top:2px;">${safeTitle}</div>
+      </div>
+      <div class="vp-status" id="vpStatusText">🟢 Reprodução direta sem anúncios</div>
+    </div>
+  </main>
+  <script>
+    (function() {
+      try {
+        if (window.parent && window.parent !== window && window.parent.location && window.parent.location.pathname === '/video-watch') {
+          return;
+        }
+      } catch (e) {}
+
+      window.__plVideoGoBack = function() {
+        try {
+          if (window.torBrowserAPI && typeof window.torBrowserAPI.sendToHost === 'function') {
+            window.torBrowserAPI.sendToHost('go-back');
+            return;
+          }
+        } catch (e) {}
+        try {
+          var app = (window.top && window.top !== window) ? window.top : ((window.parent && window.parent !== window) ? window.parent : null);
+          if (app) {
+            app.postMessage({ type: 'go-back' }, '*');
+            return;
+          }
+        } catch (e) {}
+        if (history.length > 1) history.back();
+        else window.location.href = '/search?filter=videos';
+      };
+
+      function notifyLoaded() {
+        try {
+          if (window.torBrowserAPI && typeof window.torBrowserAPI.sendToHost === 'function') {
+            window.torBrowserAPI.sendToHost('navigate-sync', { url: window.location.href, title: document.title, isFinal: true });
+            window.torBrowserAPI.sendToHost('page-loaded', { url: window.location.href });
+          }
+        } catch (e) {}
+        try {
+          var app = (window.top && window.top !== window) ? window.top : ((window.parent && window.parent !== window) ? window.parent : null);
+          if (app) {
+            app.postMessage({ type: 'navigate-sync', url: window.location.href, targetUrl: window.location.href, title: document.title, isFinal: true }, '*');
+            app.postMessage({ type: 'page-loaded', url: window.location.href }, '*');
+            app.postMessage({ type: 'papaleguas-hide-loading' }, '*');
+          }
+        } catch (e) {}
+      }
+      notifyLoaded();
+      window.addEventListener('load', notifyLoaded);
+
+      var streamUrl = ${JSON.stringify(proxiedStreamUrl)};
+      var streamType = ${JSON.stringify((info && info.streamType) || 'mp4')};
+      var embedUrl = ${JSON.stringify(embedUrl)};
+      var videoEl = document.getElementById('plExternalVideo');
+      var embedEl = document.getElementById('plExternalEmbed');
+      var statusEl = document.getElementById('vpStatusText');
+      var toggleBtn = document.getElementById('btnToggleEmbed');
+      var fsBtn = document.getElementById('btnFullscreen');
+      var boxEl = document.getElementById('vpPlayerBox');
+      var usingEmbed = false;
+      var hlsInstance = null;
+
+      function stopNativeVideo() {
+        if (hlsInstance) {
+          try { hlsInstance.stopLoad(); hlsInstance.detachMedia(); hlsInstance.destroy(); } catch (e) {}
+          hlsInstance = null;
+        }
+        if (videoEl) {
+          try {
+            videoEl.onerror = null;
+            videoEl.autoplay = false;
+            videoEl.muted = true;
+            videoEl.pause();
+            videoEl.removeAttribute('src');
+            videoEl.load();
+          } catch (e) {}
+        }
+      }
+
+      function startNativeVideo() {
+        if (!streamUrl || !videoEl) return;
+        videoEl.muted = false;
+        videoEl.autoplay = true;
+        if (streamType === 'hls') {
+          if (window.Hls && window.Hls.isSupported()) {
+            if (hlsInstance) {
+              try { hlsInstance.destroy(); } catch (e) {}
+            }
+            hlsInstance = new window.Hls({ maxBufferLength: 30 });
+            hlsInstance.loadSource(streamUrl);
+            hlsInstance.attachMedia(videoEl);
+            hlsInstance.on(window.Hls.Events.MANIFEST_PARSED, function() {
+              if (!usingEmbed) videoEl.play().catch(function(){});
+            });
+            hlsInstance.on(window.Hls.Events.ERROR, function(ev, data) {
+              if (data && data.fatal && embedUrl && !usingEmbed) switchToEmbed();
+            });
+          } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+            videoEl.src = streamUrl;
+            videoEl.play().catch(function(){});
+          }
+        } else {
+          videoEl.src = streamUrl;
+          videoEl.onerror = function() {
+            if (embedUrl && !usingEmbed) switchToEmbed();
+          };
+          videoEl.play().catch(function(){});
+        }
+      }
+
+      function switchToEmbed() {
+        if (!embedEl || !embedUrl) return;
+        usingEmbed = true;
+        stopNativeVideo();
+        videoEl.style.display = 'none';
+        embedEl.style.display = 'block';
+        if (embedEl.getAttribute('src') !== embedUrl) {
+          embedEl.src = embedUrl;
+        }
+        if (statusEl) statusEl.textContent = '📱 Player Oficial Incorporado Ativo';
+        if (toggleBtn) toggleBtn.textContent = '🎬 Voltar ao Player Nativo';
+      }
+
+      function switchToNative() {
+        if (!streamUrl) return;
+        usingEmbed = false;
+        if (embedEl) {
+          embedEl.style.display = 'none';
+          embedEl.src = 'about:blank';
+        }
+        videoEl.style.display = 'block';
+        startNativeVideo();
+        if (statusEl) statusEl.textContent = '🟢 Reprodução direta sem anúncios';
+        if (toggleBtn) toggleBtn.textContent = '📱 Alternar Player Embed';
+      }
+
+      window.addEventListener('message', function(ev) {
+        var d = ev && ev.data;
+        if (!d) return;
+        if (d.type === 'papaleguas-pause-media' || (d.type === 'papaleguas-yt-control' && d.action === 'pause')) {
+          try { if (videoEl) videoEl.pause(); } catch (e) {}
+          if (usingEmbed && embedEl && embedEl.src && embedEl.src !== 'about:blank') {
+            try { embedEl.contentWindow.postMessage(JSON.stringify({ event: 'command', func: 'pauseVideo', args: '' }), '*'); } catch (e) {}
+          }
+        }
+      });
+
+      if (toggleBtn) {
+        toggleBtn.addEventListener('click', function() {
+          if (usingEmbed) switchToNative();
+          else switchToEmbed();
+        });
+      }
+
+      if (fsBtn && boxEl) {
+        fsBtn.addEventListener('click', function() {
+          if (!document.fullscreenElement && boxEl.requestFullscreen) {
+            boxEl.requestFullscreen().catch(function(){});
+          } else if (document.exitFullscreen) {
+            document.exitFullscreen().catch(function(){});
+          }
+        });
+      }
+
+      if (!streamUrl && embedUrl) {
+        switchToEmbed();
+        return;
+      }
+
+      startNativeVideo();
+    })();
+  </script>
+</body>
+</html>`;
 }
 
 // Extrai áudio completo via yt-dlp por ID do vídeo com cache e preferência de idioma detectado
@@ -7252,7 +8724,7 @@ function getFullAudioStreamByVideoId(videoId, lang = 'pt') {
 }
 
 // Proxy de streaming de áudio/vídeo contínuo com suporte a Range e idioma detectado por IP
-async function handleAudioStreamingProxy(req, res, { title, artist, videoId, preferVideo, lang, country }) {
+async function handleAudioStreamingProxy(req, res, { title, artist, videoId, preferVideo, lang, country, _attempt = 0 }) {
   let resolvedLang = lang ? String(lang).split('-')[0].toLowerCase() : '';
   if (!resolvedLang) {
     let resolvedCountry = (country && /^[A-Z]{2}$/i.test(country) && country.toUpperCase() !== 'AUTO') ? country.toUpperCase() : '';
@@ -7262,13 +8734,16 @@ async function handleAudioStreamingProxy(req, res, { title, artist, videoId, pre
     const hl = getHlForCountry(resolvedCountry);
     resolvedLang = String(hl || 'pt').split('-')[0].toLowerCase();
   }
+  const vsMod = getPplVideoStreamMod();
   const fetchPromise = preferVideo && videoId
     ? getFullVideoStreamByVideoId(videoId, resolvedLang)
     : (videoId ? getFullAudioStreamByVideoId(videoId, resolvedLang) : getFullAudioStream({ title, artist }));
   fetchPromise.then(streamRes => {
     if (!streamRes || !streamRes.success || !streamRes.streamUrl) {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
-      res.end(preferVideo ? 'Vídeo completo não localizado.' : 'Áudio completo não localizado.');
+      if (!res.headersSent) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end(preferVideo ? 'Vídeo completo não localizado.' : 'Áudio completo não localizado.');
+      }
       return;
     }
 
@@ -7277,8 +8752,11 @@ async function handleAudioStreamingProxy(req, res, { title, artist, videoId, pre
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
       'Accept': '*/*'
     };
-    if (req.headers.range) {
-      reqHeaders['Range'] = req.headers.range;
+    const rawRange = req.headers.range || '';
+    if (vsMod && typeof vsMod.normalize_range_header === 'function') {
+      reqHeaders['Range'] = String(vsMod.normalize_range_header(rawRange) || 'bytes=0-');
+    } else if (rawRange) {
+      reqHeaders['Range'] = rawRange;
     }
 
     try {
@@ -7289,25 +8767,48 @@ async function handleAudioStreamingProxy(req, res, { title, artist, videoId, pre
         port: parsed.port || 443,
         path: parsed.pathname + parsed.search,
         method: 'GET',
-        agent: getOutboundAgent(false),
+        agent: getOutboundAgent(false) || videoStreamKeepAliveAgent,
         headers: reqHeaders
       }, (proxyRes) => {
-        if (proxyRes.statusCode === 403) {
-          const cacheKey = videoId || `${(title || '').toLowerCase().trim()} - ${(artist || '').toLowerCase().trim()}`;
+        const statusCode = proxyRes.statusCode || 200;
+        const shouldRetry = (vsMod && typeof vsMod.should_retry_stream_status === 'function')
+          ? Boolean(vsMod.should_retry_stream_status(statusCode))
+          : (statusCode === 403 || statusCode === 410);
+        if (shouldRetry) {
+          const cacheKey = (vsMod && typeof vsMod.stream_cache_key === 'function' && videoId)
+            ? String(vsMod.stream_cache_key(String(videoId), resolvedLang))
+            : (videoId ? `${videoId}:${resolvedLang}` : `${(title || '').toLowerCase().trim()} - ${(artist || '').toLowerCase().trim()}`);
           audioStreamUrlCache.delete(cacheKey);
-          if (videoId) videoStreamUrlCache.delete(videoId);
+          videoStreamUrlCache.delete(cacheKey);
+          if (videoId) {
+            audioStreamUrlCache.delete(videoId);
+            videoStreamUrlCache.delete(videoId);
+          }
+          if (_attempt === 0 && !res.headersSent) {
+            proxyRes.resume();
+            return handleAudioStreamingProxy(req, res, { title, artist, videoId, preferVideo, lang: resolvedLang, country, _attempt: 1 });
+          }
         }
 
+        let upstreamCt = String(proxyRes.headers['content-type'] || '').toLowerCase();
+        const mgMod = pplRuntime ? pplRuntime.loadNativeModule('media_guard') : null;
+        if (mgMod && typeof mgMod.normalize_stream_mime === 'function') {
+          try { upstreamCt = String(mgMod.normalize_stream_mime(upstreamCt, Boolean(preferVideo))); } catch (e) {}
+        } else if (!preferVideo) {
+          if (!upstreamCt || upstreamCt.includes('video/mp4')) upstreamCt = 'audio/mp4';
+          else if (upstreamCt.includes('video/webm')) upstreamCt = 'audio/webm';
+        }
         const resHeaders = {
-          'Content-Type': proxyRes.headers['content-type'] || (preferVideo ? 'video/mp4' : 'audio/webm'),
+          'Content-Type': upstreamCt || (preferVideo ? 'video/mp4' : 'audio/mp4'),
           'Accept-Ranges': 'bytes',
           'Cache-Control': 'public, max-age=86400',
-          'Access-Control-Allow-Origin': '*'
+          'Access-Control-Allow-Origin': '*',
+          'X-Stream-Engine': 'PPL-Native'
         };
         if (proxyRes.headers['content-length']) resHeaders['Content-Length'] = proxyRes.headers['content-length'];
         if (proxyRes.headers['content-range']) resHeaders['Content-Range'] = proxyRes.headers['content-range'];
 
-        res.writeHead(proxyRes.statusCode || 200, resHeaders);
+        res.writeHead(statusCode, resHeaders);
         proxyRes.pipe(res);
       });
 
@@ -8666,15 +10167,41 @@ function extractRelatedKeywords(title, channel) {
 }
 
 function scoreVideoRelevance(video, ctx) {
-  const title = normalizeDjText(video && video.title);
-  const channel = normalizeDjText(video && video.channel);
-  const seedTitle = normalizeDjText(ctx && ctx.title);
-  const seedChannel = normalizeDjText(ctx && ctx.channel);
-  const seedQuery = normalizeDjText(ctx && ctx.query);
+  const rawTitle = String(video && video.title || '');
+  const rawChannel = String(video && video.channel || '');
+  const rawSeedTitle = String(ctx && ctx.title || '');
+  const rawSeedChannel = String(ctx && ctx.channel || '');
+  const rawSeedQuery = String(ctx && ctx.query || '');
+  const ageDays = parseYoutubePublishedAgeDays(video && video.publishedAt);
+
+  const rankMod = pplRuntime ? pplRuntime.loadNativeModule('search_rank') : null;
+  const usedNative = Boolean(rankMod && typeof rankMod.score_baixatube_video === 'function');
   let score = 0;
-  // Bônus forte para o mesmo canal da curtida/vídeo atual
-  if (seedChannel && channel && seedChannel !== 'baixatube' && (channel === seedChannel || channel.includes(seedChannel) || seedChannel.includes(channel))) {
-    score += 95;
+
+  if (usedNative) {
+    try {
+      score += Number(rankMod.score_baixatube_video(
+        rawTitle,
+        rawChannel,
+        rawSeedTitle,
+        rawSeedChannel,
+        rawSeedQuery,
+        ageDays === null ? -1 : ageDays
+      )) || 0;
+    } catch (e) {}
+  }
+
+  const title = normalizeDjText(rawTitle);
+  const channel = normalizeDjText(rawChannel);
+  const seedTitle = normalizeDjText(rawSeedTitle);
+  const seedChannel = normalizeDjText(rawSeedChannel);
+  const seedQuery = normalizeDjText(rawSeedQuery);
+
+  if (!usedNative) {
+    // Bônus forte para o mesmo canal da curtida/vídeo atual (fallback JS)
+    if (seedChannel && channel && seedChannel !== 'baixatube' && (channel === seedChannel || channel.includes(seedChannel) || seedChannel.includes(channel))) {
+      score += 95;
+    }
   }
   seedTitle.split(/[^a-z0-9]+/).filter((w) => (CURATOR_SHORT_KEEP.has(w) || w.length >= 4) && !CURATOR_FILLER_STOPWORDS.has(w)).forEach((w) => {
     if (title.includes(w)) score += 18;
@@ -8685,13 +10212,14 @@ function scoreVideoRelevance(video, ctx) {
     if (title.includes(w)) score += 26;
     if (channel.includes(w)) score += 10;
   });
-  // Bônus de RECÊNCIA: vídeos postados recentemente sobem para o topo (todos os idiomas)
-  const ageDays = parseYoutubePublishedAgeDays(video && video.publishedAt);
+  // Bônus de RECÊNCIA: se ageDays != null e PPL rodou, já foi pontuado em C11
   if (ageDays !== null) {
-    if (ageDays <= 1) score += 45;
-    else if (ageDays <= 6) score += 30;
-    else if (ageDays <= 21) score += 18;
-    else if (ageDays >= 30) score -= 75;
+    if (!usedNative) {
+      if (ageDays <= 1) score += 45;
+      else if (ageDays <= 6) score += 30;
+      else if (ageDays <= 21) score += 18;
+      else if (ageDays >= 30) score -= 75;
+    }
   } else {
     const pub = String(video && video.publishedAt || '').toLowerCase();
     if (/hora|horas|minuto|minutos|hoje|ontem|\b\d+\s*h\b|\b\d+\s*min\b|today|hours?|mins?|ao vivo|live/i.test(pub)) {
@@ -9355,15 +10883,19 @@ function serveFileWithMemoryCache(req, res, filePath, contentType = 'text/html; 
           return;
         }
 
-        const isCompressible = /text|javascript|json|xml|svg/i.test(contentType);
+        const isCompressible = /text|javascript|json|xml|svg|wasm/i.test(contentType);
         let brBuf = null;
         let gzipBuf = null;
         if (isCompressible && content.length > 64) {
+          const tunerMod = pplRuntime ? pplRuntime.loadNativeModule('auto_tuner') : null;
+          const brQuality = (tunerMod && typeof tunerMod.optimal_static_brotli_quality === 'function')
+            ? Number(tunerMod.optimal_static_brotli_quality(content.length, 25)) || 5
+            : 5;
           try {
             if (typeof zlib.brotliCompressSync === 'function') {
               brBuf = zlib.brotliCompressSync(content, {
                 params: {
-                  [zlib.constants.BROTLI_PARAM_QUALITY]: 5
+                  [zlib.constants.BROTLI_PARAM_QUALITY]: brQuality
                 }
               });
             }
@@ -9397,7 +10929,7 @@ function serveFileWithMemoryCache(req, res, filePath, contentType = 'text/html; 
   });
 }
 
-// Verificação de IP da Rede Local (Wi-Fi / LAN / Loopback)
+// Verificação de IP da Rede Local (Wi-Fi / LAN / Loopback) via PPL nativo
 function isPrivateIp(ip) {
   if (!ip) return false;
   let clean = String(ip).trim();
@@ -9405,6 +10937,11 @@ function isPrivateIp(ip) {
   // Remove prefixo IPv4-mapped em IPv6 (::ffff:192.168.x.x)
   if (clean.startsWith('::ffff:')) {
     clean = clean.replace('::ffff:', '');
+  }
+  const lower = clean.toLowerCase();
+  const shieldMod = pplRuntime ? pplRuntime.loadNativeModule('shield_guard') : null;
+  if (shieldMod && typeof shieldMod.is_private_ip === 'function') {
+    return Boolean(shieldMod.is_private_ip(lower));
   }
 
   // Loopback / Localhost (IPv4 e IPv6)
@@ -9429,7 +10966,6 @@ function isPrivateIp(ip) {
   if (/^169\.254\.\d{1,3}\.\d{1,3}$/.test(clean)) return true;
 
   // IPv6 ULA (Unique Local Addresses fc00::/7) e Link-Local (fe80::/10)
-  const lower = clean.toLowerCase();
   if (lower.startsWith('fc') || lower.startsWith('fd')) return true;
   if (/^fe[89ab][0-9a-f]:/i.test(lower) || lower.startsWith('fe80:')) return true;
 
@@ -9523,8 +11059,8 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', '*');
   res.setHeader('Access-Control-Allow-Private-Network', 'true');
-  res.setHeader('Permissions-Policy', 'picture-in-picture=*, fullscreen=*, autoplay=*, encrypted-media=*, local-network=*, local-network-access=*, local-unrestricted=*, display-capture=*, presentation=*');
-  res.setHeader('X-Powered-By', 'Papaleguas-Engine/1.0 (Rust+Node)');
+  res.setHeader('Permissions-Policy', 'picture-in-picture=*, fullscreen=*, autoplay=*, encrypted-media=*, display-capture=*');
+  res.setHeader('X-Powered-By', 'Papaleguas-Engine/2.0 (PPL+Rust+Node)');
 
   if (req.method === 'OPTIONS') {
     if (req.headers['access-control-request-private-network']) {
@@ -9536,6 +11072,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   const reqUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  hydrateRequestWithPpl(reqUrl, null);
   const pathname = reqUrl.pathname;
   const clientIp = papaleguasTracker.extractClientIp(req);
 
@@ -9673,6 +11210,55 @@ const server = http.createServer(async (req, res) => {
       escapeHtml
     });
     if (handledMeta) return;
+  }
+
+  if (pathname.startsWith('/ppl-native/')) {
+    const subPath = reqUrl.pathname.slice('/ppl-native'.length);
+    const jsonHdr = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' };
+    try {
+      if (subPath === '/health' || subPath === '/api/status' || subPath === '/api/hw') {
+        const httpdMod = pplRuntime ? pplRuntime.loadNativeModule('papaleguas_httpd') : null;
+        const raw = (httpdMod && typeof httpdMod.health_json === 'function')
+          ? String(httpdMod.health_json())
+          : JSON.stringify({ ok: true, engine: 'Papaleguas-Native-PPL', port: PORT, mode: 'in-process' });
+        res.writeHead(200, jsonHdr);
+        res.end(raw);
+        return;
+      }
+      if (subPath === '/api/ping' || subPath === '/api/conn-probe') {
+        const hwMod = pplRuntime ? pplRuntime.loadNativeModule('hw_probe') : null;
+        const uptimeSec = (hwMod && typeof hwMod.uptime_sec === 'function') ? Number(hwMod.uptime_sec()) : Math.floor(process.uptime());
+        res.writeHead(200, jsonHdr);
+        res.end(JSON.stringify({ ok: true, pong: true, alive: true, engine: 'Papaleguas-Native-PPL', port: PORT, uptimeSec }));
+        return;
+      }
+      if (subPath === '/api/native-hash') {
+        const targetUrl = String(reqUrl.searchParams.get('url') || '');
+        const idxMod = pplRuntime ? pplRuntime.loadNativeModule('search_index') : null;
+        const hashVal = (idxMod && typeof idxMod.url_hash_fnv1a === 'function') ? String(idxMod.url_hash_fnv1a(targetUrl)) : '0';
+        res.writeHead(200, jsonHdr);
+        res.end(JSON.stringify({ ok: true, hash: hashVal, engine: 'Papaleguas-Native-PPL', port: PORT }));
+        return;
+      }
+      if (subPath === '/api/url-check') {
+        const chkU = String(reqUrl.searchParams.get('u') || '');
+        const idxMod = pplRuntime ? pplRuntime.loadNativeModule('search_index') : null;
+        const urlMod = pplRuntime ? pplRuntime.loadNativeModule('url_filter') : null;
+        const hashVal = (idxMod && typeof idxMod.url_hash_fnv1a === 'function') ? String(idxMod.url_hash_fnv1a(chkU)) : '0';
+        const isUnsafe = (urlMod && typeof urlMod.is_unsafe_scheme === 'function') ? Boolean(urlMod.is_unsafe_scheme(chkU)) : false;
+        res.writeHead(200, jsonHdr);
+        res.end(JSON.stringify({ ok: true, safe: !isUnsafe, hash: hashVal, engine: 'Papaleguas-Native-PPL', port: PORT }));
+        return;
+      }
+      if (subPath === '/ppl-info') {
+        res.writeHead(200, jsonHdr);
+        res.end(JSON.stringify({ language: 'Papaléguas (.ppl)', runtime: 'In-Process N-API (.ppl.node)', port: PORT }));
+        return;
+      }
+    } catch (e) {}
+    res.writeHead(404, jsonHdr);
+    res.end(JSON.stringify({ success: false, error: 'Rota /ppl-native não encontrada.' }));
+    return;
   }
 
   // ----------------------------------------------------
@@ -9866,6 +11452,7 @@ const server = http.createServer(async (req, res) => {
         body = rawBody ? JSON.parse(rawBody) : {};
       } catch (e) { swallowed(e, 'server:top@9214'); }
     }
+    hydrateRequestWithPpl(reqUrl, body);
 
     // Identificação do cliente individual (enviado via header X-Client-Id ou query/body param)
     const clientId = req.headers['x-client-id'] || reqUrl.searchParams.get('clientId') || body.clientId || 'client_default';
@@ -9917,6 +11504,7 @@ const server = http.createServer(async (req, res) => {
           youtubeSearchCache.clear();
         },
         handleAudioStreamingProxy,
+        prewarmVideoStreams,
         getFullAudioStream,
         getFullAudioStreamByVideoId,
         getOutboundAgent,
@@ -9981,15 +11569,16 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/url-suggest') {
       const q = reqUrl.searchParams.get('q') || body.q || '';
       const page = parseInt(reqUrl.searchParams.get('page') || body.page || '0', 10);
+      const filter = reqUrl.searchParams.get('filter') || body.filter || 'all';
       const useTor = isTorRoutingEnabled(clientSession);
-      const payload = await getUrlSuggestions({ query: q, page, useTor });
+      const payload = await getUrlSuggestions({ query: q, page, useTor, filter });
       sendCompressed(req, res, 200, { 'Content-Type': 'application/json; charset=utf-8' }, JSON.stringify(payload));
       return;
     }
 
     // Alimenta a aba de pesquisa em tela cheia com tudo que o buscador extraiu
     if (pathname === '/api/search-rich') {
-      const q = reqUrl.searchParams.get('q') || body.q || '';
+      const q = sanitizeSearchFieldInput(reqUrl.searchParams.get('q') || body.q || '');
       const useTor = isTorRoutingEnabled(clientSession);
       const data = await getRichSearchData(q, useTor);
       sendCompressed(req, res, 200, { 'Content-Type': 'application/json; charset=utf-8' }, JSON.stringify({ success: true, ...data }));
@@ -10005,8 +11594,7 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ success: false, images: [], page, hasMore: false }));
         return;
       }
-      const useTor = isTorRoutingEnabled(clientSession);
-      const images = await searchTopicImages(q, useTor, page);
+      const images = await searchTopicImages(q, isAppTorEnabled(), page);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({
         success: true,
@@ -10021,15 +11609,14 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/search-videos') {
       const q = (reqUrl.searchParams.get('q') || body.q || '').trim();
       const page = Math.max(0, parseInt(reqUrl.searchParams.get('page') || body.page || '0', 10) || 0);
-      const limit = Math.max(1, parseInt(reqUrl.searchParams.get('limit') || body.limit || '8', 10) || 8);
+      const limit = Math.max(1, parseInt(reqUrl.searchParams.get('limit') || body.limit || '12', 10) || 12);
       if (!q) {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ success: false, videos: [], page, hasMore: false }));
         return;
       }
-      const videos = await searchYoutubeVideosForTopic(q, limit, page);
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({
+      const videos = await searchTopicVideos(q, limit, page, isAppTorEnabled());
+      sendCompressed(req, res, 200, { 'Content-Type': 'application/json; charset=utf-8' }, JSON.stringify({
         success: true,
         videos,
         page,
@@ -10135,15 +11722,100 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // Modo Leitura Limpo (/api/reader): extrai título e parágrafos sem anúncios, banners de cookies ou scripts
+    if (pathname === '/api/reader') {
+      const rawTarget = String(reqUrl.searchParams.get('url') || (body && body.url) || '').trim();
+      const target = isPreviewableUrl(rawTarget);
+      if (!target) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ success: false, error: 'URL inválida ou restrita.' }));
+        return;
+      }
+      const useTor = isTorRoutingEnabled(clientSession);
+      const htmlContent = await new Promise((resolve) => {
+        let doneFlag = false;
+        const finish = (val) => { if (!doneFlag) { doneFlag = true; resolve(val); } };
+        try {
+          const lib = target.protocol === 'http:' ? http : https;
+          const rReq = lib.get(target.href, {
+            agent: getOutboundAgent(useTor),
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+              'Accept': 'text/html,application/xhtml+xml'
+            }
+          }, (rRes) => {
+            if (rRes.statusCode >= 400) { rRes.resume(); return finish(''); }
+            let buf = '';
+            rRes.on('data', (c) => {
+              buf += c;
+              if (buf.length > 450000) rRes.destroy();
+            });
+            rRes.on('end', () => finish(buf));
+            rRes.on('close', () => finish(buf));
+          });
+          rReq.on('error', () => finish(''));
+          rReq.setTimeout(7000, () => { try { rReq.destroy(); } catch (e) {} finish(''); });
+        } catch (e) { finish(''); }
+      });
+
+      const decodeEntities = (str) => String(str || '')
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/&(?:amp;)+/gi, '&')
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;|&apos;/gi, "'")
+        .replace(/&lt;/gi, '<')
+        .replace(/&gt;/gi, '>')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      const titleMatch = htmlContent.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i) || htmlContent.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+      const cleanTitle = titleMatch ? decodeEntities(titleMatch[1].replace(/<[^>]+>/g, ' ')) : target.hostname;
+      const cleanedHtml = htmlContent
+        .replace(/<!--[\s\S]*?-->/g, ' ')
+        .replace(/<(script|style|noscript|svg|nav|footer|aside|form|header|iframe)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ');
+
+      const blocks = [];
+      const blockRe = /<(p|h2|h3|blockquote)\b[^>]*>([\s\S]*?)<\/\1>/gi;
+      let bm;
+      while ((bm = blockRe.exec(cleanedHtml)) !== null) {
+        const tag = bm[1].toLowerCase();
+        const text = decodeEntities(bm[2].replace(/<[^>]+>/g, ' '));
+        if (!text) continue;
+        if (tag === 'p' && text.length < 40) continue;
+        if (/^(aceitar cookies|utilizamos cookies|política de privacidade|all rights reserved|todos os direitos reservados)/i.test(text)) continue;
+        blocks.push({ tag, text });
+        if (blocks.length >= 60) break;
+      }
+
+      if (blocks.length === 0 && htmlContent) {
+        const fallbackText = decodeEntities(nativeCore.cleanHtmlText(cleanedHtml)).slice(0, 4000);
+        if (fallbackText) blocks.push({ tag: 'p', text: fallbackText });
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        success: true,
+        url: target.href,
+        siteName: target.hostname.replace(/^www\./i, ''),
+        title: cleanTitle || target.hostname,
+        paragraphs: blocks
+      }));
+      return;
+    }
+
     // Prévia em lote (imagem + descrição) dos links encontrados pelo buscador
     if (pathname === '/api/page-preview') {
       let urls = Array.isArray(body.urls) ? body.urls : reqUrl.searchParams.getAll('url');
       urls = Array.from(new Set(urls.map((u) => String(u || '').trim()).filter(Boolean))).slice(0, 16);
       const useTor = isTorRoutingEnabled(clientSession);
       const previews = {};
+      const perUrlDeadline = useTor ? 3800 : 2400;
       await Promise.all(urls.map(async (u) => {
         try {
-          const data = await getPagePreview(u, useTor);
+          const data = await Promise.race([
+            getPagePreview(u, useTor),
+            new Promise((resolve) => setTimeout(() => resolve(null), perUrlDeadline))
+          ]);
           if (data) previews[u] = data;
         } catch (e) { swallowed(e, 'server:page-preview'); }
       }));
@@ -10152,15 +11824,40 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // Proxy de imagens das prévias: só repassa image/*, sem cookies e sem expor o IP do usuário
+    // Proxy de imagens das prévias: cache binário LRU em memória indexado por FNV-1a (search_index.ppl)
     if (pathname === '/api/preview-img') {
       const useTor = isTorRoutingEnabled(clientSession);
+      const rawImgParam = String(reqUrl.searchParams.get('u') || '').trim();
+      const isLiveRefresh = reqUrl.searchParams.has('_t');
+      const idxMod = pplRuntime ? pplRuntime.loadNativeModule('search_index') : null;
+      const cacheKey = !isLiveRefresh && rawImgParam
+        ? ((idxMod && typeof idxMod.url_hash_fnv1a === 'function')
+            ? `pv_${String(idxMod.url_hash_fnv1a(rawImgParam))}`
+            : `pv_${rawImgParam}`)
+        : '';
+
+      if (cacheKey && previewImgBinaryCache.has(cacheKey)) {
+        const hit = previewImgBinaryCache.get(cacheKey);
+        if (hit && hit.buf && (Date.now() - hit.t < 30 * 60 * 1000)) {
+          res.writeHead(200, {
+            'Content-Type': hit.type,
+            'Content-Length': hit.buf.length,
+            'Cache-Control': 'public, max-age=86400, immutable',
+            'X-Content-Type-Options': 'nosniff',
+            'X-PPL-Cache': 'HIT'
+          });
+          res.end(hit.buf);
+          return;
+        }
+      }
+
       const fail = () => {
         if (res.headersSent) { try { res.end(); } catch (e) { /* ignore */ } return; }
         res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'public, max-age=600' });
         res.end('Imagem indisponível');
       };
       const MAX_IMG_BYTES = 8 * 1024 * 1024;
+      const MAX_CACHEABLE_IMG_BYTES = 512 * 1024;
       const fetchImg = (rawUrl, hops) => {
         const target = isPreviewableUrl(rawUrl);
         if (!target || hops > 4) return fail();
@@ -10188,20 +11885,186 @@ const server = http.createServer(async (req, res) => {
           }
           res.writeHead(200, {
             'Content-Type': type,
-            'Cache-Control': 'public, max-age=86400',
+            'Cache-Control': isLiveRefresh ? 'no-store, no-cache, must-revalidate' : 'public, max-age=86400, immutable',
             'X-Content-Type-Options': 'nosniff'
           });
           let sent = 0;
+          const canCache = Boolean(cacheKey && (!len || len <= MAX_CACHEABLE_IMG_BYTES));
+          const cacheChunks = canCache ? [] : null;
           imgRes.on('data', (chunk) => {
             sent += chunk.length;
-            if (sent > MAX_IMG_BYTES) { try { imgReq.destroy(); res.end(); } catch (e) { /* ignore */ } }
+            if (sent > MAX_IMG_BYTES) {
+              try { imgReq.destroy(); res.end(); } catch (e) { /* ignore */ }
+              return;
+            }
+            if (cacheChunks && sent <= MAX_CACHEABLE_IMG_BYTES) {
+              cacheChunks.push(chunk);
+            }
+          });
+          imgRes.on('end', () => {
+            if (cacheChunks && sent > 0 && sent <= MAX_CACHEABLE_IMG_BYTES) {
+              previewImgBinaryCache.set(cacheKey, {
+                t: Date.now(),
+                type,
+                buf: Buffer.concat(cacheChunks, sent)
+              });
+            }
           });
           safePipe(imgRes, res, req);
         });
         imgReq.on('error', fail);
-        imgReq.setTimeout(9000, () => { try { imgReq.destroy(); } catch (e) { /* ignore */ } });
+        imgReq.setTimeout(useTor ? 4200 : 2800, () => { try { imgReq.destroy(); } catch (e) { /* ignore */ } fail(); });
       };
-      fetchImg(reqUrl.searchParams.get('u') || '', 0);
+      fetchImg(rawImgParam, 0);
+      return;
+    }
+
+    // Relay direto de baixa latência para frames e streams MJPEG de Câmeras IP Públicas
+    if (pathname === '/api/ipcam-frame') {
+      const failCam = () => {
+        if (res.headersSent) { try { res.end(); } catch (e) {} return; }
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end('Stream indisponível');
+      };
+      const rawParam = String(reqUrl.searchParams.get('u') || '').trim();
+      const stamp = String(Date.now()) + String(Math.floor(Math.random() * 1000));
+      let freshUrl = rawParam.replace(/COUNTER/g, stamp);
+      if (freshUrl === rawParam && /\?(?:.*=.*)?$/.test(freshUrl)) {
+        freshUrl += (freshUrl.endsWith('?') ? '' : '&') + '_ts=' + stamp;
+      } else if (freshUrl === rawParam && /snapshot|oneshot|image\.jpg|image\.cgi/i.test(freshUrl)) {
+        freshUrl += '?_ts=' + stamp;
+      }
+      const target = isPreviewableUrl(freshUrl);
+      if (!target) {
+        failCam();
+        return;
+      }
+      const lib = target.protocol === 'http:' ? http : https;
+      const camReq = lib.get(target.href, {
+        agent: getOutboundAgent(true),
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+          'Accept': 'multipart/x-mixed-replace,image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+          'Cache-Control': 'no-cache, no-store',
+          'Pragma': 'no-cache',
+          'Connection': 'close',
+          'Referer': target.origin + '/'
+        }
+      }, (camRes) => {
+        if (camRes.statusCode !== 200) {
+          camRes.resume();
+          return failCam();
+        }
+        const cType = String(camRes.headers['content-type'] || 'image/jpeg');
+        res.writeHead(200, {
+          'Content-Type': cType,
+          'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+          'Pragma': 'no-cache',
+          'Expires': '0',
+          'X-Content-Type-Options': 'nosniff'
+        });
+        safePipe(camRes, res, req);
+      });
+      camReq.on('error', failCam);
+      camReq.setTimeout(6500, () => { try { camReq.destroy(); } catch (e) {} failCam(); });
+      req.on('close', () => { try { camReq.destroy(); } catch (e) {} });
+      return;
+    }
+
+    // Relay de streaming direto (MP4 + HLS .m3u8/.m4s/.ts) para vídeos externos (TikTok, Dailymotion, Vimeo, etc.)
+    if (pathname === '/api/external-video-stream') {
+      const failStream = () => {
+        if (res.headersSent) { try { res.end(); } catch (e) {} return; }
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
+        res.end('Stream de vídeo indisponível');
+      };
+      const isDownload = reqUrl.searchParams.get('dl') === '1';
+      const streamRelay = (rawTargetUrl, hop = 0) => {
+        if (hop > 5) return failStream();
+        const target = isPreviewableUrl(rawTargetUrl);
+        if (!target) return failStream();
+        const lib = target.protocol === 'http:' ? http : https;
+        const headers = {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept': '*/*',
+          'Connection': 'keep-alive'
+        };
+        if (req.headers.range && !/\.m3u8(?:\?|$)/i.test(target.pathname)) {
+          headers.Range = req.headers.range;
+        }
+        if (/tiktokcdn|tikwm|musical\.ly|byteicdn/i.test(target.hostname)) {
+          headers.Referer = 'https://www.tiktok.com/';
+        }
+        const upReq = lib.get(target.href, { agent: false, headers }, (upRes) => {
+          if (upRes.statusCode >= 300 && upRes.statusCode < 400 && upRes.headers.location) {
+            upRes.resume();
+            try {
+              const nextUrl = new URL(upRes.headers.location, target).href;
+              return streamRelay(nextUrl, hop + 1);
+            } catch (e) {
+              return failStream();
+            }
+          }
+          if (upRes.statusCode !== 200 && upRes.statusCode !== 206) {
+            upRes.resume();
+            return failStream();
+          }
+          const cType = String(upRes.headers['content-type'] || '').toLowerCase();
+          const isM3u8 = /\.m3u8(?:\?|$)/i.test(target.pathname) || cType.includes('mpegurl') || cType.includes('x-mpegurl');
+          if (isM3u8) {
+            let m3u8Text = '';
+            upRes.on('data', (chunk) => {
+              m3u8Text += chunk.toString('utf8');
+              if (m3u8Text.length > 1024 * 1024) upReq.destroy();
+            });
+            upRes.on('end', () => {
+              const rewritten = m3u8Text.split(/\r?\n/).map((line) => {
+                const trimmed = line.trim();
+                if (!trimmed) return line;
+                if (trimmed.startsWith('#')) {
+                  return line.replace(/URI="([^"]+)"/gi, (m, uriVal) => {
+                    try {
+                      const abs = new URL(uriVal, target.href).href;
+                      return `URI="/api/external-video-stream?u=${encodeURIComponent(abs)}"`;
+                    } catch (e) { return m; }
+                  });
+                }
+                try {
+                  const abs = new URL(trimmed, target.href).href;
+                  return `/api/external-video-stream?u=${encodeURIComponent(abs)}`;
+                } catch (e) {
+                  return line;
+                }
+              }).join('\n');
+              res.writeHead(200, {
+                'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8',
+                'Access-Control-Allow-Origin': '*',
+                'Cache-Control': 'no-store'
+              });
+              res.end(rewritten);
+            });
+            return;
+          }
+
+          const outHeaders = {
+            'Content-Type': upRes.headers['content-type'] || (/\.m4s(?:\?|$)/i.test(target.pathname) ? 'video/iso.segment' : 'video/mp4'),
+            'Access-Control-Allow-Origin': '*',
+            'Accept-Ranges': upRes.headers['accept-ranges'] || 'bytes',
+            'Cache-Control': 'public, max-age=3600'
+          };
+          if (upRes.headers['content-length']) outHeaders['Content-Length'] = upRes.headers['content-length'];
+          if (upRes.headers['content-range']) outHeaders['Content-Range'] = upRes.headers['content-range'];
+          if (isDownload) {
+            outHeaders['Content-Disposition'] = 'attachment; filename="video-papaleguas.mp4"';
+          }
+          res.writeHead(upRes.statusCode, outHeaders);
+          safePipe(upRes, res, req);
+        });
+        upReq.on('error', failStream);
+        upReq.setTimeout(15000, () => { try { upReq.destroy(); } catch (e) {} failStream(); });
+        req.on('close', () => { try { upReq.destroy(); } catch (e) {} });
+      };
+      streamRelay(reqUrl.searchParams.get('u') || '', 0);
       return;
     }
 
@@ -11325,6 +13188,300 @@ function getDevicePlaylistsRoot(clientId, req) {
       return;
     }
 
+    if (pathname === '/api/papaleguas/lang-status') {
+      let agentStatus = null;
+      try {
+        const stPath = path.join(__dirname, '..', 'papaleguas', 'data', 'agent_ppl_status.json');
+        if (fs.existsSync(stPath)) agentStatus = JSON.parse(fs.readFileSync(stPath, 'utf8'));
+      } catch (e) { swallowed(e, 'server:lang-status-agent'); }
+      let hardware = null;
+      if (pplRuntime) {
+        try {
+          hardware = {
+            cpuCores: pplRuntime.invokeNative('hw_probe', 'cpu_cores'),
+            ramTotalMb: pplRuntime.invokeNative('hw_probe', 'ram_total_mb'),
+            ramFreeMb: pplRuntime.invokeNative('hw_probe', 'ram_free_mb'),
+            memoryPressurePct: pplRuntime.invokeNative('hw_probe', 'memory_pressure_pct')
+          };
+        } catch (e) { swallowed(e, 'server:lang-status-hw'); }
+      }
+      const tProbe0 = process.hrtime.bigint();
+      let nativeHttpd = { online: false, port: PORT, mode: 'in-process' };
+      try {
+        const httpdMod = pplRuntime ? pplRuntime.loadNativeModule('papaleguas_httpd') : null;
+        if (httpdMod && typeof httpdMod.health_json === 'function') {
+          const parsed = JSON.parse(String(httpdMod.health_json()));
+          const latencyMs = Number((Number(process.hrtime.bigint() - tProbe0) / 1e6).toFixed(2));
+          nativeHttpd = Object.assign({ online: true, port: PORT, mode: 'in-process', latencyMs, offloadCount: global.__pplStaticOffloadCount || 0 }, parsed);
+        }
+      } catch (e) {}
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({
+        success: true,
+        language: 'Papaléguas (.ppl)',
+        hardware,
+        nativeHttpd,
+        shieldStats: typeof requestGuard.getPplShieldStats === 'function' ? requestGuard.getPplShieldStats() : null,
+        urlFilterStats: pplUrlFilterStats,
+        autoTuner: (() => {
+          if (!pplRuntime) return null;
+          try {
+            const tm = pplRuntime.loadNativeModule('auto_tuner');
+            if (!tm) return null;
+            return {
+              profileCode: typeof tm.active_profile_code === 'function' ? tm.active_profile_code() : 0,
+              adaptiveThreshold: typeof tm.adaptive_block_threshold === 'function' ? tm.adaptive_block_threshold() : 100,
+              recommendedCacheLimit: typeof tm.recommended_cache_limit === 'function' ? tm.recommended_cache_limit() : 5000,
+              cacheTuner: lastPplCacheTune || runPplCacheAutoTune()
+            };
+          } catch (e) { return null; }
+        })(),
+        activeModules: pplRuntime ? pplRuntime.listActiveModules() : [],
+        agent: agentStatus
+      }));
+      return;
+    }
+
+    if (pathname === '/api/papaleguas/lang-agent-run' && req.method === 'POST') {
+      try {
+        const pplAgent = require('../bin/papaleguas-agent');
+        const report = pplAgent.runCycle();
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ success: true, report }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ success: false, error: e && e.message ? e.message : String(e) }));
+      }
+      return;
+    }
+
+    if (pathname === '/api/papaleguas/lang-benchmark') {
+      try {
+        const shieldMod = pplRuntime ? pplRuntime.loadNativeModule('shield_guard') : null;
+        const urlMod = pplRuntime ? pplRuntime.loadNativeModule('url_filter') : null;
+        const iterations = 10000;
+        const t0 = process.hrtime.bigint();
+        let checksum = 0;
+        if (shieldMod) {
+          for (let i = 0; i < iterations; i++) {
+            checksum += shieldMod.score_request(i % 200, i % 10, false, (i & 1) === 0);
+          }
+        }
+        const t1 = process.hrtime.bigint();
+        const elapsedMs = Number(t1 - t0) / 1e6;
+        const trackerBlocked = urlMod ? urlMod.is_blocked_tracker('https://doubleclick.net/pixel') : false;
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({
+          success: true,
+          iterations,
+          elapsedMs: Number(elapsedMs.toFixed(3)),
+          opsPerSec: elapsedMs > 0 ? Math.round((iterations / elapsedMs) * 1000) : 0,
+          checksum,
+          trackerBlocked
+        }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ success: false, error: e && e.message ? e.message : String(e) }));
+      }
+      return;
+    }
+
+    if (pathname === '/api/papaleguas/lang-source') {
+      try {
+        const modsDir = path.join(__dirname, '..', 'papaleguas-lang', 'modules');
+        const modules = fs.existsSync(modsDir)
+          ? fs.readdirSync(modsDir).filter((f) => f.endsWith('.ppl')).map((f) => f.replace(/\.ppl$/, '')).sort()
+          : [];
+        const reqMod = String(reqUrl.searchParams.get('module') || modules[0] || 'hw_probe').trim();
+        if (!/^[a-zA-Z0-9_]+$/.test(reqMod)) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ success: false, error: 'Nome de módulo inválido.' }));
+          return;
+        }
+        const filePath = path.join(modsDir, `${reqMod}.ppl`);
+        const source = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : '';
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ success: true, module: reqMod, modules, source }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ success: false, error: e && e.message ? e.message : String(e) }));
+      }
+      return;
+    }
+
+    if ((pathname === '/api/papaleguas/lang-verify' || pathname === '/api/papaleguas/lang-compile') && req.method === 'POST') {
+      const chunks = [];
+      let totalBytes = 0;
+      let aborted = false;
+      req.on('data', (chunk) => {
+        totalBytes += chunk.length;
+        if (totalBytes > 131072) {
+          aborted = true;
+          res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ success: false, error: 'Código-fonte excede 128 KB.' }));
+          req.destroy();
+          return;
+        }
+        chunks.push(chunk);
+      });
+      req.on('end', () => {
+        if (aborted) return;
+        try {
+          const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+          const source = String(body.source || '');
+          const { checkSource } = require('../papaleguas-lang/compiler');
+          const checked = checkSource(source, '<editor>');
+          if (pathname === '/api/papaleguas/lang-verify') {
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({
+              success: true,
+              policy: checked.verification.policy,
+              functionsCount: (checked.ast.functions || []).length,
+              structsCount: (checked.ast.structs || []).length
+            }));
+            return;
+          }
+          const modName = String(body.module || '').trim();
+          if (!/^[a-zA-Z0-9_]+$/.test(modName)) {
+            res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ success: false, error: 'Nome de módulo inválido.' }));
+            return;
+          }
+          const modPath = path.join(__dirname, '..', 'papaleguas-lang', 'modules', `${modName}.ppl`);
+          const prevSource = fs.existsSync(modPath) ? fs.readFileSync(modPath, 'utf8') : null;
+          fs.writeFileSync(modPath, source, 'utf8');
+          const pplAgent = require('../bin/papaleguas-agent');
+          const result = pplAgent.processModule(`${modName}.ppl`);
+          if (result.status === 'rejected' && prevSource !== null) {
+            fs.writeFileSync(modPath, prevSource, 'utf8');
+          }
+          res.writeHead(result.status === 'rejected' ? 400 : 200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ success: result.status !== 'rejected', result }));
+        } catch (e) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ success: false, error: e && e.message ? e.message : String(e), errors: e && e.errors ? e.errors : undefined }));
+        }
+      });
+      return;
+    }
+
+    if (pathname === '/api/papaleguas/lang-invoke' && req.method === 'POST') {
+      const chunks = [];
+      let totalBytes = 0;
+      let aborted = false;
+      req.on('data', (chunk) => {
+        totalBytes += chunk.length;
+        if (totalBytes > 32768) {
+          aborted = true;
+          res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ success: false, error: 'Payload excede 32 KB.' }));
+          req.destroy();
+          return;
+        }
+        chunks.push(chunk);
+      });
+      req.on('end', () => {
+        if (aborted) return;
+        try {
+          const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+          const modName = String(body.module || '').trim();
+          const fnName = String(body.fn || '').trim();
+          const args = Array.isArray(body.args) ? body.args : [];
+          if (!/^[a-zA-Z0-9_]+$/.test(modName) || !/^[a-zA-Z0-9_]+$/.test(fnName)) {
+            res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ success: false, error: 'Módulo ou função inválida.' }));
+            return;
+          }
+          if (!pplRuntime) throw new Error('Runtime Papaléguas indisponível.');
+          const t0 = process.hrtime.bigint();
+          const result = pplRuntime.invokeNative(modName, fnName, args);
+          const elapsedUs = Number((Number(process.hrtime.bigint() - t0) / 1000).toFixed(2));
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+          res.end(JSON.stringify({ success: true, module: modName, fn: fnName, result, elapsedUs }));
+        } catch (e) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ success: false, error: e && e.message ? e.message : String(e) }));
+        }
+      });
+      return;
+    }
+
+    if (pathname === '/api/site-agent' || pathname === '/api/site-agent/feedbacks' || pathname === '/api/site-agent/feedbacks/clear') {
+      const siteAgentMod = require('./site-agent');
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204, {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, X-Client-Id, X-Agent-Name, User-Agent, Authorization'
+        });
+        res.end();
+        return;
+      }
+      if (pathname === '/api/site-agent/feedbacks/clear' && req.method === 'POST') {
+        siteAgentMod.handleSiteAgentClearFeedbacks(req, res);
+        return;
+      }
+      if (pathname === '/api/site-agent/feedbacks' && req.method === 'GET') {
+        siteAgentMod.handleSiteAgentFeedbacks(req, res);
+        return;
+      }
+      if (req.method === 'GET') {
+        siteAgentMod.handleSiteAgentInfo(req, res, { botCommander });
+        return;
+      }
+      if (req.method === 'POST') {
+        siteAgentMod.handleSiteAgentChat(req, res, body || {}, { aiClient, botCommander }).catch((err) => {
+          swallowed(err, 'server:site-agent-post');
+          if (!res.headersSent) {
+            res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
+            res.end(JSON.stringify({ ok: false, error: 'Erro interno no Agente Papaléguas' }));
+          }
+        });
+        return;
+      }
+    }
+
+    if (pathname === '/api/ppl-stats' && req.method === 'GET') {
+      const stats = (pplRuntime && typeof pplRuntime.getRuntimeStats === 'function') ? pplRuntime.getRuntimeStats() : {};
+      const activeMods = (pplRuntime && typeof pplRuntime.listActiveModules === 'function')
+        ? pplRuntime.listActiveModules().map((m) => ({
+            name: m.name,
+            compilerVersion: m.compilerVersion || 'ppl-c11',
+            compileMs: m.compileMs || 0,
+            hasWasm: Boolean(m.wasmPath),
+            wasmFunctions: Array.isArray(m.wasmFunctions) ? m.wasmFunctions : [],
+            optimizerStats: m.optimizerStats || null,
+            functions: Array.isArray(m.exportedFunctions) ? m.exportedFunctions.map((f) => f.name) : []
+          }))
+        : [];
+      let toolchains = null;
+      try { toolchains = require('../papaleguas-lang/compiler').detectToolchains(); } catch (e) {}
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store'
+      });
+      res.end(JSON.stringify({ ok: true, engine: 'PPL-Native-C11-LTO', stats, toolchains, modulesCount: activeMods.length, modules: activeMods }));
+      return;
+    }
+
+    if (pathname === '/api/ppl-wasm' && req.method === 'GET') {
+      const modName = String(reqUrl.searchParams.get('module') || 'client_guard').trim();
+      if (!/^[a-zA-Z0-9_]+$/.test(modName)) {
+        res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('invalid module');
+        return;
+      }
+      const wasmFile = path.join(__dirname, '..', 'papaleguas-lang', 'active', `${modName}.ppl.wasm`);
+      if (!fs.existsSync(wasmFile)) {
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('wasm module not found');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/wasm', 'Cache-Control': 'public, max-age=300' });
+      safePipe(fs.createReadStream(wasmFile), res, req);
+      return;
+    }
+
     if (pathname === '/api/session-info') {
       const activePublicUrl = 'https://papaleguas.app';
       res.writeHead(200);
@@ -11396,37 +13553,84 @@ function getDevicePlaylistsRoot(clientId, req) {
         'Cache-Control': 'no-store, no-cache, must-revalidate'
       };
       const whoCast = requestGuard.identifyRequester(req);
-      if (!whoCast.isLocal) {
-        // Visitantes externos (túnel Cloudflare/ngrok) não estão na mesma rede física do servidor:
-        // a busca deve rodar apenas na rede Wi-Fi do celular. Já clientes locais (PC ou celular no
-        // mesmo Wi-Fi de casa acessando via IP da LAN) recebem a varredura TCP/SSDP/mDNS real do servidor!
+      let sameHomeWifi = Boolean(whoCast.isLocal);
+      if (!sameHomeWifi) {
+        try {
+          const clientWanIp = String(
+            req.headers['cf-connecting-ip'] ||
+            (req.headers['x-forwarded-for'] ? String(req.headers['x-forwarded-for']).split(',')[0] : '') ||
+            whoCast.ip || ''
+          ).trim().replace(/^::ffff:/, '');
+          const nowTs = Date.now();
+          if (!global.__pplServerWanIpCache || (nowTs - global.__pplServerWanIpCache.ts) > 600000) {
+            const wanIp = await new Promise((resolve) => {
+              const r = https.get('https://1.1.1.1/cdn-cgi/trace', { timeout: 2200 }, (resp) => {
+                let d = '';
+                resp.on('data', (c) => { d += c; });
+                resp.on('end', () => {
+                  const m = d.match(/^ip=([^\r\n]+)/m);
+                  resolve(m ? m[1].trim() : '');
+                });
+              });
+              r.on('error', () => resolve(''));
+              r.on('timeout', () => { try { r.destroy(); } catch (e) {} resolve(''); });
+            });
+            if (wanIp) global.__pplServerWanIpCache = { ip: wanIp, ts: nowTs };
+          }
+          const serverWanIp = (global.__pplServerWanIpCache && global.__pplServerWanIpCache.ip) || '';
+          if (serverWanIp && clientWanIp && serverWanIp === clientWanIp) {
+            sameHomeWifi = true;
+          }
+        } catch (e) {}
+      }
+      if (!sameHomeWifi) {
+        // Visitantes externos em outra rede não recebem a lista de TVs da casa.
         res.writeHead(200, jsonHead);
         res.end(JSON.stringify({
           success: true,
           devices: [],
           serverLocal: false,
+          sameNetwork: false,
           message: 'A transmissão deve basear na rede Wi-Fi do cliente, não do servidor.'
         }));
         return;
       }
       try {
         const castManager = require('./cast-manager');
-        const devices = await castManager.discoverRokuOnThisMachine();
+        const forceScan = reqUrl.searchParams.get('force') === '1';
+        const devices = await castManager.discoverRokuOnThisMachine({ force: forceScan });
         res.writeHead(200, jsonHead);
         res.end(JSON.stringify({
           success: true,
           devices: Array.isArray(devices) ? devices : [],
+          sameNetwork: true,
           clientScanRequired: false
         }));
       } catch (err) {
         res.writeHead(200, jsonHead);
-        res.end(JSON.stringify({ success: true, devices: [], error: err.message, clientScanRequired: false }));
+        res.end(JSON.stringify({ success: true, devices: [], sameNetwork: true, error: err.message, clientScanRequired: false }));
       }
       return;
     }
 
     if (pathname === '/api/cast-to-device') {
       const jsonHead = { 'Content-Type': 'application/json; charset=utf-8' };
+      const whoCast = requestGuard.identifyRequester(req);
+      let sameHomeWifi = Boolean(whoCast.isLocal);
+      if (!sameHomeWifi) {
+        const clientWanIp = String(
+          req.headers['cf-connecting-ip'] ||
+          (req.headers['x-forwarded-for'] ? String(req.headers['x-forwarded-for']).split(',')[0] : '') ||
+          whoCast.ip || ''
+        ).trim().replace(/^::ffff:/, '');
+        const serverWanIp = (global.__pplServerWanIpCache && global.__pplServerWanIpCache.ip) || '';
+        if (serverWanIp && clientWanIp && serverWanIp === clientWanIp) sameHomeWifi = true;
+      }
+      if (!sameHomeWifi) {
+        res.writeHead(200, jsonHead);
+        res.end(JSON.stringify({ success: false, error: 'Transmissão via servidor permitida apenas na mesma rede Wi-Fi.' }));
+        return;
+      }
       const rawTarget = body.ip || body.deviceId || reqUrl.searchParams.get('ip') || '';
       const ipMatch = String(rawTarget).match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/);
       const ip = ipMatch ? ipMatch[1] : '';
@@ -11439,8 +13643,8 @@ function getDevicePlaylistsRoot(clientId, req) {
       }
       try {
         const castManager = require('./cast-manager');
-        const device = castManager.ensureRokuDevice(ip, 'Smart TV (' + ip + ')');
-        const result = await castManager.castToDevice(device.id, targetUrl || title, title);
+        const existingDev = castManager.devices.get(ip) || castManager.ensureRokuDevice(ip, 'Smart TV (' + ip + ')');
+        const result = await castManager.castToDevice(existingDev.id, targetUrl || title, title);
         res.writeHead(200, jsonHead);
         res.end(JSON.stringify(result && typeof result === 'object' ? result : { success: true, message: 'Sinal enviado para a TV.' }));
       } catch (err) {
@@ -11807,9 +14011,21 @@ function getDevicePlaylistsRoot(clientId, req) {
         req.headers['user-agent'] || '',
         req.headers['sec-ch-ua-platform'] || ''
       );
-      const targetOs = ['windows', 'linux', 'android', 'ios'].includes(requestedOs)
+      const targetOs = ['windows', 'linux', 'android', 'ios', 'macos'].includes(requestedOs)
         ? requestedOs
         : (detected.osId || detected.os_id || 'windows');
+
+      // Persiste download da aplicação no banco de dados SQLite (papaleguas/data/downloads.sqlite)
+      try {
+        const downloadsDb = require('./downloads-db');
+        const dlIp = papaleguasTracker.extractClientIp(req);
+        downloadsDb.recordDownload({
+          os: targetOs,
+          source: 'download_app',
+          ip: dlIp,
+          userAgent: req.headers['user-agent'] || ''
+        });
+      } catch (e) {}
 
       const proto = (req.headers['x-forwarded-proto'] || '').split(',')[0].trim() || 'https';
       const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:8080';
@@ -11997,6 +14213,23 @@ function getDevicePlaylistsRoot(clientId, req) {
         'Cache-Control': 'no-store'
       });
       res.end(androidHtml);
+      return;
+    }
+
+    if (pathname === '/api/ping') {
+      const hwMod = pplRuntime ? pplRuntime.loadNativeModule('hw_probe') : null;
+      const uptimeSec = (hwMod && typeof hwMod.uptime_sec === 'function') ? Number(hwMod.uptime_sec()) : Math.floor(process.uptime());
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ ok: true, pong: true, alive: true, engine: 'Papaleguas-Native-PPL', port: PORT, uptimeSec }));
+      return;
+    }
+
+    if (pathname === '/api/native-hash') {
+      const targetUrl = String(reqUrl.searchParams.get('url') || '');
+      const idxMod = pplRuntime ? pplRuntime.loadNativeModule('search_index') : null;
+      const hashVal = (idxMod && typeof idxMod.url_hash_fnv1a === 'function') ? String(idxMod.url_hash_fnv1a(targetUrl)) : '0';
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ ok: true, hash: hashVal, engine: 'Papaleguas-Native-PPL', port: PORT }));
       return;
     }
 
@@ -12479,9 +14712,17 @@ function getDevicePlaylistsRoot(clientId, req) {
       return;
     }
 
+    if (checkPplUrlFilter(rawTarget) === 'unsafe_scheme') {
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8', 'X-Papaleguas-Blocked': 'url_filter.ppl:unsafe_scheme' });
+      res.end('Esquema de URL inseguro bloqueado pelo Papaléguas (.ppl).');
+      return;
+    }
+
     let parsedTarget;
     try {
-      parsedTarget = new URL(rawTarget.startsWith('http://') || rawTarget.startsWith('https://') ? rawTarget : 'https://' + rawTarget);
+      const hasScheme = /^https?:\/\//i.test(rawTarget);
+      const defaultScheme = /\.onion(?:[/:?#]|$)/i.test(rawTarget) ? 'http://' : 'https://';
+      parsedTarget = new URL(hasScheme ? rawTarget : defaultScheme + rawTarget);
     } catch (e) {
       res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end('URL inválida.');
@@ -12494,8 +14735,11 @@ function getDevicePlaylistsRoot(clientId, req) {
       return;
     }
 
-    if (nativeCore && typeof nativeCore.isTrackerOrAd === 'function' && nativeCore.isTrackerOrAd(parsedTarget.href)) {
-      res.writeHead(204, { 'Cache-Control': 'public, max-age=3600' });
+    if (
+      checkPplUrlFilter(parsedTarget.href) === 'blocked_tracker' ||
+      (nativeCore && typeof nativeCore.isTrackerOrAd === 'function' && nativeCore.isTrackerOrAd(parsedTarget.href))
+    ) {
+      res.writeHead(204, { 'Cache-Control': 'public, max-age=3600', 'X-Papaleguas-Blocked': 'url_filter.ppl:tracker' });
       res.end();
       return;
     }
@@ -12511,7 +14755,70 @@ function getDevicePlaylistsRoot(clientId, req) {
       res.end(buildIpCheckPage(info));
       return;
     }
-    function fetchUrlViaProxy(targetUrlObj, redirectCount = 0, torCircuitRetry = 0, forceDirect = false) {
+    if (reqUrl.searchParams.get('raw') !== '1') {
+      const matchedVideo = matchExternalVideoWatchUrl(parsedTarget);
+      if (matchedVideo) {
+        if (matchedVideo.platform === 'youtube' && matchedVideo.videoId) {
+          res.writeHead(302, { Location: `/baixatube?v=${encodeURIComponent(matchedVideo.videoId)}` });
+          res.end();
+          return;
+        }
+        const vInfo = await resolveExternalVideoInfo(parsedTarget.href, reqUrl.searchParams.get('title') || '');
+        if (vInfo && (vInfo.streamUrl || vInfo.embedUrl)) {
+          const playerHtml = buildExternalVideoPlayerPage(vInfo, clientId);
+          sendCompressed(req, res, 200, { 'Content-Type': 'text/html; charset=utf-8' }, playerHtml);
+          return;
+        }
+      }
+    }
+    if (!global.__plTorAliveCache) {
+      global.__plTorAliveCache = { ts: 0, ok: false };
+    }
+    function isTorSocksAlive() {
+      const now = Date.now();
+      if (now - global.__plTorAliveCache.ts < 5000) return Promise.resolve(global.__plTorAliveCache.ok);
+      try {
+        const torMod = pplRuntime ? pplRuntime.loadNativeModule('tor_proxy') : null;
+        if (torMod && typeof torMod.tor_alive === 'function') {
+          const ok = Boolean(torMod.tor_alive());
+          global.__plTorAliveCache = { ts: now, ok };
+          return Promise.resolve(ok);
+        }
+      } catch (e) {}
+      return new Promise((resolve) => {
+        const netMod = require('net');
+        const sock = netMod.createConnection({ host: '127.0.0.1', port: 9050 });
+        let done = false;
+        const finish = (ok) => {
+          if (done) return;
+          done = true;
+          try { sock.destroy(); } catch (e) {}
+          global.__plTorAliveCache = { ts: Date.now(), ok };
+          resolve(ok);
+        };
+        sock.setTimeout(600);
+        sock.on('connect', () => finish(true));
+        sock.on('timeout', () => finish(false));
+        sock.on('error', () => finish(false));
+      });
+    }
+
+    const isInitialDirectMedia = isYoutubeHost(parsedTarget.hostname) || isDownloadOrMediaUrl(parsedTarget) || isDeezerHost(parsedTarget.hostname);
+    if (!isInitialDirectMedia) {
+      let torReady = Boolean((torAgent || SocksProxyAgent) && await isTorSocksAlive());
+      if (!torReady) {
+        try { await torManager.ensureRunning(); } catch (e) {}
+        _torAliveCache = { ts: 0, ok: false };
+        torReady = Boolean((torAgent || SocksProxyAgent) && await isTorSocksAlive());
+      }
+      if (!torReady) {
+        res.writeHead(503, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(`<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>Conectando ao Tor...</title></head><body style="font-family:system-ui;background:#07090e;color:#f8fafc;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;text-align:center;padding:24px;"><div style="max-width:460px;background:#0f172a;border:1px solid rgba(0,240,255,0.35);border-radius:16px;padding:28px;"><div style="font-size:38px;margin-bottom:10px;">🧅</div><h2 style="color:#38bdf8;margin:0 0 10px;">Iniciando Circuito Tor...</h2><p style="color:#94a3b8;font-size:14px;line-height:1.5;margin:0 0 18px;">O daemon Tor está inicializando para proteger seu IP antes de carregar esta página.</p><a href="/proxy?url=${encodeURIComponent(parsedTarget.href)}&clientId=${encodeURIComponent(clientId)}" style="display:inline-block;background:#00f0ff;color:#020617;font-weight:700;padding:10px 20px;border-radius:10px;text-decoration:none;">🔄 Carregar Agora via Tor</a></div></body></html>`);
+        return;
+      }
+    }
+
+    function fetchUrlViaProxy(targetUrlObj, redirectCount = 0, torCircuitRetry = 0, forceDirect = false, triedOnionHttp = 0) {
       if (!targetUrlObj || !/^https?:$/i.test(targetUrlObj.protocol) || isBlockedInternalProxyHost(targetUrlObj.hostname)) {
         if (!res.headersSent) {
           res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -12537,18 +14844,22 @@ function getDevicePlaylistsRoot(clientId, req) {
       // Segurança máxima: navegação externa sempre via rede Tor (nunca revela IP ou localização do servidor).
       const useTor = !isDirectMedia;
       let requestAgent = getOutboundAgent(useTor ? true : false);
-      if (useTor && !requestAgent && SocksProxyAgent) {
+      if (useTor && (!requestAgent || isOnion) && SocksProxyAgent) {
         try {
-          requestAgent = new SocksProxyAgent('socks5h://127.0.0.1:9050', { keepAlive: true, timeout: 15000 });
+          requestAgent = new SocksProxyAgent(
+            torCircuitRetry > 0
+              ? `socks5h://rot_${Date.now()}_${torCircuitRetry}:tor@127.0.0.1:9050`
+              : 'socks5h://127.0.0.1:9050',
+            { keepAlive: true, timeout: isOnion ? 35000 : 18000 }
+          );
         } catch (e) {}
       }
-      if (useTor && torCircuitRetry > 0 && SocksProxyAgent) {
-        try {
-          requestAgent = new SocksProxyAgent(`socks5h://rot_${Date.now()}_${torCircuitRetry}:tor@127.0.0.1:9050`, {
-            keepAlive: true,
-            timeout: 15000
-          });
-        } catch (e) {}
+      if (useTor && !requestAgent) {
+        if (!res.headersSent) {
+          res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+          res.end('Tor desconectado — requisição bloqueada para evitar vazamento de IP.');
+        }
+        return;
       }
 
       let torLocale = null;
@@ -12591,6 +14902,16 @@ function getDevicePlaylistsRoot(clientId, req) {
       if (req.headers['content-type']) proxyHeaders['Content-Type'] = req.headers['content-type'];
       if (req.headers['x-requested-with']) proxyHeaders['X-Requested-With'] = req.headers['x-requested-with'];
 
+      let proxyTimeoutMs = isOnion ? 45000 : (useTor ? 35000 : 60000);
+      if (useTor) {
+        try {
+          const torMod = pplRuntime ? pplRuntime.loadNativeModule('tor_proxy') : null;
+          if (torMod && typeof torMod.optimal_proxy_timeout_ms === 'function') {
+            proxyTimeoutMs = Number(torMod.optimal_proxy_timeout_ms(isOnion, torCircuitRetry)) || proxyTimeoutMs;
+          }
+        } catch (e) {}
+      }
+
       const proxyReq = clientProtocol.request(targetUrlObj, {
         method: req.method,
         headers: proxyHeaders,
@@ -12598,8 +14919,8 @@ function getDevicePlaylistsRoot(clientId, req) {
         family: useTor ? undefined : 4,
         ecdhCurve: 'X25519:P-256:P-384',
         rejectUnauthorized: false,
-        // Conexão direta/downloads usam timeout maior (60s) para arquivos pesados
-        timeout: useTor ? 35000 : 60000
+        // Timeout dinâmico calculado em PPL (tor_proxy.optimal_proxy_timeout_ms)
+        timeout: proxyTimeoutMs
       }, (proxyRes) => {
         // Preserva cookies de desafio (Cloudflare __cf_bm, cf_clearance, CSRF) ANTES de seguir redirects 301/302
         applyProxySetCookies(proxyRes.headers, req, clientId, targetUrlObj.hostname);
@@ -12688,6 +15009,14 @@ function getDevicePlaylistsRoot(clientId, req) {
                   // Toda navegação fica dentro do Papaléguas e continua na mesma conexão
                   // (Tor ou direta) do cliente: nunca abre janela nem sai do proxy.
                   function postToApp(payload) {
+                    if (payload && payload.type === 'open-new-tab' && payload.url) {
+                      var nowTs = Date.now();
+                      if (window.__plProxyLastOpenUrl === payload.url && (nowTs - (window.__plProxyLastOpenAt || 0)) < 800) {
+                        return;
+                      }
+                      window.__plProxyLastOpenUrl = payload.url;
+                      window.__plProxyLastOpenAt = nowTs;
+                    }
                     if (IN_ELECTRON) {
                       if (payload.type === 'navigate-sync') return;
                       try { window.torBrowserAPI.sendToHost(payload.type, payload.url); return; } catch (e) {}
@@ -12695,6 +15024,18 @@ function getDevicePlaylistsRoot(clientId, req) {
                     var app = appWindow();
                     if (app) {
                       try { app.postMessage(payload, '*'); return; } catch (e) {}
+                    }
+                    if (payload.type === 'open-new-tab' && payload.url) {
+                      try {
+                        var root = document.documentElement;
+                        if (root && root.__plPopupRelay) {
+                          root.setAttribute('data-pl-open-url', payload.url);
+                          root.dispatchEvent(new Event('papaleguas-open-tab'));
+                          return;
+                        }
+                        window.postMessage({ type: 'OPEN_NEW_TAB', url: payload.url }, '*');
+                        return;
+                      } catch (e) {}
                     }
                     if (payload.type === 'navigate-sync' || !payload.url) return;
                     // Sem casca por fora (aba solta): segue pelo proxy nesta mesma janela.
@@ -12829,18 +15170,30 @@ function getDevicePlaylistsRoot(clientId, req) {
                     if (e.defaultPrevented) return;
                     if (a && a.getAttribute('href') && !a.hasAttribute('download')) {
                       var h = a.href;
-                      if (h && (h.indexOf('http://') === 0 || h.indexOf('https://') === 0)) {
+                      if (h && (h.indexOf('http://') === 0 || h.indexOf('https://') === 0 || h.indexOf('/proxy') === 0)) {
                         e.preventDefault();
-                        // _blank, target nomeado e <base target> abrem aba do Papaléguas, nunca janela de fora.
-                        var linkTarget = (a.getAttribute('target') || '').trim().toLowerCase();
+                        // _blank, target nomeado, base target ou clique com Ctrl/Meta/botão do meio abrem aba do Papaléguas.
+                        var linkTarget = (a.getAttribute('data-pl-target') || a.getAttribute('target') || '').trim().toLowerCase();
                         if (!linkTarget) {
-                          var baseEl = document.querySelector('base[target]');
-                          linkTarget = baseEl ? (baseEl.getAttribute('target') || '').trim().toLowerCase() : '';
+                          var baseEl = document.querySelector('base[data-pl-target], base[target]');
+                          linkTarget = baseEl ? (baseEl.getAttribute('data-pl-target') || baseEl.getAttribute('target') || '').trim().toLowerCase() : '';
                         }
-                        var wantsNewTab = linkTarget && linkTarget !== '_self' && linkTarget !== '_parent' && linkTarget !== '_top';
+                        var wantsNewTab = (linkTarget && linkTarget !== '_self' && linkTarget !== '_parent' && linkTarget !== '_top') || e.button === 1 || e.ctrlKey || e.metaKey;
                         postToApp({ type: wantsNewTab ? 'open-new-tab' : 'navigate-current-tab', url: realTargetFromHref(h) });
                         return;
                       }
+                    }
+                  }, true);
+
+                  document.addEventListener('auxclick', function(e) {
+                    if (e.button !== 1) return;
+                    var a = e.target && e.target.closest ? e.target.closest('a') : null;
+                    if (!a || a.hasAttribute('download')) return;
+                    var h = a.href || a.getAttribute('href');
+                    if (h && (h.indexOf('http://') === 0 || h.indexOf('https://') === 0 || h.indexOf('/proxy') === 0)) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      postToApp({ type: 'open-new-tab', url: realTargetFromHref(h) });
                     }
                   }, true);
 
@@ -12997,19 +15350,17 @@ function getDevicePlaylistsRoot(clientId, req) {
           try { res.destroy(); } catch (e) { swallowed(e, 'server:fetchUrlViaProxy@12052'); }
           return;
         }
-        if (useTor && !isOnion) {
-          if (torCircuitRetry < 2) {
-            fetchUrlViaProxy(targetUrlObj, redirectCount, torCircuitRetry + 1, false);
-            return;
-          }
-        }
-        if (isOnion && targetUrlObj.protocol === 'https:' && redirectCount > 0) {
+        if (isOnion && targetUrlObj.protocol === 'https:' && !triedOnionHttp) {
           try {
             const fallbackHttp = new URL(targetUrlObj.href);
             fallbackHttp.protocol = 'http:';
-            fetchUrlViaProxy(fallbackHttp, redirectCount + 1);
+            fetchUrlViaProxy(fallbackHttp, redirectCount + 1, torCircuitRetry, false, 1);
             return;
           } catch (e) { swallowed(e, 'server:fetchUrlViaProxy@12061'); }
+        }
+        if (useTor && (isOnion ? torCircuitRetry < 1 : torCircuitRetry < 2)) {
+          fetchUrlViaProxy(targetUrlObj, redirectCount, torCircuitRetry + 1, false, triedOnionHttp);
+          return;
         }
         try {
           if (isOnion) {
@@ -13066,13 +15417,55 @@ function getDevicePlaylistsRoot(clientId, req) {
   }
 
   // ----------------------------------------------------
+  // PLAYER DE STREAMING AO VIVO PARA CÂMERAS IP PÚBLICAS (/ipcam-live)
+  // Converte endpoints de snapshot/MJPEG em vídeo contínuo em tempo real (double-buffer sem piscar)
+  // ----------------------------------------------------
+  if (pathname === '/ipcam-live') {
+    const camUrl = String(reqUrl.searchParams.get('url') || '').trim();
+    const camTitle = String(reqUrl.searchParams.get('title') || 'Câmera IP Ao Vivo').trim();
+    const clientId = req.headers['x-client-id'] || reqUrl.searchParams.get('clientId') || 'client_default';
+    const liveHtml = buildIpCamLiveHtml({ camUrl, camTitle, clientId, escapeHtml });
+    sendCompressed(req, res, 200, { 'Content-Type': 'text/html; charset=utf-8' }, liveHtml);
+    return;
+  }
+
+  // ----------------------------------------------------
+  // PLAYER NATIVO PARA VÍDEOS EXTERNOS (TikTok, Dailymotion, Vimeo, Kwai) (/video-watch)
+  // ----------------------------------------------------
+  if (pathname === '/video-watch') {
+    const rawVideoUrl = String(reqUrl.searchParams.get('url') || '').trim();
+    const rawTitle = String(reqUrl.searchParams.get('title') || '').trim();
+    const clientId = req.headers['x-client-id'] || reqUrl.searchParams.get('clientId') || 'client_default';
+    if (!rawVideoUrl) {
+      res.writeHead(302, { Location: '/search?filter=videos' });
+      res.end();
+      return;
+    }
+    const matched = matchExternalVideoWatchUrl(rawVideoUrl);
+    if (matched && matched.platform === 'youtube' && matched.videoId) {
+      res.writeHead(302, { Location: `/baixatube?v=${encodeURIComponent(matched.videoId)}` });
+      res.end();
+      return;
+    }
+    const vInfo = await resolveExternalVideoInfo(rawVideoUrl, rawTitle);
+    if (vInfo && (vInfo.streamUrl || vInfo.embedUrl)) {
+      const playerHtml = buildExternalVideoPlayerPage(vInfo, clientId);
+      sendCompressed(req, res, 200, { 'Content-Type': 'text/html; charset=utf-8' }, playerHtml);
+      return;
+    }
+    res.writeHead(302, { Location: `/proxy?url=${encodeURIComponent(rawVideoUrl)}&raw=1&clientId=${encodeURIComponent(clientId)}` });
+    res.end();
+    return;
+  }
+
+  // ----------------------------------------------------
   // BUSCADOR INTELIGENTE EMBUTIDO (Mobile & Web)
   // Combina fontes públicas e ordena os resultados pela relevância do termo.
   // ----------------------------------------------------
   if (pathname === '/search') {
     const clientId = req.headers['x-client-id'] || reqUrl.searchParams.get('clientId') || 'client_default';
     const clientSession = getOrCreateClientSession(clientId);
-    const q = reqUrl.searchParams.get('q') || '';
+    const q = sanitizeSearchFieldInput(reqUrl.searchParams.get('q') || '');
     const activeFilter = (reqUrl.searchParams.get('filter') || 'all').toLowerCase();
     const useTor = true;
     let results = [];
@@ -13083,7 +15476,7 @@ function getDevicePlaylistsRoot(clientId, req) {
     let videosItems = [];
     let imagesItems = [];
     try {
-      const rich = q ? await getRichSearchData(q, useTor) : null;
+      const rich = q ? await getRichSearchData(q, useTor, activeFilter) : null;
       if (rich) {
         results = rich.results || [];
         onionItems = rich.onion || [];
@@ -13098,41 +15491,23 @@ function getDevicePlaylistsRoot(clientId, req) {
       results = [];
     }
 
-    if (q && (!onionItems || onionItems.length === 0)) {
-      try {
-        onionItems = await searchOnionLinks(q);
-      } catch (e) {
-        onionItems = [];
-      }
-    }
-
-    videosItems = [];
-
-    if (q && (!imagesItems || imagesItems.length === 0)) {
-      try {
-        imagesItems = await searchTopicImages(q, useTor);
-      } catch (e) {
-        imagesItems = [];
-      }
-    }
-
     // Mantém todos os links ativos do tema e confirmados
     onionItems = (onionItems || []).filter(i => !i.uptime || i.uptime.online !== false || i.uptime.statusCode < 400);
 
     let initialAiAnswer = '';
     let initialAiSources = [];
-    if (q) {
+    if (q && activeFilter === 'all') {
       try {
-        const aiRes = await answerSearchWithAi(q, {
+        const aiPayload = {
           q,
           viaTor: useTor,
           results,
           news: newsItems,
           onion: onionItems,
           wiki: wikiData
-        });
-        initialAiAnswer = aiRes.answer || '';
-        initialAiSources = aiRes.sources || [];
+        };
+        initialAiSources = buildAiSources(aiPayload, 12);
+        initialAiAnswer = generateExtractionBasedAnswer(q, initialAiSources, aiPayload) || '';
         const cacheKey = (useTor ? 'tor:' : 'web:') + q.toLowerCase();
         searchAnswerCache.set(cacheKey, { t: Date.now(), payload: { q, answer: initialAiAnswer, sources: initialAiSources } });
       } catch (err) {
@@ -13140,48 +15515,32 @@ function getDevicePlaylistsRoot(clientId, req) {
       }
     }
 
-    // Pré-carrega no servidor a prévia REAL (OpenGraph image + description) exclusivamente de cada site dos resultados
+    // Aplica imediatamente do cache em memória (0ms) e aquece prévias em background sem travar a entrega do HTML
     if (results.length) {
-      const topResults = results.slice(0, 10);
-      await Promise.allSettled(topResults.map(async (r) => {
-        if (!r.url || !/^https?:/i.test(r.url) || isOnionHref(r.url)) return;
-        try {
-          const cached = pagePreviewCache.get(r.url);
-          if (cached && cached.data && (Date.now() - cached.t < PAGE_PREVIEW_TTL)) {
-            if (cached.data.image) r.image = cached.data.image;
-            if (cached.data.description && (!r.snippet || cached.data.description.length > r.snippet.length)) {
-              r.snippet = cached.data.description;
-            }
-            if (cached.data.favicon) r.favicon = cached.data.favicon;
-            return;
+      const topResults = results.slice(0, 24);
+      topResults.forEach((r) => {
+        if (!r || !r.url) return;
+        const cached = pagePreviewCache.get(r.url);
+        if (cached && cached.data && (Date.now() - cached.t < PAGE_PREVIEW_TTL)) {
+          if (cached.data.image && !r.image) r.image = cached.data.image;
+          if (cached.data.description && (!r.snippet || cached.data.description.length > r.snippet.length)) {
+            r.snippet = cached.data.description;
           }
-          const pv = await Promise.race([
-            getPagePreview(r.url, useTor),
-            new Promise((res) => setTimeout(() => res(null), 1200))
-          ]);
-          if (pv && pv.image) {
-            r.image = pv.image;
-            if (pv.description && (!r.snippet || pv.description.length > r.snippet.length)) {
-              r.snippet = pv.description;
-            }
-            if (pv.favicon) r.favicon = pv.favicon;
-          }
-        } catch (e) {}
-      }));
+          if (cached.data.favicon && !r.favicon) r.favicon = cached.data.favicon;
+        }
+      });
 
-      // Pré-aquece em background o próximo lote (resultados 11..20) no pagePreviewCache
-      // para que "Carregar mais resultados" já exiba imagens e descrições instantaneamente.
-      const nextPreviewBatch = results.slice(10, 20);
+      const nextPreviewBatch = results.slice(0, 14);
       if (nextPreviewBatch.length) {
         setImmediate(() => {
           Promise.allSettled(nextPreviewBatch.map(async (r) => {
-            if (!r || !r.url || !/^https?:/i.test(r.url) || isOnionHref(r.url)) return;
+            if (!r || !r.url || !/^https?:/i.test(r.url) || isOnionHref(r.url) || r.image || r.source === 'ip-cam' || /\.pdf(?:[?#]|$)/i.test(r.url)) return;
             const cached = pagePreviewCache.get(r.url);
             if (cached && cached.data && (Date.now() - cached.t < PAGE_PREVIEW_TTL)) return;
             try {
               await Promise.race([
                 getPagePreview(r.url, useTor),
-                new Promise((res) => setTimeout(() => res(null), 2500))
+                new Promise((res) => setTimeout(() => res(null), 2000))
               ]);
             } catch (e) {}
           })).catch(() => {});
@@ -13219,7 +15578,7 @@ function getDevicePlaylistsRoot(clientId, req) {
             return `
             <a class="image-card" href="${proxyPageHref}" data-direct="${pageUrl}" data-page="${pageUrl}" data-idx="${i}" data-full="${fullSrc}" data-title="${titleSafe}" data-source="${sourceSafe}" title="Acessar página de ${sourceSafe} no Papaléguas">
               <div class="image-thumb-wrap">
-                <img class="image-thumb" src="${thumbSrc}" alt="${titleSafe}" loading="lazy" onerror="this.closest('.image-card').style.display='none'" />
+                <img class="image-thumb" src="${thumbSrc}" alt="${titleSafe}" width="165" height="115" loading="${i < 4 ? 'eager' : 'lazy'}" fetchpriority="${i < 4 ? 'high' : 'low'}" decoding="async" onerror="this.closest('.image-card').style.display='none'" />
                 <span class="image-source-badge">${sourceSafe} ↗</span>
                 <button type="button" class="image-zoom-btn" onclick="event.preventDefault(); event.stopPropagation(); openLightboxCard(this.closest('.image-card'))" title="Ampliar imagem">🔍</button>
               </div>
@@ -13233,7 +15592,55 @@ function getDevicePlaylistsRoot(clientId, req) {
       </section>
     ` : '';
 
-    const videosHtml = '';
+    const videosHtml = q ? `
+      <section class="videos-block ${activeFilter === 'videos' ? 'is-grid' : ''}" id="sectionVideos" data-section="videos" style="${videosItems.length ? '' : 'display:none;'}">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:10px;flex-wrap:wrap;">
+          <div style="display:flex;align-items:center;gap:10px;">
+            <h3 class="block-title" style="margin:0;">🎬 Vídeos (<span id="videosCount">${videosItems.length}</span>)</h3>
+            <button type="button" id="toggleVideosGridBtn" onclick="toggleVideosGrid()" class="images-toggle-grid-btn" title="Alternar entre Carrossel e Grade de Vídeos">
+              <span id="toggleVideosGridIcon">${activeFilter === 'videos' ? '↔' : '⊞'}</span> <span id="toggleVideosGridText">${activeFilter === 'videos' ? 'Ver carrossel' : 'Ver em grade'}</span>
+            </button>
+          </div>
+          <span style="font-size:11.5px;color:#94a3b8;">Vídeos de vários sites • Clique para assistir</span>
+        </div>
+        <div class="videos-carousel" id="videosCarousel">
+          ${videosItems.map((v, vIdx) => {
+            const titleSafe = escapeHtml(v.title || q);
+            const rawUrl = String(v.url || (v.id ? 'https://www.youtube.com/watch?v=' + v.id : '')).trim();
+            const isYt = Boolean(v.isYoutube && v.id);
+            const cardHref = isYt
+              ? `/baixatube?v=${encodeURIComponent(v.id)}`
+              : `/video-watch?url=${encodeURIComponent(rawUrl)}&title=${encodeURIComponent(v.title || q)}&clientId=${encodeURIComponent(clientId)}`;
+            const thumbSrc = escapeHtml(v.thumbnail || (v.id ? `https://i.ytimg.com/vi/${v.id}/hqdefault.jpg` : ''));
+            const durSafe = escapeHtml(v.duration || '');
+            const sourceSafe = escapeHtml(v.source || safeHostname(rawUrl) || v.channel || 'Web');
+            const channelSafe = escapeHtml(v.channel || sourceSafe);
+            const viewsSafe = escapeHtml(v.views || '');
+            return `
+            <a class="video-card ${isYt ? '' : 'video-card-external'}" href="${cardHref}" data-direct="${escapeHtml(isYt ? rawUrl : cardHref)}" ${isYt ? `data-video-id="${escapeHtml(v.id)}" data-video-title="${titleSafe}"` : ''} title="Assistir ${titleSafe} (${sourceSafe})">
+              <div class="video-thumb-wrap">
+                <img class="video-thumb" src="${thumbSrc}" alt="${titleSafe}" width="225" height="125" loading="${vIdx < 4 ? 'eager' : 'lazy'}" fetchpriority="${vIdx < 4 ? 'high' : 'low'}" decoding="async" onerror="this.closest('.video-card').style.display='none'" />
+                ${durSafe ? `<span class="video-duration">${durSafe}</span>` : ''}
+                <span class="image-source-badge">${sourceSafe} ↗</span>
+                <div class="video-play-overlay">
+                  <span class="video-play-icon">▶</span>
+                </div>
+              </div>
+              <div class="video-info">
+                <h4 class="video-title" title="${titleSafe}">${titleSafe}</h4>
+                <div class="video-meta">
+                  <span class="video-channel">${channelSafe}</span>
+                  ${viewsSafe ? `<span class="video-views">· ${viewsSafe}</span>` : ''}
+                </div>
+              </div>
+            </a>`;
+          }).join('')}
+          <div class="carousel-infinite-spinner" id="videosInfiniteSpinner" style="display:none;" aria-hidden="true"><span class="infinite-spin-icon">⏳</span></div>
+          <button type="button" class="carousel-load-more-pill" id="videosLoadMoreBtn" onclick="loadMoreVideosAuto()" title="Carregar mais vídeos">➕ Mais vídeos</button>
+          <div class="carousel-sentinel" id="videosSentinel" style="width:24px;min-width:24px;height:60px;flex-shrink:0;"></div>
+        </div>
+      </section>
+    ` : '';
 
     const newsHtml = (newsItems && newsItems.length) ? `
       <section class="news-block" id="sectionNews" data-section="news" style="${activeFilter === 'all' || activeFilter === 'news' ? '' : 'display:none;'}">
@@ -13242,7 +15649,7 @@ function getDevicePlaylistsRoot(clientId, req) {
           ${newsItems.map((item) => {
             const host = safeHostname(item.url);
             return `
-            <a class="news-item" href="/proxy?url=${encodeURIComponent(item.url)}&clientId=${encodeURIComponent(clientId)}" data-direct="${escapeHtml(item.url)}" data-url="${escapeHtml(item.url)}">
+            <a class="news-item" href="${escapeHtml(wrapProxyAbs(item.url, clientId))}" data-direct="${escapeHtml(item.url)}" data-url="${escapeHtml(item.url)}">
               <span class="news-title">${escapeHtml(item.title)}</span>
               <span class="news-meta">${escapeHtml(host)}${item.date ? ' · ' + escapeHtml(formatSearchDate(item.date)) : ''}</span>
               ${item.snippet ? `<span class="news-snip">${escapeHtml(item.snippet)}</span>` : ''}
@@ -13253,20 +15660,21 @@ function getDevicePlaylistsRoot(clientId, req) {
     ` : '';
 
     const onlineCount = onionItems.length;
-    const onionHtml = (onionItems && onionItems.length) ? `
-      <div class="onion-depth-indicator" style="text-align: center; margin: 30px 0 18px 0; ${activeFilter === 'all' || activeFilter === 'tor' ? '' : 'display:none;'}">
+    const onionVisibleInitial = (activeFilter === 'tor') || (activeFilter === 'all' && onlineCount > 0);
+    const onionHtml = q ? `
+      <div class="onion-depth-indicator" style="text-align: center; margin: 30px 0 18px 0; ${onionVisibleInitial ? '' : 'display:none;'}">
         <span style="display: inline-flex; align-items: center; gap: 8px; background: rgba(16, 185, 129, 0.16); border: 1px solid rgba(34, 197, 94, 0.55); color: #86efac; padding: 6px 18px; border-radius: 24px; font-size: 12px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase; box-shadow: 0 0 25px rgba(34, 197, 94, 0.35);">
           <span style="width: 8px; height: 8px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 10px #22c55e, 0 0 20px #22c55e;"></span>
           Rede Tor • Links Confirmados Online
         </span>
       </div>
-      <section id="onionSection" class="onion-block" style="margin: 0 0 40px 0; background: linear-gradient(180deg, rgba(6, 44, 25, 0.55) 0%, rgba(2, 6, 4, 0.98) 100%); border: 1px solid rgba(34, 197, 94, 0.5); border-radius: 22px; padding: 22px 24px; box-shadow: 0 10px 45px rgba(0, 0, 0, 0.95), 0 0 35px rgba(34, 197, 94, 0.25); position: relative; z-index: 2; ${activeFilter === 'all' || activeFilter === 'tor' ? '' : 'display:none;'}">
+      <section id="onionSection" class="onion-block" style="margin: 0 0 40px 0; background: linear-gradient(180deg, rgba(6, 44, 25, 0.55) 0%, rgba(2, 6, 4, 0.98) 100%); border: 1px solid rgba(34, 197, 94, 0.5); border-radius: 22px; padding: 22px 24px; box-shadow: 0 10px 45px rgba(0, 0, 0, 0.95), 0 0 35px rgba(34, 197, 94, 0.25); position: relative; z-index: 2; ${onionVisibleInitial ? '' : 'display:none;'}">
         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; flex-wrap: wrap; gap: 10px;">
           <h3 style="font-size: 17px; font-weight: 700; color: #4ade80; display: flex; align-items: center; gap: 8px; margin: 0; letter-spacing: -0.2px; text-shadow: 0 0 14px rgba(34, 197, 94, 0.5);">
             <span style="font-size: 24px; filter: drop-shadow(0 0 10px rgba(34, 197, 94, 0.9));">🧅</span> Buscador Tor • Links 100% Confirmados Online (200 OK)
           </h3>
           <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-            <span style="font-size: 11.5px; background: rgba(16, 185, 129, 0.25); color: #86efac; padding: 3px 12px; border-radius: 12px; font-weight: 700; border: 1px solid rgba(34, 197, 94, 0.6); box-shadow: 0 0 12px rgba(34, 197, 94, 0.35);">
+            <span id="onionOnlineCountBadge" style="font-size: 11.5px; background: rgba(16, 185, 129, 0.25); color: #86efac; padding: 3px 12px; border-radius: 12px; font-weight: 700; border: 1px solid rgba(34, 197, 94, 0.6); box-shadow: 0 0 12px rgba(34, 197, 94, 0.35);">
               🟢 ${onlineCount} Confirmados Online
             </span>
           </div>
@@ -13274,7 +15682,7 @@ function getDevicePlaylistsRoot(clientId, req) {
         <p style="font-size: 13px; color: #a1a1aa; margin: 0 0 16px 0; line-height: 1.55;">
           Apenas nós e serviços .onion com <b>status HTTP 200 OK confirmado</b> e ativos na rede Tor. Links offline, quebrados ou antigos são descartados automaticamente.
         </p>
-        <div style="display: flex; flex-direction: column; gap: 14px;">
+        <div id="onionResultsContainer" style="display: flex; flex-direction: column; gap: 14px;">
           ${onionItems.map((item, idx) => {
             const isWebHarvest = (item.category === 'Descoberto em Blogs/Web' || item.source === 'Varredura em Blogs & Artigos');
             const isAhmiaLive = (item.source === 'Ahmia Live Index' || /Ahmia/i.test(item.category || ''));
@@ -13399,7 +15807,20 @@ function getDevicePlaylistsRoot(clientId, req) {
     const rustMetrics = nativeCore.getEngineMetrics();
     const rustIndexedDocs = rustMetrics.indexedDocumentsCount || rustMetrics.indexed_documents_count || 0;
     const rustIndexedTerms = rustMetrics.indexedTermsCount || rustMetrics.indexed_terms_count || 0;
-    const filterPillsHtml = '';
+    const filterPillsHtml = q ? `
+      <nav class="search-filter-bar" id="searchFilterBar" aria-label="Filtros da pesquisa">
+        <div class="search-filter-pills" id="searchFilterPills">
+          <button type="button" class="search-pill ${activeFilter === 'all' ? 'is-active' : ''}" data-filter="all">🌟 Todos</button>
+          <button type="button" class="search-pill ${activeFilter === 'videos' ? 'is-active' : ''}" data-filter="videos">🎬 Vídeos <span class="pill-count-videos">${videosItems.length}</span></button>
+          <button type="button" class="search-pill ${activeFilter === 'images' ? 'is-active' : ''}" data-filter="images">🖼️ Imagens <span class="pill-count-images">${imagesItems.length}</span></button>
+          <button type="button" class="search-pill ${activeFilter === 'web' ? 'is-active' : ''}" data-filter="web">⚡ Web (PPL)</button>
+          <button type="button" class="search-pill ${activeFilter === 'pdf' ? 'is-active' : ''}" data-filter="pdf">📄 PDF</button>
+          <button type="button" class="search-pill ${activeFilter === 'ipcam' ? 'is-active' : ''}" data-filter="ipcam">📹 Câmera IP</button>
+          <button type="button" class="search-pill ${activeFilter === 'tor' ? 'is-active' : ''}" data-filter="tor">🧅 .onion <span class="pill-count-tor">${onionItems.length}</span></button>
+          <button type="button" class="search-pill ${activeFilter === 'news' ? 'is-active' : ''}" data-filter="news">📰 Notícias</button>
+        </div>
+      </nav>
+    ` : '';
 
     const wikiHtml = (wikiData && (wikiData.extract || wikiData.title)) ? `
       <section class="wiki-knowledge-card" id="sectionWiki" data-section="wiki" style="${activeFilter === 'all' || activeFilter === 'wiki' ? '' : 'display:none;'}">
@@ -13416,7 +15837,7 @@ function getDevicePlaylistsRoot(clientId, req) {
             ${wikiData.description ? `<div class="wiki-card-desc">${escapeHtml(wikiData.description)}</div>` : ''}
             <p class="wiki-card-extract">${escapeHtml(wikiData.extract)}</p>
             <div class="wiki-card-actions">
-              <a href="/proxy?url=${encodeURIComponent(wikiData.url)}&clientId=${encodeURIComponent(clientId)}" data-direct="${escapeHtml(wikiData.url)}" class="wiki-read-btn">
+              <a href="${escapeHtml(wrapProxyAbs(wikiData.url, clientId))}" data-direct="${escapeHtml(wikiData.url)}" class="wiki-read-btn">
                 Ler artigo completo na Wikipédia →
               </a>
             </div>
@@ -13432,24 +15853,31 @@ function getDevicePlaylistsRoot(clientId, req) {
           <div style="width: 68px; height: 68px; border-radius: 22px; background: rgba(249, 115, 22, 0.14); border: 1px solid rgba(249, 115, 22, 0.45); display: flex; align-items: center; justify-content: center; margin: 0 auto 20px; font-size: 32px; box-shadow: 0 0 30px rgba(249, 115, 22, 0.25);">
             ⚡
           </div>
-          <h2 style="font-size: 24px; font-weight: 700; color: #fff; margin-bottom: 12px; letter-spacing: -0.3px;">Motor de Busca Próprio Papaléguas (Rust v2.0)</h2>
+          <h2 style="font-size: 24px; font-weight: 700; color: #fff; margin-bottom: 12px; letter-spacing: -0.3px;">Motor de Busca Próprio Papaléguas (Motor PPL)</h2>
           <p style="font-size: 14px; color: #94a3b8; line-height: 1.6; margin-bottom: 20px;">
-            Índice Invertido Nativo BM25 compilado em Rust com varredura autônoma da web, conhecimento enciclopédico e notícias em tempo real — <b>sem depender de outros navegadores e com Zero Cookies</b>.
+            Índice Invertido Nativo BM25 + Ranqueamento em C (PPL) com varredura autônoma da web, conhecimento enciclopédico e notícias em tempo real — <b>sem depender de outros navegadores e com Zero Cookies</b>.
           </p>
           <div style="display:inline-flex;align-items:center;gap:8px;padding:8px 16px;border-radius:999px;background:rgba(249,115,22,0.14);border:1px solid rgba(249,115,22,0.45);color:#fdba74;font-size:12.5px;font-weight:700;">
-            🦀 ${rustIndexedDocs} páginas indexadas em memória (${rustIndexedTerms} termos BM25)
+            ⚡ ${rustIndexedDocs} páginas indexadas no Motor PPL (${rustIndexedTerms} termos)
           </div>
         </div>
       `;
     } else if (results.length === 0) {
-      resultsHtml = `
+      resultsHtml = activeFilter === 'ipcam'
+        ? `
+        <div style="text-align: center; padding: 40px 20px; color: #94a3b8;">
+          <p style="font-size: 16px;">📹 Nenhuma câmera IP encontrada para "<b>${safeQ}</b>" no momento.</p>
+          <p style="font-size: 13.5px; margin-top: 10px; color: #64748b;">Tente pesquisar por país, cidade ou ambiente (ex.: <b>brasil</b>, <b>praia</b>, <b>rua</b>, <b>hotel</b>, <b>quarto</b>, <b>estacionamento</b>).</p>
+        </div>
+      `
+        : `
         <div style="text-align: center; padding: 40px 20px; color: #94a3b8;">
           <p style="font-size: 16px;">Nenhum resultado direto encontrado para "<b>${safeQ}</b>" no índice no momento.</p>
-          <p style="font-size: 13.5px; margin-top: 10px; color: #64748b;">Tente reformular os termos da sua pesquisa no Motor Papaléguas Rust.</p>
+          <p style="font-size: 13.5px; margin-top: 10px; color: #64748b;">Tente reformular os termos da sua pesquisa no Motor Papaléguas PPL.</p>
         </div>
       `;
     } else {
-      const initialResults = results.slice(0, 10);
+      const initialResults = results.slice(0, 24);
       resultsHtml = initialResults.map((r, index) => {
         const safeTitle = escapeHtml(r.title);
         const safeSnippet = escapeHtml(r.snippet);
@@ -13458,13 +15886,19 @@ function getDevicePlaylistsRoot(clientId, req) {
         const letter = String(hostLabel || '?').charAt(0).toUpperCase();
         const dateLabel = r.date ? formatSearchDate(r.date) : '';
         const isTopPick = index < 3;
-        const sourceTagHtml = `<span class="url-source-tag source-rust-index">⚡ MOTOR RUST</span>`;
+        const isIpCamCard = r.source === 'ip-cam' || r.source === 'ip-direct' || activeFilter === 'ipcam' || /^https?:\/\/\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?/i.test(String(r.url || ''));
+        const isPdfCard = !isIpCamCard && (activeFilter === 'pdf' || /\.pdf(?:[?#]|$)/i.test(String(r.url || '')));
+        const sourceTagHtml = isIpCamCard
+          ? `<span class="url-source-tag" style="background:rgba(16,185,129,0.22);color:#34d399;border:1px solid rgba(16,185,129,0.5);">🟢 CÂMERA IP AO VIVO</span>`
+          : (isPdfCard
+            ? `<span class="url-source-tag" style="background:rgba(239,68,68,0.2);color:#fca5a5;border:1px solid rgba(239,68,68,0.45);">📄 DOCUMENTO PDF</span>`
+            : `<span class="url-source-tag source-rust-index">⚡ MOTOR PPL</span>`);
 
         // Mídia vinculada: apenas vídeo específico se detectado (NUNCA pareia imagens aleatórias de outros sites)
-        const pairedVideo = r.video || (videosItems && videosItems[index]) || null;
+        const pairedVideo = (!isIpCamCard && !isPdfCard) ? (r.video || (videosItems && videosItems[index]) || null) : null;
         const mediaHtml = (pairedVideo && pairedVideo.id) ? `
           <div class="link-media-row">
-            <div class="link-media-item link-media-video" data-video-id="${escapeHtml(pairedVideo.id)}" data-video-title="${escapeHtml(pairedVideo.title || safeTitle)}" onclick="openVideo(this.getAttribute('data-video-id'), this.getAttribute('data-video-title'))" role="button" tabindex="0" title="Assistir vídeo na aplicação">
+            <div class="link-media-item link-media-video" data-video-id="${escapeHtml(pairedVideo.id)}" data-video-title="${escapeHtml(pairedVideo.title || safeTitle)}" role="button" tabindex="0" title="Assistir vídeo na aplicação">
               <div class="link-media-thumb-wrap">
                 <img class="link-media-thumb" src="${escapeHtml(pairedVideo.thumbnail || ('https://i.ytimg.com/vi/' + pairedVideo.id + '/hqdefault.jpg'))}" alt="${escapeHtml(pairedVideo.title || safeTitle)}" loading="lazy" onerror="this.src='https://i.ytimg.com/vi/${escapeHtml(pairedVideo.id)}/hqdefault.jpg'" />
                 <span class="link-media-play-icon">▶</span>
@@ -13477,19 +15911,42 @@ function getDevicePlaylistsRoot(clientId, req) {
             </div>
           </div>` : '';
 
+        const quickActionHtml = isIpCamCard
+          ? `<div class="result-quick-actions" style="display:flex;gap:8px;padding:6px 14px 10px;flex-wrap:wrap;">
+               <button type="button" class="btn-smart-preview btn-open-ipcam" data-preview-url="${safeUrl}" data-preview-title="${safeTitle}" style="font-size:11.5px;font-weight:700;color:#d1fae5;background:rgba(16,185,129,0.22);border:1px solid rgba(16,185,129,0.55);border-radius:8px;padding:5px 12px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;">
+                 🔴 Assistir Câmera Ao Vivo (Tempo Real)
+               </button>
+             </div>`
+          : (isPdfCard
+            ? `<div class="result-quick-actions" style="display:flex;gap:8px;padding:6px 14px 10px;flex-wrap:wrap;">
+                 <button type="button" class="btn-smart-preview btn-open-pdf" data-preview-url="${safeUrl}" data-preview-title="${safeTitle}" style="font-size:11.5px;font-weight:700;color:#fecaca;background:rgba(239,68,68,0.2);border:1px solid rgba(239,68,68,0.5);border-radius:8px;padding:5px 12px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;">
+                   📄 Ler PDF Integrado Aqui
+                 </button>
+               </div>`
+            : `<div class="result-quick-actions" style="display:flex;gap:8px;padding:4px 14px 9px;flex-wrap:wrap;">
+                 <button type="button" class="btn-smart-preview btn-open-reader" data-preview-url="${safeUrl}" data-preview-title="${safeTitle}" style="font-size:11px;font-weight:600;color:#bae6fd;background:rgba(56,189,248,0.12);border:1px solid rgba(56,189,248,0.35);border-radius:8px;padding:4px 10px;cursor:pointer;display:inline-flex;align-items:center;gap:5px;">
+                   📖 Modo Leitura Limpo
+                 </button>
+               </div>`);
+
         // A imagem exibida pertence ESTRITAMENTE ao site do resultado (extraída de r.url via OpenGraph/Twitter)
         const previewImgHtml = r.image ? `
           <span class="url-suggest-pv is-ready" data-url="${safeUrl}">
-            <img src="/api/preview-img?u=${encodeURIComponent(r.image)}&clientId=${encodeURIComponent(clientId)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.parentElement.remove()" />
+            <img src="${isIpCamCard ? `/api/ipcam-frame?ppl=${encodeURIComponent(encryptPplPayload({ u: r.image, _t: Date.now() }))}` : `/api/preview-img?ppl=${encodeURIComponent(encryptPplPayload({ u: r.image, clientId }))}`}" alt="" width="136" height="90" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.parentElement.remove()" />
           </span>` : '';
 
         const faviconHtml = r.favicon ? `
-          <img src="/api/preview-img?u=${encodeURIComponent(r.favicon)}&clientId=${encodeURIComponent(clientId)}" alt="" onerror="this.remove()" />
+          <img src="/api/preview-img?ppl=${encodeURIComponent(encryptPplPayload({ u: r.favicon, clientId }))}" alt="" width="20" height="20" loading="lazy" decoding="async" onerror="this.remove()" />
         ` : letter;
+
+        const rowTargetHref = isIpCamCard
+          ? `/ipcam-live?url=${encodeURIComponent(r.url)}&title=${encodeURIComponent(r.title || 'Câmera IP')}&clientId=${encodeURIComponent(clientId)}`
+          : wrapProxyAbs(r.url, clientId);
+        const rowDirectUrl = isIpCamCard ? rowTargetHref : safeUrl;
 
         return `
         <div class="search-result-card ${isTopPick ? 'is-pick' : ''}">
-          <a class="url-suggest-row" href="/proxy?url=${encodeURIComponent(r.url)}&clientId=${encodeURIComponent(clientId)}" data-direct="${safeUrl}" data-url="${safeUrl}" ${r.image ? 'data-pv="1"' : ''}>
+          <a class="url-suggest-row" href="${rowTargetHref}" target="_self" rel="noopener noreferrer" data-direct="${escapeHtml(rowDirectUrl)}" data-url="${safeUrl}" ${isIpCamCard ? 'data-ipcam="1"' : ''} ${r.image ? 'data-pv="1"' : ''}>
             <span class="url-suggest-fav">${faviconHtml}</span>
             <span class="url-suggest-meta">
               <span class="url-suggest-title">${safeTitle}${sourceTagHtml}${isTopPick ? ' <span class="url-pick-badge">Mais Relevante</span>' : ''}</span>
@@ -13497,8 +15954,9 @@ function getDevicePlaylistsRoot(clientId, req) {
               ${safeSnippet ? `<span class="url-suggest-snip">${safeSnippet}</span>` : ''}
             </span>
             ${previewImgHtml}
-            <span class="url-suggest-ext" title="Acessar no Papaléguas">Acessar →</span>
+            <span class="url-suggest-ext" title="${isIpCamCard ? 'Assistir Streaming Ao Vivo' : 'Acessar no Papaléguas'}">${isIpCamCard ? '🔴 Ao Vivo →' : 'Acessar →'}</span>
           </a>
+          ${quickActionHtml}
           ${mediaHtml}
         </div>
       `;
@@ -13509,14 +15967,21 @@ function getDevicePlaylistsRoot(clientId, req) {
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-5788322050130808"
-     crossorigin="anonymous"></script>
-  <title>${safeQ ? safeQ + ' - Papaléguas Search (Motor Rust v2.0)' : 'Papaléguas Search • Motor de Busca Próprio em Rust'}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="${safeQ ? 'Resultados de busca por ' + safeQ + ' no Motor de Busca Próprio Papaléguas (PPL) com vídeos, imagens e web.' : 'Motor de Busca Próprio Papaléguas (PPL) com índice BM25, vídeos, imagens e privacidade total.'}">
+  <title>${safeQ ? safeQ + ' - Papaléguas Search (Motor PPL)' : 'Papaléguas Search • Motor de Busca Próprio PPL'}</title>
   ${botCommander ? botCommander.getAiDirectiveHtml() : ''}
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+  <noscript><link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"></noscript>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      overflow-x: hidden;
+      max-width: 100%;
+    }
     body {
       background-color: #0c0e14;
       color: #e2e8f0;
@@ -13808,23 +16273,50 @@ function getDevicePlaylistsRoot(clientId, req) {
       color: #fff;
     }
 
+    #webResultsBar {
+      margin: 18px 0 12px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+    }
+    #resultsList {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
     .search-result-card {
       display: flex;
       flex-direction: column;
-      border-radius: 12px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-      transition: background 0.18s ease;
-      margin-bottom: 2px;
+      border-radius: 14px;
+      background: rgba(17, 24, 39, 0.72);
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.24);
+      overflow: hidden;
+      transition: background 0.18s ease, border-color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+      margin-bottom: 0;
     }
     .search-result-card:hover {
-      background: rgba(0, 240, 255, 0.04);
+      background: rgba(20, 30, 48, 0.92);
+      border-color: rgba(56, 189, 248, 0.42);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.34);
     }
     .search-result-card.is-pick {
-      background: rgba(0, 240, 255, 0.035);
-      border-color: rgba(0, 240, 255, 0.2);
+      background: linear-gradient(135deg, rgba(14, 34, 52, 0.85), rgba(17, 24, 39, 0.88));
+      border-color: rgba(56, 189, 248, 0.38);
+      border-left: 3px solid #38bdf8;
     }
     .search-result-card .url-suggest-row {
       border-bottom: none;
+    }
+    .search-result-card .result-quick-actions {
+      border-top: 1px solid rgba(148, 163, 184, 0.1);
+      background: rgba(10, 14, 24, 0.45);
+      padding: 8px 16px 8px 64px !important;
+      align-items: center;
+    }
+    @media (max-width: 640px) {
+      .search-result-card .result-quick-actions {
+        padding: 8px 12px !important;
+      }
     }
     .search-top-install-bar {
       display: flex;
@@ -13896,27 +16388,28 @@ function getDevicePlaylistsRoot(clientId, req) {
     .url-suggest-row {
       display: flex;
       align-items: flex-start;
-      gap: 12px;
-      padding: 12px 10px;
+      gap: 14px;
+      padding: 14px 16px;
       text-decoration: none;
-      border-radius: 12px;
+      border-radius: 0;
       border-bottom: 1px solid rgba(255, 255, 255, 0.05);
     }
     .url-suggest-row:hover {
-      background: rgba(0, 240, 255, 0.07);
+      background: rgba(56, 189, 248, 0.05);
     }
     .url-suggest-ext {
       margin-left: auto;
       align-self: center;
       display: inline-flex;
       align-items: center;
+      justify-content: center;
       gap: 4px;
-      padding: 5px 10px;
-      border-radius: 8px;
-      background: rgba(0, 240, 255, 0.08);
-      border: 1px solid rgba(0, 240, 255, 0.25);
-      color: #38bdf8;
-      font-size: 11.5px;
+      padding: 7px 12px;
+      border-radius: 9px;
+      background: rgba(56, 189, 248, 0.12);
+      border: 1px solid rgba(56, 189, 248, 0.32);
+      color: #7dd3fc;
+      font-size: 12px;
       font-weight: 700;
       white-space: nowrap;
       flex-shrink: 0;
@@ -14067,10 +16560,11 @@ function getDevicePlaylistsRoot(clientId, req) {
     .tor-nav-url { margin-top: 6px; font-size: 12px; color: #34d399; word-break: break-all; }
     .tor-nav-hint { margin-top: 8px; font-size: 12.5px; color: #94a3b8; line-height: 1.45; }
     .url-suggest-fav {
-      width: 32px;
-      height: 32px;
-      border-radius: 9px;
-      background: rgba(255, 255, 255, 0.08);
+      width: 34px;
+      height: 34px;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.07);
+      border: 1px solid rgba(255, 255, 255, 0.09);
       color: #7dd3fc;
       font-size: 13px;
       font-weight: 800;
@@ -14084,13 +16578,17 @@ function getDevicePlaylistsRoot(clientId, req) {
       min-width: 0;
       display: flex;
       flex-direction: column;
-      gap: 2px;
+      gap: 4px;
     }
     .url-suggest-title {
       color: #f8fafc;
-      font-size: 15px;
-      font-weight: 650;
-      line-height: 1.3;
+      font-size: 15.5px;
+      font-weight: 700;
+      line-height: 1.35;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
     }
     .url-suggest-row.is-gpt {
       background: rgba(168, 85, 247, 0.08);
@@ -14115,12 +16613,15 @@ function getDevicePlaylistsRoot(clientId, req) {
     .url-suggest-url {
       color: #34d399;
       font-size: 12px;
-      word-break: break-all;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 100%;
     }
     .url-suggest-snip {
-      color: #94a3b8;
-      font-size: 12.5px;
-      line-height: 1.45;
+      color: #cbd5e1;
+      font-size: 13px;
+      line-height: 1.5;
     }
     /* MÍDIAS ACOPLADAS AO RESULTADO (1 IMAGEM E 1 VÍDEO SE HOUVER) */
     .link-media-row {
@@ -14282,13 +16783,13 @@ function getDevicePlaylistsRoot(clientId, req) {
       position: relative;
       flex-shrink: 0;
       align-self: center;
-      width: 136px;
-      height: 90px;
+      width: 132px;
+      height: 84px;
       margin-left: auto;
-      border-radius: 12px;
+      border-radius: 10px;
       overflow: hidden;
       background: rgba(255, 255, 255, 0.05);
-      border: 1px solid rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(148, 163, 184, 0.18);
     }
     .url-suggest-pv + .url-suggest-ext { margin-left: 0; }
     .url-suggest-pv img {
@@ -14310,12 +16811,37 @@ function getDevicePlaylistsRoot(clientId, req) {
     .url-suggest-fav img { width: 62%; height: 62%; object-fit: contain; border-radius: 4px; }
     .url-suggest-snip {
       display: -webkit-box;
-      -webkit-line-clamp: 3;
+      -webkit-line-clamp: 2;
       -webkit-box-orient: vertical;
       overflow: hidden;
     }
-    @media (max-width: 600px) {
-      .url-suggest-pv { width: 88px; height: 66px; }
+    @media (max-width: 640px) {
+      .url-suggest-row {
+        flex-wrap: wrap;
+        padding: 12px;
+        gap: 10px;
+      }
+      .url-suggest-fav {
+        width: 28px;
+        height: 28px;
+        border-radius: 8px;
+      }
+      .url-suggest-meta {
+        flex: 1 1 calc(100% - 140px);
+        min-width: 150px;
+      }
+      .url-suggest-pv {
+        width: 92px;
+        height: 64px;
+        border-radius: 8px;
+      }
+      .url-suggest-ext {
+        width: 100%;
+        margin-left: 0;
+        margin-top: 2px;
+        padding: 7px 12px;
+        font-size: 12px;
+      }
     }
     .suggest-refresh-btn:disabled {
       opacity: 0.65;
@@ -15481,7 +18007,7 @@ function getDevicePlaylistsRoot(clientId, req) {
     <form class="ddg-form" action="/search" method="GET" autocomplete="off">
       <input type="hidden" name="clientId" value="${clientId}">
       <input type="hidden" name="filter" id="searchFilterInput" value="${escapeHtml(activeFilter)}">
-      <input type="text" name="q" id="searchInput" class="ddg-input" value="${safeQ}" placeholder="Pesquise no Motor de Busca Próprio Papaléguas (Rust BM25)..." autofocus autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-form-type="other" />
+      <input type="text" name="q" id="searchInput" class="ddg-input" value="${safeQ}" placeholder="Pesquise no Motor de Busca Próprio Papaléguas (PPL)..." autofocus autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-form-type="other" />
       <button type="submit" class="ddg-btn" title="Buscar">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
       </button>
@@ -15489,15 +18015,6 @@ function getDevicePlaylistsRoot(clientId, req) {
   </header>
 
   <main class="ddg-container">
-    <aside class="search-top-install-bar" id="searchTopInstallBar">
-      <div class="search-install-text">
-        <img src="/icon-192.png" alt="Papaléguas" class="search-install-mascot" onerror="this.onerror=null;this.src='/favicon.ico';">
-        <span><strong>Super Navegador Papaléguas (Motor Rust v2.0):</strong> Zero anúncios, busca direta e navegação ultra-rápida.</span>
-      </div>
-      <a href="/download/app" class="search-install-btn" title="Baixar Super Navegador Papaléguas para Windows, Android, iOS e Linux">
-        📥 Baixar Navegador
-      </a>
-    </aside>
     ${filterPillsHtml}
     <div id="filterEmptyMsg" style="display:none; text-align: center; padding: 45px 20px; color: #94a3b8;">
       <div style="font-size: 36px; margin-bottom: 12px;">🔍</div>
@@ -15528,18 +18045,18 @@ function getDevicePlaylistsRoot(clientId, req) {
     ${didYouMeanHtml}
     ${imagesHtml}
     ${videosHtml}
-    ${q && results.length ? `<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;${activeFilter === 'all' || activeFilter === 'web' ? '' : 'display:none;'}" id="webResultsBar">
-      <h3 class="block-title" id="webResultsHeading" style="margin:0;">🌐 Resultados da Web Mais Relevantes</h3>
-      <div class="web-quick-filters" id="webQuickFilters" style="display:flex;gap:6px;flex-wrap:wrap;">
+    ${q ? `<div style="display:${activeFilter === 'all' || activeFilter === 'web' || activeFilter === 'pdf' || activeFilter === 'ipcam' ? 'flex' : 'none'};align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;" id="webResultsBar">
+      <h3 class="block-title" id="webResultsHeading" style="margin:0;">${activeFilter === 'ipcam' ? '📹 Câmeras IP Ao Vivo Encontradas' : (activeFilter === 'pdf' ? '📄 Documentos PDF Encontrados' : (activeFilter === 'web' ? '⚡ Resultados Web (Motor Rust BM25)' : '🌐 Resultados da Web Mais Relevantes'))}</h3>
+      <div class="web-quick-filters" id="webQuickFilters" style="display:${activeFilter === 'ipcam' || activeFilter === 'pdf' ? 'none' : 'flex'};gap:6px;flex-wrap:wrap;">
         <button type="button" class="search-pill active" data-web-filter="all" style="padding:5px 11px;font-size:12px;">Todos</button>
         <button type="button" class="search-pill" data-web-filter="official" style="padding:5px 11px;font-size:12px;">Oficiais (.gov/.edu)</button>
         <button type="button" class="search-pill" data-web-filter="recent" style="padding:5px 11px;font-size:12px;">Com data recente</button>
       </div>
     </div>` : ''}
-    <div id="resultsList" data-section="web" style="${activeFilter === 'all' || activeFilter === 'web' ? '' : 'display:none;'}">
+    <div id="resultsList" data-section="web" style="${activeFilter === 'all' || activeFilter === 'web' || activeFilter === 'pdf' || activeFilter === 'ipcam' ? '' : 'display:none;'}">
       ${resultsHtml}
     </div>
-    <div class="url-suggest-more" id="resultsMore" style="${(activeFilter === 'all' || activeFilter === 'web') && (q && results.length) ? '' : 'display:none;'}">
+    <div class="url-suggest-more" id="resultsMore" style="${(activeFilter === 'all' || activeFilter === 'web' || activeFilter === 'pdf' || activeFilter === 'ipcam') && q ? '' : 'display:none;'}">
       <button type="button" class="suggest-refresh-btn" id="resultsRefresh">Carregar mais resultados</button>
     </div>
     <!-- As notícias vêm depois -->
@@ -15570,7 +18087,7 @@ function getDevicePlaylistsRoot(clientId, req) {
           <a id="lightboxPageBtn" href="#" class="image-lightbox-btn primary" title="Acessar Página no Papaléguas">
             <span>🌐</span> Acessar Página no Papaléguas
           </a>
-          <a id="lightboxFullBtn" href="#" class="image-lightbox-btn" target="_blank" rel="noopener noreferrer">
+          <a id="lightboxFullBtn" href="#" class="image-lightbox-btn" target="_self" rel="noopener noreferrer">
             <span>↗</span> Ver Imagem Completa
           </a>
         </div>
@@ -15586,7 +18103,7 @@ function getDevicePlaylistsRoot(clientId, req) {
         <button type="button" class="video-modal-close" id="videoModalClose" title="Fechar">&times;</button>
       </div>
       <div class="video-modal-player-wrap">
-        <iframe id="videoModalIframe" class="video-modal-iframe" src="" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
+        <iframe id="videoModalIframe" class="video-modal-iframe" src="about:blank" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
       </div>
       <div class="video-modal-footer">
         <button type="button" class="video-modal-btn primary" id="videoModalBaixaTubeBtn">
@@ -15608,11 +18125,19 @@ function getDevicePlaylistsRoot(clientId, req) {
       const cleanId = String(id || '').trim();
       const cleanTitle = (title || 'Vídeo').trim();
       const baixatubeUrl = '/baixatube?v=' + encodeURIComponent(cleanId);
+      if (e && typeof e.preventDefault === 'function') e.preventDefault();
+      if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+
+      const nowTs = Date.now();
+      if (window.__plLastTabOpenUrl === baixatubeUrl && (nowTs - (window.__plLastTabOpenAt || 0)) < 800) {
+        return;
+      }
+      window.__plLastTabOpenUrl = baixatubeUrl;
+      window.__plLastTabOpenAt = nowTs;
 
       // 1. Host Electron via torBrowserAPI: abre em nova aba/janela no app
       try {
         if (window.torBrowserAPI && typeof window.torBrowserAPI.sendToHost === 'function') {
-          if (e && typeof e.preventDefault === 'function') e.preventDefault();
           window.torBrowserAPI.sendToHost('open-new-tab', baixatubeUrl);
           return;
         }
@@ -15621,18 +18146,28 @@ function getDevicePlaylistsRoot(clientId, req) {
       // 2. Shell pai (postMessage para abrir em nova aba no shell)
       try {
         if (window.parent && window.parent !== window) {
-          if (e && typeof e.preventDefault === 'function') e.preventDefault();
           window.parent.postMessage({ type: 'open-new-tab', url: baixatubeUrl }, '*');
           return;
         }
       } catch (err) {}
 
-      // 3. PostMessage local para scripts do shell
+      // 3. PostMessage local para scripts do shell / popup relay
       try {
+        var root = document.documentElement;
+        if (root && root.__plPopupRelay) {
+          root.setAttribute('data-pl-open-url', baixatubeUrl);
+          root.dispatchEvent(new Event('papaleguas-open-tab'));
+          return;
+        }
         window.postMessage({ type: 'open-new-tab', url: baixatubeUrl }, '*');
       } catch (err) {}
 
-      // 4. Se for standalone no navegador, deixa o target="_blank" nativo abrir a nova janela perfeitamente!
+      // 4. Se for standalone no navegador, abre em nova aba
+      try {
+        window.open(baixatubeUrl, '_blank', 'noopener,noreferrer');
+      } catch (err) {
+        window.location.href = baixatubeUrl;
+      }
     }
 
     function closeVideoModal() {
@@ -15643,7 +18178,7 @@ function getDevicePlaylistsRoot(clientId, req) {
         modal.setAttribute('aria-hidden', 'true');
       }
       if (iframe) {
-        iframe.src = '';
+        iframe.src = 'about:blank';
       }
     }
     window.openVideo = openVideo;
@@ -15694,12 +18229,88 @@ function getDevicePlaylistsRoot(clientId, req) {
       window.location.href = '/musica?q=' + encodeURIComponent(query) + '&autoplay=1';
     }
 
+    (function installPplSearchPageCrypto() {
+      const _origFetch = window.fetch;
+      const MASK_64 = (1n << 64n) - 1n;
+      window.__pplSearchWasm = null;
+      (async function () {
+        try {
+          if (typeof WebAssembly === 'undefined') return;
+          const r = await _origFetch.call(window, '/api/ppl-wasm?module=client_guard');
+          if (!r.ok) return;
+          const inst = await WebAssembly.instantiate(await r.arrayBuffer(), {});
+          if (inst && inst.instance && inst.instance.exports) window.__pplSearchWasm = inst.instance.exports;
+        } catch (e) {}
+      })();
+      function ksByte(nonce, idx) {
+        const w = window.__pplSearchWasm;
+        if (w && typeof w.ppl_keystream_byte === 'function') {
+          try { return Number(w.ppl_keystream_byte(BigInt(nonce >>> 0), BigInt(idx))) & 0xFF; } catch (e) {}
+        }
+        const seed = (BigInt(nonce >>> 0) ^ 0x50504C5F32303236n) & MASK_64;
+        let z = (seed + (((BigInt(idx) + 1n) * 0x9E3779B97F4A7C15n) & MASK_64)) & MASK_64;
+        z = ((z ^ (z >> 30n)) * 0xBF58476D1CE4E5B9n) & MASK_64;
+        z = ((z ^ (z >> 27n)) * 0x94D049BB133111EBn) & MASK_64;
+        z = (z ^ (z >> 31n)) & MASK_64;
+        return Number(z & 0xFFn);
+      }
+      function encObj(obj) {
+        const arr = new Uint32Array(1);
+        if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(arr);
+        else arr[0] = (Math.random() * 0xFFFFFFFF) >>> 0;
+        const nonce = arr[0] >>> 0;
+        const plain = new TextEncoder().encode(JSON.stringify(obj || {}));
+        const out = new Uint8Array(plain.length);
+        for (let i = 0; i < plain.length; i++) out[i] = plain[i] ^ ksByte(nonce, i);
+        let bin = '';
+        for (let i = 0; i < out.length; i++) bin += String.fromCharCode(out[i]);
+        return nonce.toString(16).padStart(8, '0') + '.' + btoa(bin).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/g, '');
+      }
+      window.__pplEncryptUrl = function(rawUrl) {
+        try {
+          const u = new URL(rawUrl, window.location.origin);
+          if ((u.pathname === '/search' || u.pathname === '/proxy' || u.pathname.startsWith('/api/')) && u.search && !u.searchParams.has('ppl')) {
+            const payload = {};
+            u.searchParams.forEach((v, k) => { payload[k] = v; });
+            return u.pathname + '?ppl=' + encodeURIComponent(encObj(payload));
+          }
+        } catch (e) {}
+        return rawUrl;
+      };
+      const ENC_RE = /^\\/(?:api\\/(?:search|search-picks|url-suggest|search-rich|search-images|search-videos|ai-answer|preview-img|ipcam-frame)|search|proxy)\\b/;
+      window.fetch = function(input, init) {
+        try {
+          const urlStr = typeof input === 'string' ? input : (input && input.url ? input.url : '');
+          const parsed = new URL(urlStr, window.location.origin);
+          if (ENC_RE.test(parsed.pathname) && parsed.search && !parsed.searchParams.has('ppl')) {
+            const encUrl = window.__pplEncryptUrl(parsed.pathname + parsed.search);
+            input = (typeof input === 'string') ? encUrl : new Request(encUrl, input);
+          }
+          if (ENC_RE.test(parsed.pathname) && init && typeof init.body === 'string' && init.body.trim().startsWith('{')) {
+            const bObj = JSON.parse(init.body);
+            if (bObj && !bObj.ppl) init = Object.assign({}, init, { body: JSON.stringify({ ppl: encObj(bObj) }) });
+          }
+        } catch (e) {}
+        return _origFetch.call(this, input, init);
+      };
+      document.addEventListener('submit', function(ev) {
+        const form = ev.target;
+        if (!form || form.tagName !== 'FORM') return;
+        const act = String(form.getAttribute('action') || '');
+        if (!/^\\/search(?:$|[?#])/.test(act)) return;
+        ev.preventDefault();
+        const payload = {};
+        new FormData(form).forEach((v, k) => { payload[k] = String(v); });
+        window.location.href = '/search?ppl=' + encodeURIComponent(encObj(payload));
+      }, true);
+    })();
+
     const currentQuery = ${JSON.stringify(q)};
     const suggestClientId = ${JSON.stringify(clientId)};
     const pageUsesTor = ${useTor ? 'true' : 'false'};
     const initialAiData = ${JSON.stringify({ answer: initialAiAnswer, sources: initialAiSources })};
 
-    let imagesPage = 1;
+    let imagesPage = ${imagesItems.length > 0 ? 1 : 0};
     let imagesLoading = false;
     let imagesHasMore = true;
 
@@ -15722,11 +18333,25 @@ function getDevicePlaylistsRoot(clientId, req) {
           const sentinel = document.getElementById('imagesSentinel');
           const insertAnchor = spinner || loadBtn || sentinel;
           if (gallery) {
+            const seenImages = new Set();
+            gallery.querySelectorAll('.image-card').forEach((el) => {
+              const df = (el.getAttribute('data-full') || '').split('#')[0].trim();
+              const dp = (el.getAttribute('data-page') || '').split('#')[0].trim();
+              if (df) seenImages.add(df);
+              if (dp) seenImages.add(dp);
+            });
+            let addedCount = 0;
             data.images.forEach((img) => {
+              const pageTarget = (img.pageUrl || img.image || '').trim();
+              const fullImg = (img.image || img.thumbnail || '').trim();
+              const keyFull = fullImg.split('#')[0];
+              const keyPage = pageTarget.split('#')[0];
+              if (!keyFull || seenImages.has(keyFull) || (keyPage && seenImages.has(keyPage))) return;
+              seenImages.add(keyFull);
+              if (keyPage) seenImages.add(keyPage);
+              addedCount += 1;
               const card = document.createElement('a');
               card.className = 'image-card';
-              const pageTarget = img.pageUrl || img.image || '';
-              const fullImg = img.image || img.thumbnail || '';
               card.href = '/proxy?url=' + encodeURIComponent(pageTarget) + '&clientId=' + encodeURIComponent(suggestClientId);
               card.setAttribute('data-direct', pageTarget);
               card.setAttribute('data-page', pageTarget);
@@ -15761,9 +18386,18 @@ function getDevicePlaylistsRoot(clientId, req) {
             if (cEl) cEl.textContent = totalImgs;
             const pEl = document.querySelector('.pill-count-images');
             if (pEl) pEl.textContent = totalImgs;
+            if (totalImgs > 0) {
+              const secImgEl = document.getElementById('sectionImages');
+              const curFilter = (document.getElementById('searchFilterInput')?.value || 'all').toLowerCase();
+              if (secImgEl && (curFilter === 'all' || curFilter === 'images')) {
+                secImgEl.style.display = '';
+              }
+            }
+            imagesPage += 1;
+            imagesHasMore = addedCount > 0 && !!data.hasMore;
+          } else {
+            imagesHasMore = false;
           }
-          imagesPage += 1;
-          imagesHasMore = !!data.hasMore;
         } else {
           imagesHasMore = false;
         }
@@ -15804,7 +18438,22 @@ function getDevicePlaylistsRoot(clientId, req) {
     }
     window.toggleImagesGrid = toggleImagesGrid;
 
-    let videosPage = 1;
+    function toggleVideosGrid() {
+      const sec = document.getElementById('sectionVideos');
+      const btnText = document.getElementById('toggleVideosGridText');
+      const btnIcon = document.getElementById('toggleVideosGridIcon');
+      if (!sec) return;
+      const isGrid = sec.classList.toggle('is-grid');
+      if (btnText) btnText.textContent = isGrid ? 'Ver carrossel' : 'Ver em grade';
+      if (btnIcon) btnIcon.textContent = isGrid ? '↔' : '⊞';
+      if (isGrid && typeof loadMoreVideosAuto === 'function') {
+        const count = sec.querySelectorAll('.video-card').length;
+        if (count < 24) loadMoreVideosAuto();
+      }
+    }
+    window.toggleVideosGrid = toggleVideosGrid;
+
+    let videosPage = ${videosItems.length > 0 ? 1 : 0};
     let videosLoading = false;
     let videosHasMore = true;
 
@@ -15820,33 +18469,49 @@ function getDevicePlaylistsRoot(clientId, req) {
       if (loadBtn) loadBtn.style.display = 'none';
 
       try {
-        const res = await fetch('/api/search-videos?q=' + encodeURIComponent(q) + '&page=' + videosPage + '&limit=8');
+        const res = await fetch('/api/search-videos?q=' + encodeURIComponent(q) + '&page=' + videosPage + '&limit=12');
         const data = await res.json();
         if (data && data.success && Array.isArray(data.videos) && data.videos.length > 0) {
           const carousel = document.getElementById('videosCarousel');
           const sentinel = document.getElementById('videosSentinel');
           const insertAnchor = spinner || loadBtn || sentinel;
           if (carousel) {
+            const seenVideos = new Set();
+            carousel.querySelectorAll('.video-card').forEach((el) => {
+              const vid = (el.getAttribute('data-video-id') || '').trim();
+              const durl = (el.getAttribute('data-direct') || '').split('#')[0].replace(/[/]+$/, '').trim();
+              if (vid) seenVideos.add('yt:' + vid);
+              if (durl) seenVideos.add(durl);
+            });
+            let addedVideos = 0;
             data.videos.forEach((v) => {
+              const rawUrl = String(v.url || (v.id ? 'https://www.youtube.com/watch?v=' + v.id : '')).trim();
+              if (!rawUrl) return;
+              const isYt = Boolean((v.isYoutube || !v.source || v.source === 'youtube.com') && v.id);
+              const normUrl = rawUrl.split('#')[0].replace(/[/]+$/, '').trim();
+              const ytKey = isYt && v.id ? ('yt:' + String(v.id).trim()) : '';
+              if ((ytKey && seenVideos.has(ytKey)) || seenVideos.has(normUrl)) return;
+              if (ytKey) seenVideos.add(ytKey);
+              seenVideos.add(normUrl);
+              addedVideos += 1;
               const card = document.createElement('a');
-              card.className = 'video-card';
+              card.className = 'video-card' + (isYt ? '' : ' video-card-external');
               const cleanVTitle = v.title || 'Vídeo';
-              const vHref = '/baixatube?v=' + encodeURIComponent(v.id);
+              const vHref = isYt
+                ? '/baixatube?v=' + encodeURIComponent(v.id)
+                : '/video-watch?url=' + encodeURIComponent(rawUrl) + '&title=' + encodeURIComponent(cleanVTitle) + '&clientId=' + encodeURIComponent(suggestClientId);
               card.href = vHref;
-              card.target = '_blank';
-              card.rel = 'noopener noreferrer';
-              card.setAttribute('data-video-id', v.id);
-              card.setAttribute('data-video-title', cleanVTitle);
-              card.setAttribute('role', 'button');
-              card.setAttribute('tabindex', '0');
-              card.setAttribute('title', 'Assistir ' + cleanVTitle);
-              card.onclick = function(e) {
-                openVideo(v.id, cleanVTitle, e);
-              };
+              card.setAttribute('data-direct', isYt ? rawUrl : vHref);
+              if (isYt) {
+                card.setAttribute('data-video-id', v.id);
+                card.setAttribute('data-video-title', cleanVTitle);
+              }
+              card.setAttribute('title', 'Assistir ' + cleanVTitle + (v.source ? ' (' + v.source + ')' : ''));
 
               const safeT = (v.title || '').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-              const safeThumb = (v.thumbnail || ('https://i.ytimg.com/vi/' + v.id + '/hqdefault.jpg')).replace(/"/g, '&quot;');
-              const safeCh = (v.channel || 'YouTube').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+              const safeThumb = (v.thumbnail || (v.id ? ('https://i.ytimg.com/vi/' + v.id + '/hqdefault.jpg') : '')).replace(/"/g, '&quot;');
+              const safeSrc = (v.source || v.channel || 'Web').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+              const safeCh = (v.channel || safeSrc).replace(/</g, '&lt;').replace(/>/g, '&gt;');
               const safeViews = (v.views || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
               const safeDur = (v.duration || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -15854,6 +18519,7 @@ function getDevicePlaylistsRoot(clientId, req) {
                 '<div class="video-thumb-wrap">' +
                   '<img class="video-thumb" src="' + safeThumb + '" alt="' + safeT + '" loading="lazy" />' +
                   (safeDur ? '<span class="video-duration">' + safeDur + '</span>' : '') +
+                  '<span class="image-source-badge">' + safeSrc + ' ↗</span>' +
                   '<div class="video-play-overlay">' +
                     '<span class="video-play-icon">▶</span>' +
                   '</div>' +
@@ -15867,7 +18533,13 @@ function getDevicePlaylistsRoot(clientId, req) {
                 '</div>';
               const vThumbEl = card.querySelector('.video-thumb');
               if (vThumbEl) {
-                vThumbEl.onerror = function() { this.src = 'https://i.ytimg.com/vi/' + v.id + '/hqdefault.jpg'; };
+                vThumbEl.onerror = function() {
+                  if (isYt && v.id && this.src.indexOf('hqdefault.jpg') === -1) {
+                    this.src = 'https://i.ytimg.com/vi/' + v.id + '/hqdefault.jpg';
+                  } else {
+                    card.style.display = 'none';
+                  }
+                };
               }
 
               if (insertAnchor && insertAnchor.parentNode === carousel) {
@@ -15882,9 +18554,18 @@ function getDevicePlaylistsRoot(clientId, req) {
             if (cEl) cEl.textContent = totalVids;
             const pEl = document.querySelector('.pill-count-videos');
             if (pEl) pEl.textContent = totalVids;
+            if (totalVids > 0) {
+              const secVidEl = document.getElementById('sectionVideos');
+              const curFilter = (document.getElementById('searchFilterInput')?.value || 'all').toLowerCase();
+              if (secVidEl && (curFilter === 'all' || curFilter === 'videos')) {
+                secVidEl.style.display = '';
+              }
+            }
+            videosPage += 1;
+            videosHasMore = addedVideos > 0 && !!data.hasMore;
+          } else {
+            videosHasMore = false;
           }
-          videosPage += 1;
-          videosHasMore = !!data.hasMore;
         } else {
           videosHasMore = false;
         }
@@ -16072,6 +18753,159 @@ function getDevicePlaylistsRoot(clientId, req) {
       setTimeout(initCarouselsAndFill, 20);
     }
 
+    var suggestPage = Math.max(1, Math.ceil(document.querySelectorAll('#resultsList .url-suggest-row').length / 10));
+    var suggestLoading = false;
+    var suggestHasMore = true;
+    let currentListMode = ${JSON.stringify((activeFilter === 'pdf' || activeFilter === 'ipcam') ? activeFilter : 'web')};
+    const categoryListCache = {};
+    let onionLoadingDynamic = false;
+
+    function saveCurrentCategoryListToCache() {
+      const listEl = document.getElementById('resultsList');
+      if (!listEl) return;
+      if (listEl.querySelectorAll('.url-suggest-row').length > 0) {
+        categoryListCache[currentListMode] = {
+          html: listEl.innerHTML,
+          page: typeof suggestPage === 'number' ? suggestPage : 1,
+          hasMore: typeof suggestHasMore === 'boolean' ? suggestHasMore : true
+        };
+      }
+    }
+
+    async function loadOnionSectionDynamic() {
+      if (onionLoadingDynamic || !currentQuery) return;
+      const container = document.getElementById('onionResultsContainer');
+      if (!container || container.querySelectorAll('.onion-item').length > 0) return;
+      onionLoadingDynamic = true;
+      container.innerHTML = '<div style="text-align:center;padding:30px 16px;color:#4ade80;"><div class="tor-nav-spin" style="display:block;width:36px;height:36px;margin:0 auto 10px;border:3px solid rgba(34,197,94,0.2);border-top-color:#22c55e;border-radius:50%;animation:tor-nav-spin 0.8s linear infinite;"></div><div style="font-size:14.5px;font-weight:700;">🧅 Sondando nós .onion ativos (HTTP 200 OK) na rede Tor…</div></div>';
+      try {
+        const res = await fetch('/api/onion-search?q=' + encodeURIComponent(currentQuery));
+        const data = await res.json();
+        const items = (data && (data.items || data.results)) || [];
+        if (items.length > 0) {
+          container.innerHTML = items.map(function(item, idx) {
+            const safeUrl = escapeClientHtml(item.url || '');
+            const safeTitle = escapeClientHtml(item.title || item.url || 'Serviço .onion');
+            const safeDesc = item.description ? '<div style="font-size: 13px; color: #94a3b8; line-height: 1.45;">' + escapeClientHtml(item.description) + '</div>' : '';
+            const shortUrl = escapeClientHtml(String(item.url || '').replace(/^https?:[/][/]/i, '').replace(/[/]$/, ''));
+            const proxyHref = '/proxy?url=' + encodeURIComponent(item.url || '') + '&clientId=' + encodeURIComponent(suggestClientId);
+            return '<div style="background: rgba(4, 14, 8, 0.92); border: 1px solid rgba(34, 197, 94, 0.4); border-radius: 14px; padding: 15px 18px; display: flex; flex-direction: column; gap: 6px; box-shadow: 0 4px 18px rgba(34, 197, 94, 0.12);">' +
+              '<div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;">' +
+                '<div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">' +
+                  '<a href="' + proxyHref + '" data-direct="' + safeUrl + '" data-url="' + safeUrl + '" class="onion-item" style="font-size: 15.5px; font-weight: 700; color: #38bdf8; text-decoration: none;">' + safeTitle + '</a>' +
+                  '<span id="status-badge-dyn-' + idx + '" style="font-size: 11px; background: rgba(16, 185, 129, 0.2); border: 1px solid rgba(34, 197, 94, 0.6); color: #4ade80; padding: 2px 10px; border-radius: 6px; font-weight: 700;">🟢 HTTP 200 OK</span>' +
+                '</div>' +
+              '</div>' +
+              '<div style="font-family: monospace; font-size: 11px; color: #00ff88; word-break: break-all;">' + shortUrl + '</div>' +
+              safeDesc +
+              '<div id="sublinksTarget-dyn-' + idx + '"></div>' +
+              '<div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px; flex-wrap: wrap; gap: 8px;">' +
+                '<div style="display: flex; align-items: center; gap: 8px;">' +
+                  '<button type="button" class="btn-deep-crawl" data-url="' + safeUrl + '" data-target-id="sublinksTarget-dyn-' + idx + '" style="font-size: 11.5px; font-weight: 600; color: #86efac; background: rgba(34, 197, 94, 0.12); border: 1px solid rgba(34, 197, 94, 0.35); border-radius: 8px; padding: 5px 12px; cursor: pointer;">🔍 Sub-links</button>' +
+                '</div>' +
+                '<a href="' + proxyHref + '" data-direct="' + safeUrl + '" class="onion-item" style="font-size: 12px; font-weight: 700; color: #f0fdf4; background: rgba(16, 185, 129, 0.28); border: 1px solid rgba(34, 197, 94, 0.65); border-radius: 8px; padding: 5px 15px; text-decoration: none;">Acessar via Tor →</a>' +
+              '</div>' +
+            '</div>';
+          }).join('');
+          const badge = document.getElementById('onionOnlineCountBadge');
+          if (badge) badge.textContent = '🟢 ' + items.length + ' Confirmados Online';
+          const pillTor = document.querySelector('.pill-count-tor');
+          if (pillTor) pillTor.textContent = items.length;
+        } else {
+          container.innerHTML = '<div style="text-align:center;padding:24px 16px;color:#94a3b8;">Nenhum link .onion ativo respondeu com HTTP 200 OK para este termo no momento.</div>';
+        }
+      } catch (err) {
+        container.innerHTML = '<div style="text-align:center;padding:24px 16px;color:#94a3b8;">Não foi possível consultar a rede Tor agora.</div>';
+      } finally {
+        onionLoadingDynamic = false;
+      }
+    }
+
+    async function switchResultsListMode(targetMode, displayFilter) {
+      const secWebList = document.getElementById('resultsList');
+      const secWebHeading = document.getElementById('webResultsHeading');
+      const webQuick = document.getElementById('webQuickFilters');
+      if (!secWebList) return;
+
+      if (secWebHeading) {
+        if (targetMode === 'ipcam') {
+          secWebHeading.textContent = '📹 Câmeras IP Ao Vivo Encontradas';
+        } else if (targetMode === 'pdf') {
+          secWebHeading.textContent = '📄 Documentos PDF Encontrados';
+        } else if (displayFilter === 'web') {
+          secWebHeading.textContent = '⚡ Resultados Web (Motor Rust BM25)';
+        } else {
+          secWebHeading.textContent = '🌐 Resultados da Web Mais Relevantes';
+        }
+      }
+      if (webQuick) {
+        webQuick.style.display = (targetMode === 'ipcam' || targetMode === 'pdf') ? 'none' : 'flex';
+      }
+
+      if (currentListMode === targetMode && secWebList.querySelectorAll('.url-suggest-row').length > 0) {
+        scheduleResultPreviews();
+        return;
+      }
+
+      saveCurrentCategoryListToCache();
+      currentListMode = targetMode;
+
+      if (categoryListCache[targetMode] && categoryListCache[targetMode].html) {
+        secWebList.innerHTML = categoryListCache[targetMode].html;
+        suggestPage = categoryListCache[targetMode].page || 1;
+        suggestHasMore = categoryListCache[targetMode].hasMore !== false;
+        setRefreshLabel();
+        scheduleResultPreviews();
+        return;
+      }
+
+      if (!currentQuery) return;
+      const loadingLabel = targetMode === 'ipcam'
+        ? '📹 Buscando Câmeras IP Ao Vivo para "' + escapeClientHtml(currentQuery) + '"…'
+        : (targetMode === 'pdf'
+          ? '📄 Buscando Documentos PDF para "' + escapeClientHtml(currentQuery) + '"…'
+          : '⚡ Buscando resultados no Motor Rust BM25 para "' + escapeClientHtml(currentQuery) + '"…');
+
+      secWebList.innerHTML =
+        '<div class="category-loading-state" style="text-align:center;padding:38px 20px;color:#38bdf8;">' +
+          '<div class="tor-nav-spin" style="display:block;width:38px;height:38px;margin:0 auto 12px;border:3px solid rgba(0,240,255,0.2);border-top-color:#00f0ff;border-radius:50%;animation:tor-nav-spin 0.8s linear infinite;"></div>' +
+          '<div style="font-size:15px;font-weight:700;color:#f8fafc;">' + loadingLabel + '</div>' +
+        '</div>';
+
+      try {
+        const res = await fetch('/api/url-suggest?q=' + encodeURIComponent(currentQuery) + '&page=0&filter=' + encodeURIComponent(targetMode) + '&clientId=' + encodeURIComponent(suggestClientId));
+        const data = await res.json();
+        const items = (data && data.suggestions) || [];
+        if (currentListMode !== targetMode) return;
+        secWebList.innerHTML = '';
+        if (items.length > 0) {
+          appendSuggestRows(items);
+          suggestPage = 1;
+          suggestHasMore = Boolean(data && data.hasMore);
+          setRefreshLabel();
+          saveCurrentCategoryListToCache();
+          if (secWebList.querySelectorAll('.url-suggest-row').length < 6 && suggestHasMore) {
+            loadMoreSuggestions();
+          }
+        } else if (targetMode === 'ipcam' && data && data.hasMore === false) {
+          suggestPage = 1;
+          suggestHasMore = false;
+          setRefreshLabel();
+          secWebList.innerHTML = '<div style="text-align:center;padding:36px 20px;color:#94a3b8;"><p style="font-size:15.5px;">📹 Nenhuma câmera IP encontrada para "<b>' + escapeClientHtml(currentQuery) + '</b>" no momento.</p><p style="font-size:13px;margin-top:8px;color:#64748b;">Tente pesquisar por país, cidade ou ambiente (ex.: <b>brasil</b>, <b>praia</b>, <b>rua</b>, <b>hotel</b>, <b>quarto</b>, <b>estacionamento</b>).</p></div>';
+          saveCurrentCategoryListToCache();
+        } else {
+          suggestPage = 1;
+          suggestHasMore = true;
+          setRefreshLabel();
+          loadMoreSuggestions();
+        }
+      } catch (err) {
+        if (currentListMode === targetMode) {
+          secWebList.innerHTML = '<div style="text-align:center;padding:30px 20px;color:#94a3b8;">Não foi possível carregar resultados agora. Clique em <b>Carregar mais resultados</b> abaixo.</div>';
+        }
+      }
+    }
+
     function selectSearchFilter(filterName, shouldScroll = true) {
       const container = document.getElementById('searchFilterPills');
       const targetFilter = (filterName || 'all').toLowerCase();
@@ -16091,12 +18925,16 @@ function getDevicePlaylistsRoot(clientId, req) {
 
       const filterInput = document.getElementById('searchFilterInput');
       if (filterInput) filterInput.value = targetFilter;
+      if (typeof prefetchedSuggestPages !== 'undefined' && prefetchedSuggestPages && typeof prefetchedSuggestPages.clear === 'function') {
+        prefetchedSuggestPages.clear();
+      }
 
       const secImages = document.getElementById('sectionImages');
       const secVideos = document.getElementById('sectionVideos');
       const secWiki = document.getElementById('sectionWiki');
       const secNews = document.getElementById('sectionNews');
       const secWebList = document.getElementById('resultsList');
+      const secWebBar = document.getElementById('webResultsBar');
       const secWebHeading = document.getElementById('webResultsHeading');
       const secTor = document.getElementById('onionSection');
       const onionIndicator = document.querySelector('.onion-depth-indicator');
@@ -16107,19 +18945,47 @@ function getDevicePlaylistsRoot(clientId, req) {
       const filterEmptyMsg = document.getElementById('filterEmptyMsg');
 
       if (targetFilter === 'all') {
-        if (secImages) { secImages.style.display = ''; secImages.classList.remove('is-grid'); }
-        if (secVideos) { secVideos.style.display = ''; secVideos.classList.remove('is-grid'); }
+        if (secImages) {
+          const imgCount = secImages.querySelectorAll('.image-card').length;
+          secImages.style.display = imgCount > 0 ? '' : 'none';
+          secImages.classList.remove('is-grid');
+          const btnText = document.getElementById('toggleGridText');
+          const btnIcon = document.getElementById('toggleGridIcon');
+          if (btnText) btnText.textContent = 'Ver em grade';
+          if (btnIcon) btnIcon.textContent = '⊞';
+          if (imgCount < 8 && typeof loadMoreImagesAuto === 'function') {
+            imagesHasMore = true;
+            loadMoreImagesAuto();
+          }
+        }
+        if (secVideos) {
+          const vidCount = secVideos.querySelectorAll('.video-card').length;
+          secVideos.style.display = vidCount > 0 ? '' : 'none';
+          secVideos.classList.remove('is-grid');
+          const vBtnText = document.getElementById('toggleVideosGridText');
+          const vBtnIcon = document.getElementById('toggleVideosGridIcon');
+          if (vBtnText) vBtnText.textContent = 'Ver em grade';
+          if (vBtnIcon) vBtnIcon.textContent = '⊞';
+          if (vidCount < 6 && typeof loadMoreVideosAuto === 'function') {
+            videosHasMore = true;
+            loadMoreVideosAuto();
+          }
+        }
         if (secWiki) secWiki.style.display = '';
         if (secNews) secNews.style.display = '';
         if (secWebList) secWebList.style.display = '';
+        if (secWebBar) secWebBar.style.display = 'flex';
         if (secWebHeading) secWebHeading.style.display = '';
-        if (secTor) secTor.style.display = '';
-        if (onionIndicator) onionIndicator.style.display = '';
+        const hasTorItems = secTor && secTor.querySelectorAll('.onion-item').length > 0;
+        if (secTor) secTor.style.display = hasTorItems ? '' : 'none';
+        if (onionIndicator) onionIndicator.style.display = hasTorItems ? '' : 'none';
         if (aiCard) aiCard.style.display = '';
         if (agentPicks && agentPicks.querySelector('.agent-pick')) agentPicks.hidden = false;
         if (resultsMore) resultsMore.style.display = '';
         if (relatedBlock) relatedBlock.style.display = '';
         if (filterEmptyMsg) filterEmptyMsg.style.display = 'none';
+
+        switchResultsListMode('web', 'all');
 
         if (shouldScroll) {
           window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -16129,6 +18995,7 @@ function getDevicePlaylistsRoot(clientId, req) {
           url.searchParams.delete('filter');
           history.replaceState(null, '', url.pathname + url.search);
         } catch(e){}
+        if (typeof window.__updateOnionAtmosphere === 'function') window.__updateOnionAtmosphere();
         return;
       }
 
@@ -16138,6 +19005,7 @@ function getDevicePlaylistsRoot(clientId, req) {
       if (secWiki) secWiki.style.display = 'none';
       if (secNews) secNews.style.display = 'none';
       if (secWebList) secWebList.style.display = 'none';
+      if (secWebBar) secWebBar.style.display = 'none';
       if (secWebHeading) secWebHeading.style.display = 'none';
       if (secTor) secTor.style.display = 'none';
       if (onionIndicator) onionIndicator.style.display = 'none';
@@ -16148,13 +19016,21 @@ function getDevicePlaylistsRoot(clientId, req) {
 
       let hasContent = false;
 
-      // Filtro exclusivo: se tiver selecionado video so traga video, se tor so traga tor, etc.
+      // Filtro exclusivo: alterna instantaneamente entre todos os menus
       if (targetFilter === 'videos') {
         if (secVideos) {
           secVideos.style.display = '';
           secVideos.classList.add('is-grid');
+          const vBtnText = document.getElementById('toggleVideosGridText');
+          const vBtnIcon = document.getElementById('toggleVideosGridIcon');
+          if (vBtnText) vBtnText.textContent = 'Ver carrossel';
+          if (vBtnIcon) vBtnIcon.textContent = '↔';
           hasContent = true;
           const count = secVideos.querySelectorAll('.video-card').length;
+          if (count === 0) {
+            videosHasMore = true;
+            videosPage = 0;
+          }
           if (count < 16 && typeof loadMoreVideosAuto === 'function') {
             loadMoreVideosAuto();
           }
@@ -16164,23 +19040,34 @@ function getDevicePlaylistsRoot(clientId, req) {
           secTor.style.display = '';
           if (onionIndicator) onionIndicator.style.display = '';
           hasContent = true;
+          loadOnionSectionDynamic();
         }
       } else if (targetFilter === 'images') {
         if (secImages) {
           secImages.style.display = '';
           secImages.classList.add('is-grid');
+          const btnText = document.getElementById('toggleGridText');
+          const btnIcon = document.getElementById('toggleGridIcon');
+          if (btnText) btnText.textContent = 'Ver carrossel';
+          if (btnIcon) btnIcon.textContent = '↔';
           hasContent = true;
           const count = secImages.querySelectorAll('.image-card').length;
+          if (count === 0) {
+            imagesHasMore = true;
+            imagesPage = 0;
+          }
           if (count < 24 && typeof loadMoreImagesAuto === 'function') {
             loadMoreImagesAuto();
           }
         }
-      } else if (targetFilter === 'web') {
+      } else if (targetFilter === 'web' || targetFilter === 'pdf' || targetFilter === 'ipcam') {
         if (secWebList) {
           secWebList.style.display = '';
+          if (secWebBar) secWebBar.style.display = 'flex';
           if (secWebHeading) secWebHeading.style.display = '';
           if (resultsMore) resultsMore.style.display = '';
           hasContent = true;
+          switchResultsListMode(targetFilter, targetFilter);
         }
       } else if (targetFilter === 'wiki') {
         if (secWiki) {
@@ -16196,6 +19083,9 @@ function getDevicePlaylistsRoot(clientId, req) {
 
       if (filterEmptyMsg) {
         filterEmptyMsg.style.display = hasContent ? 'none' : 'block';
+      }
+      if (typeof window.__updateOnionAtmosphere === 'function') {
+        window.__updateOnionAtmosphere();
       }
 
       if (shouldScroll) {
@@ -16222,9 +19112,11 @@ function getDevicePlaylistsRoot(clientId, req) {
     window.selectSearchFilter = selectSearchFilter;
 
     (function setupFilterPills() {
+      saveCurrentCategoryListToCache();
       document.addEventListener('click', function(e) {
-        const pill = e.target.closest('.search-pill');
+        const pill = e.target.closest('.search-pill[data-filter]');
         if (!pill) return;
+        e.preventDefault();
         const filter = pill.getAttribute('data-filter') || 'all';
         selectSearchFilter(filter, true);
       });
@@ -16258,7 +19150,17 @@ function getDevicePlaylistsRoot(clientId, req) {
       if (!onionSec || !vignette) return;
 
       function updateAtmosphere() {
+        if (onionSec.style.display === 'none' || onionSec.offsetParent === null) {
+          vignette.style.opacity = '0';
+          document.body.style.backgroundColor = '';
+          return;
+        }
         const rect = onionSec.getBoundingClientRect();
+        if (rect.height === 0) {
+          vignette.style.opacity = '0';
+          document.body.style.backgroundColor = '';
+          return;
+        }
         const winH = window.innerHeight;
         // Começa a escurecer 500px antes da seção .onion entrar totalmente na tela
         const distance = rect.top - winH;
@@ -16277,6 +19179,7 @@ function getDevicePlaylistsRoot(clientId, req) {
         }
       }
 
+      window.__updateOnionAtmosphere = updateAtmosphere;
       window.addEventListener('scroll', updateAtmosphere, { passive: true });
       window.addEventListener('resize', updateAtmosphere, { passive: true });
       updateAtmosphere();
@@ -16298,7 +19201,7 @@ function getDevicePlaylistsRoot(clientId, req) {
       let hostLabel = '';
       try {
         const u = new URL(url.startsWith('http') ? url : 'https://' + url);
-        hostLabel = u.hostname.replace(/^www\./, '');
+        hostLabel = u.hostname.replace(/^www[.]/, '');
       } catch (e) { hostLabel = url || ''; }
       if (title) title.textContent = isSearch ? 'Pesquisando na web…' : 'Carregando página…';
       if (urlEl) urlEl.textContent = hostLabel || url || '';
@@ -16416,7 +19319,8 @@ function getDevicePlaylistsRoot(clientId, req) {
       let detectedVideoId = '';
       try {
         const u = new URL(realTarget, window.location.origin);
-        if (u.searchParams && u.searchParams.has('v')) {
+        const isYtDomain = u.hostname && (u.hostname.includes('youtube.com') || u.hostname.includes('youtu.be') || u.hostname.includes('youtube-nocookie.com') || u.pathname === '/baixatube' || u.pathname === '/youtube' || u.pathname === '/watch');
+        if (isYtDomain && u.searchParams && u.searchParams.has('v')) {
           const v = u.searchParams.get('v');
           if (v && v.length === 11) detectedVideoId = v;
         }
@@ -16424,7 +19328,7 @@ function getDevicePlaylistsRoot(clientId, req) {
           const seg = u.pathname.split('/').filter(Boolean)[0];
           if (seg && seg.length === 11) detectedVideoId = seg;
         }
-        if (!detectedVideoId && u.pathname) {
+        if (!detectedVideoId && isYtDomain && u.pathname) {
           const parts = u.pathname.split('/').filter(Boolean);
           for (let pi = 0; pi < parts.length; pi++) {
             if (['embed', 'shorts', 'v'].includes(parts[pi]) && parts[pi + 1] && parts[pi + 1].length === 11) {
@@ -16433,15 +19337,16 @@ function getDevicePlaylistsRoot(clientId, req) {
             }
           }
         }
-      } catch (e) {
-        if (realTarget.includes('v=')) {
-          const idx = realTarget.indexOf('v=');
-          const candidate = realTarget.substring(idx + 2, idx + 13);
-          if (candidate.length === 11) detectedVideoId = candidate;
-        }
-      }
+      } catch (e) {}
       if (detectedVideoId) {
         openVideo(detectedVideoId);
+        return;
+      }
+
+      // 1b. Se for vídeo externo (TikTok, Dailymotion, Vimeo, Kwai), abre em nova aba no Player Nativo Papaléguas (/video-watch)
+      if (/^https?:[/][/](?:(?:www|vm|vt|m)[.])?(?:tiktok[.]com[/](?:@[^/]+[/]video[/]|v[/]|t[/])|(?:vm|vt)[.]tiktok[.]com[/]|dailymotion[.]com[/]video[/]|dai[.]ly[/]|vimeo[.]com[/][0-9]+|kwai[.]com[/](?:photo|video)[/])/i.test(realTarget)) {
+        const watchPath = '/video-watch?url=' + encodeURIComponent(realTarget) + '&clientId=' + encodeURIComponent(suggestClientId);
+        openInNewTab(watchPath, rowEl);
         return;
       }
 
@@ -16498,18 +19403,91 @@ function getDevicePlaylistsRoot(clientId, req) {
       window.location.href = inside;
     }
 
+    function openInNewTab(url, rowEl) {
+      if (!url) return;
+      let targetUrl = String(url).trim();
+      if (targetUrl.includes('/proxy?url=')) {
+        try {
+          const u = new URL(targetUrl, window.location.origin);
+          targetUrl = u.searchParams.get('url') || targetUrl;
+        } catch (e) {}
+      }
+      if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://') && !targetUrl.startsWith('/')) {
+        targetUrl = 'https://' + targetUrl;
+      }
+      if (/^https?:[/][/](?:(?:www|vm|vt|m)[.])?(?:tiktok[.]com[/](?:@[^/]+[/]video[/]|v[/]|t[/])|(?:vm|vt)[.]tiktok[.]com[/]|dailymotion[.]com[/]video[/]|dai[.]ly[/]|vimeo[.]com[/][0-9]+|kwai[.]com[/](?:photo|video)[/])/i.test(targetUrl)) {
+        targetUrl = '/video-watch?url=' + encodeURIComponent(targetUrl) + '&clientId=' + encodeURIComponent(suggestClientId);
+      } else if (/^https?:[/][/][0-9]{1,3}(?:[.][0-9]{1,3}){3}(?::[0-9]+)?[/](?:cgi-bin[/]snapshot[.]cgi|SnapshotJPEG|oneshotimage|axis-cgi[/](?:jpg|mjpg)|mjpg[/]video[.]mjpg|nphMotionJpeg)/i.test(targetUrl)) {
+        targetUrl = '/ipcam-live?url=' + encodeURIComponent(targetUrl) + '&clientId=' + encodeURIComponent(suggestClientId);
+      }
+      const nowTs = Date.now();
+      if (window.__plLastTabOpenUrl === targetUrl && (nowTs - (window.__plLastTabOpenAt || 0)) < 800) {
+        return;
+      }
+      window.__plLastTabOpenUrl = targetUrl;
+      window.__plLastTabOpenAt = nowTs;
+      if (rowEl) {
+        markRowLoading(rowEl);
+        setTimeout(clearLocalLoading, 900);
+      }
+      const isInternalPortalTarget = /^[/](?:video-watch|ipcam-live|baixatube|youtube|filmes|musica|search)(?:[/?#]|$)/i.test(targetUrl);
+      try {
+        if (window.torBrowserAPI && typeof window.torBrowserAPI.sendToHost === 'function') {
+          if (!isInternalPortalTarget) {
+            window.torBrowserAPI.sendToHost('page-loading', { url: targetUrl, kind: 'link' });
+          }
+          window.torBrowserAPI.sendToHost('open-new-tab', targetUrl);
+          return;
+        }
+      } catch (e) {}
+      try {
+        var app = (window.top && window.top !== window) ? window.top : ((window.parent && window.parent !== window) ? window.parent : null);
+        if (app) {
+          if (!isInternalPortalTarget) {
+            app.postMessage({ type: 'page-loading', kind: 'link', url: targetUrl }, '*');
+          }
+          app.postMessage({ type: 'open-new-tab', url: targetUrl }, '*');
+          return;
+        }
+      } catch (e) {}
+      try {
+        var root = document.documentElement;
+        if (root && root.__plPopupRelay) {
+          root.setAttribute('data-pl-open-url', targetUrl);
+          root.dispatchEvent(new Event('papaleguas-open-tab'));
+          return;
+        }
+      } catch (e) {}
+      try {
+        const fallbackHref = (targetUrl.startsWith('/') && !targetUrl.startsWith('/proxy'))
+          ? targetUrl
+          : ('/proxy?url=' + encodeURIComponent(targetUrl) + '&clientId=' + encodeURIComponent(suggestClientId));
+        window.location.href = fallbackHref;
+      } catch (e) {
+        window.location.href = targetUrl;
+      }
+    }
+    window.openInNewTab = openInNewTab;
+
+    // Garante que nenhuma chamada window.open dentro da página de pesquisa abra nova janela
+    if ((window.torBrowserAPI && typeof window.torBrowserAPI.sendToHost === 'function') || (window.top && window.top !== window) || (window.parent && window.parent !== window)) {
+      try {
+        window.open = function(u) {
+          if (u && u !== 'about:blank' && !/^javascript:/i.test(String(u))) {
+            openInNewTab(u);
+          }
+          return null;
+        };
+      } catch (e) {}
+    }
+
     function openImageInApp(el) {
       if (!el) return;
       const targetPage = el.getAttribute('data-page') || el.getAttribute('data-full') || '';
       if (!targetPage) return;
-      showLocalTorLoading('link', targetPage);
-      navigateDirect(targetPage, el);
+      openInNewTab(targetPage, el);
     }
     window.openImageInApp = openImageInApp;
-
-    let suggestPage = Math.max(1, Math.ceil(document.querySelectorAll('#resultsList .url-suggest-row').length / 10));
-    let suggestLoading = false;
-    let suggestHasMore = true;
 
     // ---------- Resposta da IA (primeiro bloco da página) ----------
     const aiCard = document.getElementById('aiCard');
@@ -16629,7 +19607,7 @@ function getDevicePlaylistsRoot(clientId, req) {
         cite.addEventListener('click', function (e) {
           e.preventDefault();
           const src = (sources || [])[parseInt(cite.getAttribute('data-ai-src'), 10) - 1];
-          if (src) navigateDirect(src.url, null);
+          if (src) openInNewTab(src.url, cite);
         });
       });
     }
@@ -16641,11 +19619,13 @@ function getDevicePlaylistsRoot(clientId, req) {
         a.className = 'ai-source';
         a.href = '/proxy?url=' + encodeURIComponent(src.url) + '&clientId=' + encodeURIComponent(suggestClientId);
         a.setAttribute('data-direct', src.url);
+        a.target = '_blank';
+        a.rel = 'noopener';
         a.title = src.title + ' · ' + src.host;
         a.innerHTML = '<span class="ai-source-num"></span><span class="ai-source-name"></span>';
         a.querySelector('.ai-source-num').textContent = String(index + 1);
         a.querySelector('.ai-source-name').textContent = src.host || src.title;
-        a.addEventListener('click', function (e) { e.preventDefault(); navigateDirect(src.url, a); });
+        a.addEventListener('click', function (e) { e.preventDefault(); openInNewTab(src.url, a); });
         container.appendChild(a);
       });
     }
@@ -16656,7 +19636,7 @@ function getDevicePlaylistsRoot(clientId, req) {
         a.addEventListener('click', function (e) {
           e.preventDefault();
           const target = a.getAttribute('data-direct') || a.getAttribute('href');
-          navigateDirect(target, a);
+          openInNewTab(target, a);
         });
       });
     }
@@ -16748,7 +19728,7 @@ function getDevicePlaylistsRoot(clientId, req) {
         a.appendChild(body);
         a.addEventListener('click', function (e) {
           e.preventDefault();
-          navigateDirect(pick.url, a);
+          openInNewTab(pick.url, a);
         });
         box.appendChild(a);
 
@@ -16832,9 +19812,10 @@ function getDevicePlaylistsRoot(clientId, req) {
     const pvPending = new Set();
     let pvTimer = null;
     function pvImgSrc(u) {
-      return '/api/preview-img?u=' + encodeURIComponent(u) + '&clientId=' + encodeURIComponent(suggestClientId);
+      return window.__pplEncryptUrl('/api/preview-img?u=' + encodeURIComponent(u) + '&clientId=' + encodeURIComponent(suggestClientId));
     }
     function decorateResultRow(row) {
+      if (row.getAttribute('data-ipcam') === '1') return;
       const url = row.getAttribute('data-url') || '';
       if (!pvStore.has(url)) {
         if (!row.querySelector('.url-suggest-pv')) {
@@ -16857,15 +19838,24 @@ function getDevicePlaylistsRoot(clientId, req) {
           box.className = 'url-suggest-pv';
           row.insertBefore(box, row.querySelector('.url-suggest-ext') || null);
         }
-        box.classList.remove('is-loading');
+        box.classList.add('is-loading');
         const img = document.createElement('img');
         img.alt = '';
         img.loading = 'lazy';
+        img.decoding = 'async';
         img.referrerPolicy = 'no-referrer';
+        const imgFailTimer = setTimeout(function () {
+          if (!box.classList.contains('is-ready')) box.remove();
+        }, 4500);
         img.onload = function () {
+          clearTimeout(imgFailTimer);
+          box.classList.remove('is-loading');
           box.classList.add('is-ready');
         };
-        img.onerror = function () { box.remove(); };
+        img.onerror = function () {
+          clearTimeout(imgFailTimer);
+          box.remove();
+        };
         img.src = pvImgSrc(pv.image);
         box.appendChild(img);
       }
@@ -16893,7 +19883,7 @@ function getDevicePlaylistsRoot(clientId, req) {
     }
     function scheduleResultPreviews() {
       if (pvTimer) clearTimeout(pvTimer);
-      pvTimer = setTimeout(runResultPreviews, 100);
+      pvTimer = setTimeout(runResultPreviews, 40);
     }
     async function runResultPreviews() {
       pvTimer = null;
@@ -16901,26 +19891,38 @@ function getDevicePlaylistsRoot(clientId, req) {
       rows.forEach(decorateResultRow);
       const urls = [];
       rows.forEach(function (row) {
+        if (row.getAttribute('data-ipcam') === '1') return;
         const u = row.getAttribute('data-url') || '';
-        if (!/^https?:/i.test(u) || pvStore.has(u) || pvPending.has(u) || urls.indexOf(u) !== -1) return;
+        if (!/^https?:/i.test(u) || /[.]pdf(?:[?#]|$)/i.test(u) || pvStore.has(u) || pvPending.has(u) || urls.indexOf(u) !== -1) return;
         if (urls.length < 12) urls.push(u);
       });
       if (!urls.length) return;
-      urls.forEach(function (u) { pvPending.add(u); });
-      try {
-        const res = await fetch('/api/page-preview?clientId=' + encodeURIComponent(suggestClientId), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ urls: urls })
-        });
-        const data = await res.json();
-        const previews = (data && data.previews) || {};
-        urls.forEach(function (u) { pvStore.set(u, previews[u] || null); });
-      } catch (e) {
-        urls.forEach(function (u) { pvStore.set(u, null); });
+      const chunks = [];
+      for (let i = 0; i < urls.length; i += 4) {
+        chunks.push(urls.slice(i, i + 4));
       }
-      urls.forEach(function (u) { pvPending.delete(u); });
-      document.querySelectorAll('#resultsList .url-suggest-row[data-url]').forEach(decorateResultRow);
+      await Promise.all(chunks.map(async function (batch) {
+        batch.forEach(function (u) { pvPending.add(u); });
+        const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+        const abortTimer = ctrl ? setTimeout(function () { try { ctrl.abort(); } catch (e) {} }, 3200) : null;
+        try {
+          const res = await fetch('/api/page-preview?clientId=' + encodeURIComponent(suggestClientId), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ urls: batch }),
+            signal: ctrl ? ctrl.signal : undefined
+          });
+          const data = await res.json();
+          const previews = (data && data.previews) || {};
+          batch.forEach(function (u) { pvStore.set(u, previews[u] || null); });
+        } catch (e) {
+          batch.forEach(function (u) { pvStore.set(u, null); });
+        } finally {
+          if (abortTimer) clearTimeout(abortTimer);
+          batch.forEach(function (u) { pvPending.delete(u); });
+          document.querySelectorAll('#resultsList .url-suggest-row[data-url]').forEach(decorateResultRow);
+        }
+      }));
       scheduleResultPreviews();
     }
 
@@ -16932,27 +19934,56 @@ function getDevicePlaylistsRoot(clientId, req) {
         .replace(/"/g, '&quot;');
     }
 
+    function normalizeClientResultUrl(raw) {
+      return String(raw || '')
+        .trim()
+        .replace(/^https?:[/][/]/i, '')
+        .replace(/^www[.]/i, '')
+        .split('#')[0]
+        .replace(/[/]+$/, '')
+        .toLowerCase();
+    }
+
+    function getActiveFilterMode() {
+      const inp = document.getElementById('searchFilterInput');
+      return (inp && inp.value ? inp.value : 'all').toLowerCase();
+    }
+
     function appendSuggestRows(items) {
       const list = document.getElementById('resultsList');
       if (!list || !items || !items.length) return;
       const seenUrls = new Set();
       list.querySelectorAll('.url-suggest-row[data-url]').forEach(function(el) {
-        const u = el.getAttribute('data-url');
+        const u = normalizeClientResultUrl(el.getAttribute('data-url'));
         if (u) seenUrls.add(u);
       });
+      const activeMode = getActiveFilterMode();
       items.forEach((item) => {
         if (!item || item.kind === 'search' || !item.url || !/^https?:/i.test(item.url)) return;
-        if (seenUrls.has(item.url)) return;
-        seenUrls.add(item.url);
+        const normU = normalizeClientResultUrl(item.url);
+        if (!normU || seenUrls.has(normU)) return;
+        seenUrls.add(normU);
         const host = item.subtitle || item.url;
         const letter = String(host || '?').charAt(0).toUpperCase();
+        const isIpCamCard = item.kind === 'ipcam' || item.source === 'ip-cam' || item.source === 'ip-direct' || activeMode === 'ipcam' || /^https?:[/][/][0-9]{1,3}(?:[.][0-9]{1,3}){3}(?::[0-9]+)?/i.test(String(item.url || ''));
+        const isPdfCard = !isIpCamCard && (item.kind === 'pdf' || activeMode === 'pdf' || /[.]pdf(?:[?#]|$)/i.test(String(item.url || '')));
+
         const card = document.createElement('div');
         card.className = 'search-result-card';
         const a = document.createElement('a');
         a.className = 'url-suggest-row is-appended';
-        a.href = '/proxy?url=' + encodeURIComponent(item.url) + '&clientId=' + encodeURIComponent(suggestClientId);
-        a.setAttribute('data-direct', item.url);
+
+        const rowTargetHref = isIpCamCard
+          ? '/ipcam-live?url=' + encodeURIComponent(item.url) + '&title=' + encodeURIComponent(item.title || 'Câmera IP') + '&clientId=' + encodeURIComponent(suggestClientId)
+          : '/proxy?url=' + encodeURIComponent(item.url) + '&clientId=' + encodeURIComponent(suggestClientId);
+        a.href = rowTargetHref;
+        a.setAttribute('target', '_blank');
+        a.setAttribute('rel', 'noopener noreferrer');
+        a.setAttribute('data-direct', isIpCamCard ? rowTargetHref : item.url);
         a.setAttribute('data-url', item.url);
+        if (isIpCamCard) {
+          a.setAttribute('data-ipcam', '1');
+        }
         if (item.image) a.setAttribute('data-pv', '1');
 
         let favHtml = letter;
@@ -16962,14 +19993,25 @@ function getDevicePlaylistsRoot(clientId, req) {
 
         let pvHtml = '';
         if (item.image) {
+          const imgSrc = isIpCamCard
+            ? window.__pplEncryptUrl('/api/ipcam-frame?u=' + encodeURIComponent(item.image) + '&_t=' + Date.now())
+            : pvImgSrc(item.image);
           pvHtml = '<span class="url-suggest-pv is-ready" data-url="' + escapeClientHtml(item.url) + '">' +
-            '<img src="' + pvImgSrc(item.image) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.parentElement.remove()" />' +
+            '<img src="' + imgSrc + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.parentElement.remove()" />' +
             '</span>';
         }
 
-        const sourceTag = item.badge
-          ? '<span class="url-source-tag source-rust-index">' + escapeClientHtml(item.badge) + '</span>'
-          : '<span class="url-source-tag source-rust-index">⚡ MOTOR RUST</span>';
+        const sourceTag = isIpCamCard
+          ? '<span class="url-source-tag" style="background:rgba(16,185,129,0.22);color:#34d399;border:1px solid rgba(16,185,129,0.5);">🟢 CÂMERA IP AO VIVO</span>'
+          : (isPdfCard
+            ? '<span class="url-source-tag" style="background:rgba(239,68,68,0.2);color:#fca5a5;border:1px solid rgba(239,68,68,0.45);">📄 DOCUMENTO PDF</span>'
+            : (item.badge
+              ? '<span class="url-source-tag source-rust-index">' + escapeClientHtml(item.badge) + '</span>'
+              : '<span class="url-source-tag source-rust-index">⚡ MOTOR PPL</span>'));
+
+        const extLabel = isIpCamCard
+          ? '<span class="url-suggest-ext" title="Assistir Streaming Ao Vivo">🔴 Ao Vivo →</span>'
+          : '<span class="url-suggest-ext" title="Acessar no Papaléguas">Acessar →</span>';
 
         a.innerHTML = '<span class="url-suggest-fav">' + favHtml + '</span>' +
           '<span class="url-suggest-meta">' +
@@ -16978,9 +20020,23 @@ function getDevicePlaylistsRoot(clientId, req) {
             (item.snippet ? '<span class="url-suggest-snip">' + escapeClientHtml(item.snippet) + '</span>' : '') +
           '</span>' +
           pvHtml +
-          '<span class="url-suggest-ext" title="Acessar no Papaléguas">Acessar →</span>';
+          extLabel;
 
         card.appendChild(a);
+
+        const quickDiv = document.createElement('div');
+        quickDiv.className = 'result-quick-actions';
+        quickDiv.style.cssText = isIpCamCard || isPdfCard
+          ? 'display:flex;gap:8px;padding:6px 14px 10px;flex-wrap:wrap;'
+          : 'display:flex;gap:8px;padding:4px 14px 9px;flex-wrap:wrap;';
+        if (isIpCamCard) {
+          quickDiv.innerHTML = '<button type="button" class="btn-smart-preview btn-open-ipcam" data-preview-url="' + escapeClientHtml(item.url) + '" data-preview-title="' + escapeClientHtml(item.title || host) + '" style="font-size:11.5px;font-weight:700;color:#d1fae5;background:rgba(16,185,129,0.22);border:1px solid rgba(16,185,129,0.55);border-radius:8px;padding:5px 12px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;">🔴 Assistir Câmera Ao Vivo (Tempo Real)</button>';
+        } else if (isPdfCard) {
+          quickDiv.innerHTML = '<button type="button" class="btn-smart-preview btn-open-pdf" data-preview-url="' + escapeClientHtml(item.url) + '" data-preview-title="' + escapeClientHtml(item.title || host) + '" style="font-size:11.5px;font-weight:700;color:#fecaca;background:rgba(239,68,68,0.2);border:1px solid rgba(239,68,68,0.5);border-radius:8px;padding:5px 12px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;">📄 Ler PDF Integrado Aqui</button>';
+        } else {
+          quickDiv.innerHTML = '<button type="button" class="btn-smart-preview btn-open-reader" data-preview-url="' + escapeClientHtml(item.url) + '" data-preview-title="' + escapeClientHtml(item.title || host) + '" style="font-size:11px;font-weight:600;color:#bae6fd;background:rgba(56,189,248,0.12);border:1px solid rgba(56,189,248,0.35);border-radius:8px;padding:4px 10px;cursor:pointer;display:inline-flex;align-items:center;gap:5px;">📖 Modo Leitura Limpo</button>';
+        }
+        card.appendChild(quickDiv);
         list.appendChild(card);
       });
       scheduleResultPreviews();
@@ -17013,7 +20069,7 @@ function getDevicePlaylistsRoot(clientId, req) {
           const isOfficial = href.indexOf('.gov') !== -1 || href.indexOf('.edu') !== -1 || text.indexOf('.gov') !== -1 || text.indexOf('.edu') !== -1;
           row.style.display = isOfficial ? '' : 'none';
         } else if (activeWebQuickFilter === 'recent') {
-          const hasRecent = /\b(2024|2025|2026|hoje|ontem|hora|horas|minuto|minutos|dia|dias|semana)\b/i.test(text);
+          const hasRecent = /(?:^|[^a-z0-9])(2024|2025|2026|hoje|ontem|hora|horas|minuto|minutos|dia|dias|semana)(?:$|[^a-z0-9])/i.test(text);
           row.style.display = hasRecent ? '' : 'none';
         }
       });
@@ -17039,32 +20095,48 @@ function getDevicePlaylistsRoot(clientId, req) {
     function prefetchNextSuggestPage() {
       if (!currentQuery || !suggestHasMore || suggestLoading) return;
       const targetPage = suggestPage;
-      if (prefetchedSuggestPages.has(targetPage)) return;
-      const reqPromise = fetch('/api/url-suggest?q=' + encodeURIComponent(currentQuery) + '&page=' + targetPage + '&clientId=' + encodeURIComponent(suggestClientId))
+      const activeMode = getActiveFilterMode();
+      const cacheKey = activeMode + ':' + targetPage;
+      if (prefetchedSuggestPages.has(cacheKey)) return;
+      const reqPromise = fetch('/api/url-suggest?q=' + encodeURIComponent(currentQuery) + '&page=' + targetPage + '&filter=' + encodeURIComponent(activeMode) + '&clientId=' + encodeURIComponent(suggestClientId))
         .then(function (r) { return r.json(); })
         .catch(function () { return null; });
-      prefetchedSuggestPages.set(targetPage, reqPromise);
+      prefetchedSuggestPages.set(cacheKey, reqPromise);
     }
 
-    async function loadMoreSuggestions() {
+    async function loadMoreSuggestions(force) {
       if (suggestLoading || !currentQuery) return;
+      if (!force && !suggestHasMore) return;
+      const activeMode = getActiveFilterMode();
+      if (activeMode !== 'all' && activeMode !== 'web' && activeMode !== 'pdf' && activeMode !== 'ipcam') return;
       suggestLoading = true;
       suggestHasMore = true;
       setRefreshLabel();
       let hops = 0;
       let added = 0;
+      const maxHops = 3;
+      const fetchSuggestWithTimeout = async (url, ms) => {
+        const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const timer = ctrl ? setTimeout(function () { try { ctrl.abort(); } catch (e) {} }, ms) : null;
+        try {
+          const res = await fetch(url, ctrl ? { signal: ctrl.signal } : undefined);
+          return await res.json();
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      };
       try {
-        while (hops < 8) {
+        while (hops < maxHops) {
           hops += 1;
           const before = document.querySelectorAll('#resultsList .url-suggest-row').length;
           let data = null;
-          if (prefetchedSuggestPages.has(suggestPage)) {
-            data = await prefetchedSuggestPages.get(suggestPage);
-            prefetchedSuggestPages.delete(suggestPage);
+          const cacheKey = activeMode + ':' + suggestPage;
+          if (prefetchedSuggestPages.has(cacheKey)) {
+            data = await prefetchedSuggestPages.get(cacheKey);
+            prefetchedSuggestPages.delete(cacheKey);
           }
           if (!data) {
-            const res = await fetch('/api/url-suggest?q=' + encodeURIComponent(currentQuery) + '&page=' + suggestPage + '&clientId=' + encodeURIComponent(suggestClientId));
-            data = await res.json();
+            data = await fetchSuggestWithTimeout('/api/url-suggest?q=' + encodeURIComponent(currentQuery) + '&page=' + suggestPage + '&filter=' + encodeURIComponent(activeMode) + '&clientId=' + encodeURIComponent(suggestClientId), 8000);
           }
           const items = (data && data.suggestions) || [];
           appendSuggestRows(items);
@@ -17075,7 +20147,7 @@ function getDevicePlaylistsRoot(clientId, req) {
           const diff = after - before;
           added += diff;
           if (added >= 5) break;
-          if (!suggestHasMore && hops > 2) break;
+          if (!suggestHasMore) break;
           if (!items.length && !suggestHasMore) break;
         }
       } catch (e) {
@@ -17083,6 +20155,7 @@ function getDevicePlaylistsRoot(clientId, req) {
       }
       suggestLoading = false;
       setRefreshLabel();
+      saveCurrentCategoryListToCache();
       if (added === 0 && !suggestHasMore) {
         const btn = document.getElementById('resultsRefresh');
         if (btn) {
@@ -17093,17 +20166,39 @@ function getDevicePlaylistsRoot(clientId, req) {
         setTimeout(prefetchNextSuggestPage, 900);
       }
     }
-    scheduleResultPreviews();
-    if (currentQuery) {
-      setTimeout(prefetchNextSuggestPage, 900);
-    }
+    // Mantém o circuito Tor livre para navegação imediata sem pré-buscas pesadas em segundo plano
 
     const resultsRefresh = document.getElementById('resultsRefresh');
-    if (resultsRefresh) resultsRefresh.addEventListener('click', function () { loadMoreSuggestions(); });
+    if (resultsRefresh) resultsRefresh.addEventListener('click', function () { loadMoreSuggestions(true); });
+
+    function triggerInfiniteScrollIfNeeded() {
+      const activeMode = getActiveFilterMode();
+      if (activeMode === 'videos') {
+        if (typeof loadMoreVideosAuto === 'function') loadMoreVideosAuto();
+      } else if (activeMode === 'images') {
+        if (typeof loadMoreImagesAuto === 'function') loadMoreImagesAuto();
+      } else if (activeMode === 'all' || activeMode === 'web' || activeMode === 'pdf' || activeMode === 'ipcam') {
+        loadMoreSuggestions(false);
+      }
+    }
+
+    if (resultsRefresh && typeof IntersectionObserver === 'function') {
+      const refreshObserver = new IntersectionObserver(function (entries) {
+        for (let i = 0; i < entries.length; i++) {
+          if (entries[i].isIntersecting) {
+            triggerInfiniteScrollIfNeeded();
+            break;
+          }
+        }
+      }, { root: null, rootMargin: '450px 0px', threshold: 0 });
+      refreshObserver.observe(resultsRefresh);
+    }
 
     window.addEventListener('scroll', () => {
-      if ((window.innerHeight + window.scrollY) >= (document.body.offsetHeight - 240)) {
-        loadMoreSuggestions();
+      const scrollTop = window.scrollY || window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
+      const docHeight = Math.max(document.documentElement.scrollHeight || 0, document.body.scrollHeight || 0, document.body.offsetHeight || 0);
+      if ((window.innerHeight + scrollTop) >= (docHeight - 360)) {
+        triggerInfiniteScrollIfNeeded();
       }
     }, { passive: true });
 
@@ -17124,15 +20219,51 @@ function getDevicePlaylistsRoot(clientId, req) {
       initSearchPageEvents();
     }
 
-    // Delegação global robusta de cliques em todos os links e cards da busca
+    // Delegação global robusta de cliques em todos os links e cards da busca:
+    // Resultados de pesquisa abrem SEMPRE em uma nova aba para preservar a busca atual intacta!
     document.addEventListener('click', function (e) {
-      // 1. Vídeo do YouTube
-      const videoCard = e.target.closest('.topic-video-card');
-      if (videoCard) {
+      // 0. Botão de ampliar/zoom da imagem (abre o lightbox sem navegar)
+      const zoomBtn = e.target.closest('.image-zoom-btn');
+      if (zoomBtn) {
         e.preventDefault();
-        const vid = videoCard.getAttribute('data-video-id') || '';
-        const title = videoCard.getAttribute('data-video-title') || '';
-        if (vid) openVideo(vid, title);
+        e.stopPropagation();
+        const card = zoomBtn.closest('.image-card, .link-media-item');
+        if (card && typeof openLightboxCard === 'function') openLightboxCard(card);
+        return;
+      }
+
+      // Controles internos da página de busca (filtros de categoria, carregar mais, crawler, preview, modais)
+      if (e.target.closest('.search-pill, .search-filter-pills, .search-filter-bar, .load-more-btn, .carousel-load-more-pill, .btn-deep-crawl, .btn-test-uptime, .btn-smart-preview, .image-lightbox-close, .image-lightbox-nav, .video-modal')) {
+        return;
+      }
+
+      // 1. Vídeo do YouTube (card de tópico, mídia acoplada ou card da galeria de vídeos)
+      const ytVideoCard = e.target.closest('.topic-video-card, .link-media-video, .video-card[data-video-id]');
+      if (ytVideoCard) {
+        e.preventDefault();
+        e.stopPropagation();
+        const vid = ytVideoCard.getAttribute('data-video-id') || '';
+        const title = ytVideoCard.getAttribute('data-video-title') || 'Vídeo';
+        if (vid) openVideo(vid, title, e);
+        return;
+      }
+
+      // 1b. Card de vídeo externo (TikTok, Dailymotion, Vimeo, Kwai) -> abre em nova aba no player nativo /video-watch
+      const extVideoCard = e.target.closest('.video-card-external');
+      if (extVideoCard) {
+        e.preventDefault();
+        e.stopPropagation();
+        const watchUrl = extVideoCard.getAttribute('data-direct') || extVideoCard.getAttribute('href') || '';
+        if (watchUrl) openInNewTab(watchUrl, extVideoCard);
+        return;
+      }
+
+      // 1c. Card de imagem da galeria ou mídia acoplada -> abre página de origem em nova aba
+      const imgCard = e.target.closest('.image-card, .link-media-image');
+      if (imgCard) {
+        e.preventDefault();
+        e.stopPropagation();
+        openImageInApp(imgCard);
         return;
       }
 
@@ -17140,6 +20271,7 @@ function getDevicePlaylistsRoot(clientId, req) {
       const musicCard = e.target.closest('.topic-music-card');
       if (musicCard) {
         e.preventDefault();
+        e.stopPropagation();
         const query = musicCard.getAttribute('data-music-query') || '';
         if (query) openMusic(query);
         return;
@@ -17149,27 +20281,21 @@ function getDevicePlaylistsRoot(clientId, req) {
       const cite = e.target.closest('.ai-cite');
       if (cite) {
         e.preventDefault();
+        e.stopPropagation();
         const srcIdx = parseInt(cite.getAttribute('data-ai-src'), 10) - 1;
         const currentSources = (window.__aiSources && window.__aiSources.length) ? window.__aiSources : ((typeof initialAiData !== 'undefined' && initialAiData) ? initialAiData.sources : []);
         const src = (currentSources || [])[srcIdx];
-        if (src && src.url) navigateDirect(src.url, null);
+        if (src && src.url) openInNewTab(src.url, cite);
         return;
       }
 
-      // 4. Botões de Crawler e Uptime
-      if (e.target.closest('.btn-deep-crawl, .btn-test-uptime')) {
-        return;
-      }
-
-      // 5. Todos os links (resultados web, notícias, wikipédia, fontes IA, picks do agente, filmes, onion, etc.)
-      const link = e.target.closest('a[href], .onion-item, .onion-direct-search-btn, .onion-sublink');
+      // 4. Todos os links (resultados web, PDF, câmera IP, notícias, wikipédia, fontes IA, picks do agente, onion, etc.)
+      const link = e.target.closest('a[href], .onion-item, .onion-direct-search-btn, .onion-sublink, .url-suggest-row, .news-item, .ai-source, .agent-pick, .video-card');
       if (!link) return;
 
-      const href = link.getAttribute('href') || '';
-      if (!href || href === '#' || href.startsWith('javascript:')) return;
-
-      const targetAttr = (link.getAttribute('target') || '').toLowerCase();
-      const directUrl = link.getAttribute('data-direct') || href;
+      const href = (link.getAttribute('href') || '').trim();
+      const directUrl = (link.getAttribute('data-direct') || link.getAttribute('data-url') || href || '').trim();
+      if (!directUrl || directUrl === '#' || directUrl.toLowerCase().startsWith('javascript:')) return;
 
       if (href === 'newtab.html' || href === '/') {
         e.preventDefault();
@@ -17177,18 +20303,44 @@ function getDevicePlaylistsRoot(clientId, req) {
         return;
       }
 
-      if (targetAttr === '_blank') {
-        try {
-          if (window.openInNewTab && directUrl) {
-            e.preventDefault();
-            window.openInNewTab(directUrl);
-            return;
-          }
-        } catch (err) {}
+      // Pesquisas relacionadas ("Você quis dizer" / ".related-chip") atualizam a própria aba de busca
+      const isInternalSearchQuery = link.classList.contains('related-chip') || href.startsWith('/search') || directUrl.startsWith('/search');
+      if (isInternalSearchQuery && e.button !== 1 && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        navigateDirect(directUrl, link);
+        return;
       }
 
+      // Qualquer clique em link de resultado abre em uma nova aba!
+      const hasNativeTabHost = Boolean(
+        (window.torBrowserAPI && typeof window.torBrowserAPI.sendToHost === 'function') ||
+        (window.top && window.top !== window) ||
+        (window.parent && window.parent !== window) ||
+        (document.documentElement && document.documentElement.__plPopupRelay)
+      );
+      if (!hasNativeTabHost && link.tagName === 'A' && link.getAttribute('target') === '_blank') {
+        const rowEl = link.closest('.search-result-card, .url-suggest-row') || link;
+        if (rowEl) {
+          markRowLoading(rowEl);
+          setTimeout(clearLocalLoading, 900);
+        }
+        return;
+      }
       e.preventDefault();
-      navigateDirect(directUrl, link);
+      e.stopPropagation();
+      openInNewTab(directUrl, link.closest('.search-result-card, .url-suggest-row') || link);
+    }, true);
+
+    document.addEventListener('auxclick', function (e) {
+      if (e.button !== 1) return;
+      const link = e.target.closest('a[href], .onion-item, .onion-direct-search-btn, .onion-sublink, .url-suggest-row, .news-item, .ai-source, .agent-pick, .video-card');
+      if (!link) return;
+      const href = (link.getAttribute('href') || '').trim();
+      const directUrl = (link.getAttribute('data-direct') || link.getAttribute('data-url') || href || '').trim();
+      if (!directUrl || directUrl === '#' || directUrl.toLowerCase().startsWith('javascript:')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      openInNewTab(directUrl, link.closest('.search-result-card, .url-suggest-row') || link);
     }, true);
 
       // Crawler Profundo sob Demanda na Rede Tor (Deep Searcher)
@@ -17324,44 +20476,7 @@ function getDevicePlaylistsRoot(clientId, req) {
         });
       }
 
-      // Interceptador Universal: SEMPRE que clicar num link, mostrar loading até a página aparecer
-      document.addEventListener('click', function(e) {
-        // Se for clique no botão de zoom da imagem, abre o lightbox e não navega
-        const zoomBtn = e.target.closest('.image-zoom-btn');
-        if (zoomBtn) {
-          e.preventDefault();
-          e.stopPropagation();
-          const card = zoomBtn.closest('.image-card, .link-media-item');
-          if (card && typeof openLightboxCard === 'function') openLightboxCard(card);
-          return;
-        }
-
-        if (e.target.closest('.search-pill, .search-filter-pills, .search-filter-bar, .video-card, .link-media-video, .load-more-btn, .image-lightbox-close, .image-lightbox-nav, .video-modal')) {
-          return;
-        }
-
-        const a = e.target && e.target.closest ? e.target.closest('a') : null;
-        if (!a) return;
-        if (a.closest('.btn-deep-crawl, .btn-test-uptime')) return;
-
-        const href = (a.getAttribute('href') || '').trim();
-        if (!href || href === '#' || href.toLowerCase().startsWith('javascript:')) return;
-
-        const directUrl = a.getAttribute('data-direct') || a.getAttribute('data-url') || a.href;
-        if (!directUrl) return;
-
-        const isSearch = href.includes('/search') || directUrl.includes('/search');
-        const kind = isSearch ? 'search' : 'link';
-
-        markRowLoading(a.closest('.search-result-card, .url-suggest-row') || a);
-        showLocalTorLoading(kind, directUrl);
-
-        if (!a.classList.contains('ai-cite') && !a.classList.contains('onion-item') && !a.classList.contains('onion-sublink')) {
-          e.preventDefault();
-          navigateDirect(directUrl, a.closest('.search-result-card, .url-suggest-row') || a);
-        }
-      }, true);
-
+      // Navegação de imagens/vídeos do lightbox (abertura em nova aba)
       (function setupImageLightboxAndVideos() {
         const lightbox = document.getElementById('imageLightbox');
         const lightboxImg = document.getElementById('lightboxImg');
@@ -17461,13 +20576,13 @@ function getDevicePlaylistsRoot(clientId, req) {
         }
         window.openDirectLightbox = openDirectLightbox;
 
-        // Navegação interna da imagem (Acessar Página no Papaléguas)
+        // Navegação interna da imagem (Acessar Página no Papaléguas em nova aba)
         function openLightboxTargetPage() {
           const btn = document.getElementById('lightboxPageBtn');
           const targetUrl = btn ? btn.getAttribute('data-target-page') : '';
           if (targetUrl) {
             closeLightbox();
-            navigateDirect(targetUrl);
+            openInNewTab(targetUrl);
           }
         }
         window.openLightboxTargetPage = openLightboxTargetPage;
@@ -17516,55 +20631,188 @@ function getDevicePlaylistsRoot(clientId, req) {
             if (e.target === videoModal) closeVideoModal();
           });
         }
+      })();
 
-        // Delegação de cliques segura para cards de imagens e vídeos
-        document.addEventListener('click', function(e) {
-          // Clique no botão de ampliar/zoom da imagem (abre o lightbox)
-          const zoomBtn = e.target.closest('.image-zoom-btn');
-          if (zoomBtn) {
-            e.preventDefault();
-            e.stopPropagation();
-            const card = zoomBtn.closest('.image-card, .link-media-item');
-            if (card) openLightboxCard(card);
+      // Modal Inteligente: Câmera IP Ao Vivo, Visualizador de PDF e Modo Leitura Limpo
+      (function setupSmartPreviewModal() {
+        var ipCamTimer = null;
+        var readerFontSize = 16;
+
+        function ensureModal() {
+          var modal = document.getElementById('smartPreviewModal');
+          if (modal) return modal;
+          modal = document.createElement('div');
+          modal.id = 'smartPreviewModal';
+          modal.style.cssText = 'position:fixed;inset:0;z-index:999999;background:rgba(4,7,14,0.88);backdrop-filter:blur(10px);display:none;align-items:center;justify-content:center;padding:16px;';
+          modal.innerHTML =
+            '<div style="width:100%;max-width:860px;max-height:90vh;background:#0f172a;border:1px solid rgba(56,189,248,0.35);border-radius:16px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.75);">' +
+              '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 16px;background:#090d16;border-bottom:1px solid rgba(255,255,255,0.08);">' +
+                '<div style="display:flex;align-items:center;gap:8px;min-width:0;">' +
+                  '<span id="smartModalBadge" style="font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;background:rgba(56,189,248,0.2);color:#38bdf8;white-space:nowrap;">MODO LEITURA</span>' +
+                  '<strong id="smartModalTitle" style="font-size:14px;color:#f8fafc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Visualizador</strong>' +
+                '</div>' +
+                '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">' +
+                  '<button type="button" id="smartModalFontDec" style="display:none;padding:4px 9px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.06);color:#e2e8f0;font-size:12px;font-weight:700;cursor:pointer;">A-</button>' +
+                  '<button type="button" id="smartModalFontInc" style="display:none;padding:4px 9px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.06);color:#e2e8f0;font-size:12px;font-weight:700;cursor:pointer;">A+</button>' +
+                  '<a id="smartModalDirectBtn" href="#" target="_blank" onclick="event.preventDefault(); openInNewTab(this.dataset.direct || this.href);" style="padding:5px 12px;border-radius:8px;background:rgba(56,189,248,0.18);border:1px solid rgba(56,189,248,0.45);color:#38bdf8;font-size:12px;font-weight:700;text-decoration:none;">Abrir página original ↗</a>' +
+                  '<button type="button" id="smartModalClose" style="width:30px;height:30px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(255,255,255,0.06);color:#fff;font-size:18px;cursor:pointer;line-height:1;">&times;</button>' +
+                '</div>' +
+              '</div>' +
+              '<div id="smartModalBody" style="padding:18px;overflow-y:auto;flex:1;color:#e2e8f0;line-height:1.7;font-size:16px;"></div>' +
+            '</div>';
+          document.body.appendChild(modal);
+
+          document.getElementById('smartModalClose').addEventListener('click', closeSmartModal);
+          modal.addEventListener('click', function(ev) {
+            if (ev.target === modal) closeSmartModal();
+          });
+          document.getElementById('smartModalFontDec').addEventListener('click', function() {
+            readerFontSize = Math.max(13, readerFontSize - 2);
+            document.getElementById('smartModalBody').style.fontSize = readerFontSize + 'px';
+          });
+          document.getElementById('smartModalFontInc').addEventListener('click', function() {
+            readerFontSize = Math.min(26, readerFontSize + 2);
+            document.getElementById('smartModalBody').style.fontSize = readerFontSize + 'px';
+          });
+          return modal;
+        }
+
+        function stopCamLoop() {
+          if (!ipCamTimer) return;
+          if (typeof ipCamTimer.stop === 'function') ipCamTimer.stop();
+          else clearInterval(ipCamTimer);
+          ipCamTimer = null;
+        }
+
+        function closeSmartModal() {
+          stopCamLoop();
+          var modal = document.getElementById('smartPreviewModal');
+          if (modal) {
+            modal.style.display = 'none';
+            var body = document.getElementById('smartModalBody');
+            if (body) body.innerHTML = '';
+          }
+        }
+
+        document.addEventListener('click', function(ev) {
+          var btn = ev.target.closest('.btn-smart-preview');
+          if (!btn) return;
+          ev.preventDefault();
+          ev.stopPropagation();
+
+          var url = btn.getAttribute('data-preview-url') || '';
+          var title = btn.getAttribute('data-preview-title') || url;
+          if (!url) return;
+
+          if (btn.classList.contains('btn-open-ipcam')) {
+            var fullPlayerHref = '/ipcam-live?url=' + encodeURIComponent(url) + '&title=' + encodeURIComponent(title) + '&clientId=' + encodeURIComponent(suggestClientId);
+            openInNewTab(fullPlayerHref);
             return;
           }
 
-          // Mídia acoplada ao resultado web: Imagem -> Acessa o site da imagem dentro do app
-          const linkImg = e.target.closest('.link-media-image');
-          if (linkImg) {
-            e.preventDefault();
-            e.stopPropagation();
-            openImageInApp(linkImg);
-            return;
-          }
+          var modal = ensureModal();
+          var badge = document.getElementById('smartModalBadge');
+          var titleEl = document.getElementById('smartModalTitle');
+          var bodyEl = document.getElementById('smartModalBody');
+          var directBtn = document.getElementById('smartModalDirectBtn');
+          var fDec = document.getElementById('smartModalFontDec');
+          var fInc = document.getElementById('smartModalFontInc');
 
-          // Mídia acoplada ao resultado web: Vídeo
-          const linkVid = e.target.closest('.link-media-video');
-          if (linkVid) {
-            e.preventDefault();
-            e.stopPropagation();
-            const vid = linkVid.getAttribute('data-video-id');
-            const t = linkVid.getAttribute('data-video-title') || 'Vídeo';
-            openVideo(vid, t);
-            return;
-          }
+          stopCamLoop();
+          titleEl.textContent = title;
+          directBtn.href = '/proxy?url=' + encodeURIComponent(url) + '&clientId=' + encodeURIComponent(suggestClientId);
+          directBtn.setAttribute('data-direct', url);
+          directBtn.textContent = 'Abrir página original ↗';
+          modal.style.display = 'flex';
 
-          // Card de imagem da galeria -> Acessa o site da imagem dentro do app
-          const imgCard = e.target.closest('.image-card');
-          if (imgCard) {
-            e.preventDefault();
-            openImageInApp(imgCard);
-            return;
+          if (btn.classList.contains('btn-open-ipcam')) {
+            badge.textContent = '🟢 STREAMING CÂMERA IP AO VIVO';
+            badge.style.background = 'rgba(16,185,129,0.22)';
+            badge.style.color = '#34d399';
+            fDec.style.display = 'none';
+            fInc.style.display = 'none';
+            var fullPlayerHref = '/ipcam-live?url=' + encodeURIComponent(url) + '&title=' + encodeURIComponent(title) + '&clientId=' + encodeURIComponent(suggestClientId);
+            directBtn.href = fullPlayerHref;
+            directBtn.setAttribute('data-direct', fullPlayerHref);
+            directBtn.textContent = 'Abrir Player em Tela Cheia ↗';
+            var frameCount = 0;
+            var proxyFrameUrl = function() {
+              frameCount += 1;
+              return window.__pplEncryptUrl('/api/ipcam-frame?u=' + encodeURIComponent(url) + '&_t=' + Date.now() + '_' + frameCount);
+            };
+            bodyEl.innerHTML =
+              '<div style="text-align:center;">' +
+                '<div style="position:relative;display:inline-block;max-width:100%;border-radius:12px;overflow:hidden;border:1px solid rgba(16,185,129,0.45);background:#000;">' +
+                  '<img id="liveIpCamImg" src="' + proxyFrameUrl() + '" alt="Stream IP" style="max-width:100%;max-height:65vh;display:block;margin:0 auto;" />' +
+                  '<span id="liveIpCamHud" style="position:absolute;top:10px;left:10px;padding:4px 10px;border-radius:999px;background:rgba(220,38,38,0.88);color:#fff;font-size:11px;font-weight:700;">● AO VIVO (Streaming Contínuo)</span>' +
+                '</div>' +
+                '<div style="margin-top:10px;font-family:monospace;font-size:12px;color:#94a3b8;word-break:break-all;">' + escapeClientHtml(url) + '</div>' +
+              '</div>';
+            var camActive = true;
+            ipCamTimer = { stop: function() { camActive = false; } };
+            var preload = new Image();
+            var loadNext = function() {
+              if (!camActive || !document.getElementById('liveIpCamImg')) return;
+              preload.src = proxyFrameUrl();
+            };
+            preload.onload = function() {
+              var img = document.getElementById('liveIpCamImg');
+              var hud = document.getElementById('liveIpCamHud');
+              if (!img || !camActive) return;
+              img.src = preload.src;
+              if (hud) hud.textContent = '● AO VIVO • Quadro #' + frameCount;
+              setTimeout(loadNext, 70);
+            };
+            preload.onerror = function() {
+              if (!camActive) return;
+              setTimeout(loadNext, 700);
+            };
+            setTimeout(loadNext, 80);
+          } else if (btn.classList.contains('btn-open-pdf')) {
+            badge.textContent = '📄 VISUALIZADOR PDF';
+            badge.style.background = 'rgba(239,68,68,0.22)';
+            badge.style.color = '#fca5a5';
+            fDec.style.display = 'none';
+            fInc.style.display = 'none';
+            var pdfProxy = '/proxy?url=' + encodeURIComponent(url) + '&clientId=' + encodeURIComponent(suggestClientId);
+            bodyEl.innerHTML =
+              '<iframe src="' + pdfProxy + '" style="width:100%;height:72vh;border:none;border-radius:10px;background:#1e293b;"></iframe>';
+          } else {
+            badge.textContent = '📖 MODO LEITURA LIMPO';
+            badge.style.background = 'rgba(56,189,248,0.2)';
+            badge.style.color = '#38bdf8';
+            fDec.style.display = 'inline-block';
+            fInc.style.display = 'inline-block';
+            bodyEl.innerHTML = '<div style="padding:24px;text-align:center;color:#94a3b8;">⏳ Extraindo texto limpo sem anúncios ou rastreadores...</div>';
+            fetch('/api/reader?url=' + encodeURIComponent(url) + '&clientId=' + encodeURIComponent(suggestClientId))
+              .then(function(r) { return r.json(); })
+              .then(function(data) {
+                if (!data || !data.success || !Array.isArray(data.paragraphs) || !data.paragraphs.length) {
+                  bodyEl.innerHTML = '<div style="padding:20px;color:#94a3b8;">Não foi possível extrair o artigo automaticamente. Clique em <b>Abrir página original</b> acima.</div>';
+                  return;
+                }
+                if (data.title) titleEl.textContent = data.title;
+                var htmlOut = '<article style="max-width:700px;margin:0 auto;">' +
+                  '<div style="font-size:12px;color:#38bdf8;font-weight:700;margin-bottom:6px;text-transform:uppercase;">' + escapeClientHtml(data.siteName || '') + ' • Sem Anúncios e Sem Cookies</div>' +
+                  '<h1 style="font-size:1.45em;color:#fff;margin:0 0 16px;line-height:1.3;">' + escapeClientHtml(data.title || title) + '</h1>';
+                data.paragraphs.forEach(function(b) {
+                  var t = escapeClientHtml(b.text || '');
+                  if (b.tag === 'h2' || b.tag === 'h3') {
+                    htmlOut += '<h2 style="font-size:1.15em;color:#f8fafc;margin:18px 0 8px;">' + t + '</h2>';
+                  } else if (b.tag === 'blockquote') {
+                    htmlOut += '<blockquote style="border-left:3px solid #38bdf8;padding-left:12px;color:#cbd5e1;margin:12px 0;">' + t + '</blockquote>';
+                  } else {
+                    htmlOut += '<p style="margin:0 0 14px;color:#e2e8f0;">' + t + '</p>';
+                  }
+                });
+                htmlOut += '</article>';
+                bodyEl.innerHTML = htmlOut;
+              })
+              .catch(function() {
+                bodyEl.innerHTML = '<div style="padding:20px;color:#94a3b8;">Erro ao carregar Modo Leitura.</div>';
+              });
           }
-
-          const vidCard = e.target.closest('.video-card');
-          if (vidCard) {
-            const vid = vidCard.getAttribute('data-video-id');
-            const title = vidCard.getAttribute('data-video-title') || 'Vídeo';
-            openVideo(vid, title, e);
-            return;
-          }
-        });
+        }, true);
       })();
   </script>
 </body>
@@ -17598,11 +20846,10 @@ function getDevicePlaylistsRoot(clientId, req) {
             return;
           }
           const modifiedHtml = injectSeoIntoHtml(html, seoData);
-          res.writeHead(200, {
+          sendCompressed(req, res, 200, {
             'Content-Type': 'text/html; charset=utf-8',
             'Cache-Control': 'no-cache, must-revalidate'
-          });
-          res.end(modifiedHtml);
+          }, modifiedHtml);
         });
         if (!titleParam && !videoMetaCache.has(videoId)) {
           getVideoTitleFast(videoId, null).catch(() => {});
@@ -17630,11 +20877,10 @@ function getDevicePlaylistsRoot(clientId, req) {
             return;
           }
           const modifiedHtml = injectSeoIntoHtml(html, seoData);
-          res.writeHead(200, {
+          sendCompressed(req, res, 200, {
             'Content-Type': 'text/html; charset=utf-8',
             'Cache-Control': 'no-cache, must-revalidate'
-          });
-          res.end(modifiedHtml);
+          }, modifiedHtml);
         });
       }).catch(() => {
         const seoData = getVideoSeoMetadata(cleanVid, titleParam);
@@ -17654,11 +20900,10 @@ function getDevicePlaylistsRoot(clientId, req) {
             return;
           }
           const modifiedHtml = injectSeoIntoHtml(html, seoData);
-          res.writeHead(200, {
+          sendCompressed(req, res, 200, {
             'Content-Type': 'text/html; charset=utf-8',
             'Cache-Control': 'no-cache, must-revalidate'
-          });
-          res.end(modifiedHtml);
+          }, modifiedHtml);
         });
       });
       return;
@@ -17666,7 +20911,8 @@ function getDevicePlaylistsRoot(clientId, req) {
 
     // Requisição de categoria / tema / busca geral
     const qParam = reqUrl.searchParams.get('q') || '';
-    const themeSeo = getThemeSeoMetadata(qParam);
+    const isMobileUa = /Mobile|Android|iPhone|iPad/i.test(userAgent);
+    const themeSeo = Object.assign({}, getThemeSeoMetadata(qParam), { isMobile: isMobileUa });
 
     if (isSocialCrawler) {
       serveSocialPreview(res, {
@@ -17685,11 +20931,45 @@ function getDevicePlaylistsRoot(clientId, req) {
         return;
       }
       const modifiedHtml = injectSeoIntoHtml(html, themeSeo);
-      res.writeHead(200, {
+      sendCompressed(req, res, 200, {
         'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'no-cache, must-revalidate'
-      });
-      res.end(modifiedHtml);
+      }, modifiedHtml);
+    });
+    return;
+  }
+
+  if (pathname === '/newtab.html') {
+    const targetFile = path.join(SRC_DIR, 'newtab.html');
+    const isMobileUa = /Mobile|Android|iPhone|iPad/i.test(String(req.headers['user-agent'] || ''));
+    const cacheKey = isMobileUa ? 'mobile' : 'desktop';
+    if (!global.__plNewtabSsrCache) global.__plNewtabSsrCache = new Map();
+    const ssrHit = global.__plNewtabSsrCache.get(cacheKey);
+    if (ssrHit && (Date.now() - ssrHit.ts < 20000)) {
+      deliverCachedAsset(req, res, ssrHit.asset, 'text/html; charset=utf-8', 'no-cache, must-revalidate', false);
+      return;
+    }
+    const themeSeo = Object.assign({}, getThemeSeoMetadata(''), { isMobile: isMobileUa });
+    fs.readFile(targetFile, 'utf8', (err, html) => {
+      if (err || !html) {
+        serveFileWithMemoryCache(req, res, targetFile, 'text/html; charset=utf-8', 'no-cache, must-revalidate', false);
+        return;
+      }
+      const modifiedHtml = injectSeoIntoHtml(html, themeSeo);
+      const content = Buffer.from(modifiedHtml, 'utf8');
+      let brBuf = null;
+      let gzipBuf = null;
+      try {
+        if (typeof zlib.brotliCompressSync === 'function') {
+          brBuf = zlib.brotliCompressSync(content, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 5 } });
+        }
+      } catch (e) {}
+      try {
+        gzipBuf = zlib.gzipSync(content, { level: 6 });
+      } catch (e) {}
+      const asset = { mtimeMs: Date.now(), content, brBuf, gzipBuf, etag: `W/"ssr-${content.length}"` };
+      global.__plNewtabSsrCache.set(cacheKey, { ts: Date.now(), asset });
+      deliverCachedAsset(req, res, asset, 'text/html; charset=utf-8', 'no-cache, must-revalidate', false);
     });
     return;
   }
@@ -17715,28 +20995,26 @@ function getDevicePlaylistsRoot(clientId, req) {
     }
   }
 
-  if (pathname === '/papaleguas/admin.css' || pathname === '/admin.css') {
-    const cssPath = path.join(__dirname, '../papaleguas/admin.css');
-    if (fs.existsSync(cssPath)) {
-      res.writeHead(200, {
-        'Content-Type': 'text/css; charset=utf-8',
-        'Cache-Control': 'no-cache, no-store, must-revalidate'
+  if (pathname === '/papaleguas/admin.css' || pathname === '/admin.css' || pathname === '/papaleguas/admin.js' || pathname === '/admin.js') {
+    const isCss = pathname.endsWith('.css');
+    const localPath = path.join(__dirname, isCss ? '../papaleguas/admin.css' : '../papaleguas/admin.js');
+    const pplPath = isCss ? '/papaleguas/admin.css' : '/papaleguas/admin.js';
+    const headers = {
+      'Content-Type': isCss ? 'text/css; charset=utf-8' : 'application/javascript; charset=utf-8',
+      'Cache-Control': 'no-cache, no-store, must-revalidate'
+    };
+    tryOffloadToNativePpl(req, res, pplPath, headers, () => {
+      fs.readFile(localPath, 'utf8', (err, data) => {
+        if (err) {
+          res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end('Not found');
+          return;
+        }
+        res.writeHead(200, headers);
+        res.end(data);
       });
-      res.end(fs.readFileSync(cssPath, 'utf8'));
-      return;
-    }
-  }
-
-  if (pathname === '/papaleguas/admin.js' || pathname === '/admin.js') {
-    const jsPath = path.join(__dirname, '../papaleguas/admin.js');
-    if (fs.existsSync(jsPath)) {
-      res.writeHead(200, {
-        'Content-Type': 'application/javascript; charset=utf-8',
-        'Cache-Control': 'no-cache, no-store, must-revalidate'
-      });
-      res.end(fs.readFileSync(jsPath, 'utf8'));
-      return;
-    }
+    });
+    return;
   }
 
   // ----------------------------------------------------
@@ -18052,16 +21330,34 @@ function getDevicePlaylistsRoot(clientId, req) {
     }
 
     // Prioriza filmes de longa duração (mais de 25min) sobre trailers ou clipes curtos
-    const fullMovies = movieResults.filter(m => {
-      const dur = m.duration || '';
-      return dur.split(':').length >= 3 || (dur.split(':').length === 2 && parseInt(dur.split(':')[0], 10) >= 25);
-    });
+    const fullMovies = movieResults.filter(m => parseMovieDurationMins(m.duration) >= 25);
     if (fullMovies.length >= 2) {
       movieResults = fullMovies;
     }
 
-    // Embaralha SEMPRE a cada requisição para garantir catálogo vivo e rotativo
-    shuffleArr(movieResults);
+    // Ranqueamento nativo PPL para /filmes (mantendo leve rotação quando sem busca explícita)
+    const movieRankMod = pplRuntime ? pplRuntime.loadNativeModule('search_rank') : null;
+    if (movieRankMod && typeof movieRankMod.score_filme_candidate === 'function' && movieResults.length > 1) {
+      movieResults = movieResults.map((m) => {
+        const durMins = parseMovieDurationMins(m && m.duration);
+        const ageDays = parseYoutubePublishedAgeDays(m && m.publishedAt);
+        let pplScore = 0;
+        try {
+          pplScore = Number(movieRankMod.score_filme_candidate(
+            String(m && m.title || ''),
+            String(m && m.channel || ''),
+            String(catId || 'todos'),
+            String(searchQuery || ''),
+            durMins,
+            ageDays === null ? -1 : ageDays
+          )) || 0;
+        } catch (e) {}
+        const jitter = searchQuery ? 0 : Math.floor(Math.random() * 14);
+        return { m, _s: pplScore + jitter };
+      }).sort((a, b) => b._s - a._s).map((x) => x.m);
+    } else {
+      shuffleArr(movieResults);
+    }
     if (fallbackList.length > 0) {
       const shuffledFallback = shuffleArr(fallbackList.slice());
       const seenIds = new Set(movieResults.map(m => m.id));
@@ -18093,8 +21389,6 @@ function getDevicePlaylistsRoot(clientId, req) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-5788322050130808"
-     crossorigin="anonymous"></script>
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="theme-color" content="#0b0d14">
@@ -18827,11 +22121,9 @@ function getDevicePlaylistsRoot(clientId, req) {
       <span>${ui.minimize.replace(/^🗕\s*/, '')}</span>
     </button>
     <div class="cinema-player-wrapper" id="player-container">
-      <iframe id="cinema-iframe" src="https://www.youtube.com/embed/${encodeURIComponent(selectedVid)}?autoplay=1&enablejsapi=1&playsinline=1&hl=${encodeURIComponent(hl)}&cc_lang_pref=${encodeURIComponent(langShort)}&rel=0&origin=${encodedOrigin}&widget_referrer=${encodedOrigin}" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="origin"></iframe>
-      <video id="cinema-native-video" controls playsinline webkit-playsinline style="display:none;position:absolute;inset:0;width:100%;height:100%;background:#000;z-index:2;object-fit:contain;"></video>
+      <iframe id="cinema-iframe" src="https://www.youtube.com/embed/${encodeURIComponent(selectedVid)}?autoplay=0&enablejsapi=1&playsinline=1&hl=${encodeURIComponent(hl)}&cc_lang_pref=${encodeURIComponent(langShort)}&rel=0&origin=${encodedOrigin}&widget_referrer=${encodedOrigin}" allow="accelerometer; encrypted-media; gyroscope; web-share" referrerpolicy="origin"></iframe>
+      <video id="cinema-native-video" controls playsinline webkit-playsinline disablepictureinpicture controlsList="nodownload" style="display:none;position:absolute;inset:0;width:100%;height:100%;background:#000;z-index:2;object-fit:contain;"></video>
     </div>
-
-    <video id="cinema-pip-video" playsinline webkit-playsinline muted style="position:fixed;width:160px;height:90px;left:-200px;bottom:0;opacity:0.02;pointer-events:none;"></video>
 
     <div class="cinema-info-card">
       <div class="cinema-info-text" id="active-title">
@@ -18840,9 +22132,6 @@ function getDevicePlaylistsRoot(clientId, req) {
       <div class="cinema-actions">
         <button class="cinema-cast-btn" id="btn-cinema-fs-toggle" type="button" onclick="toggleCinemaMaximize()" style="background:rgba(255,255,255,0.12);color:#fff;padding:6px 12px;font-size:11px;" title="${ui.maximize} / ${ui.minimize}">
           <span id="cinema-fs-label">${ui.maximize}</span>
-        </button>
-        <button class="cinema-cast-btn" id="btn-cinema-mini-toggle" type="button" onclick="enterCinemaMiniPlayer(false)" style="background:rgba(255,255,255,0.08);color:#fff;padding:6px 12px;font-size:11px;" title="${ui.miniPlayer}">
-          ${ui.miniPlayer}
         </button>
         <a id="cinema-direct-link" href="/youtube?v=${encodeURIComponent(selectedVid)}" class="cinema-cast-btn" style="background:rgba(255,255,255,0.08);color:#fff;text-decoration:none;padding:6px 12px;font-size:11px;" title="${ui.watchDirect}" onclick="event.preventDefault(); var u=this.getAttribute('href'); try { if (window.openInNewTab) { window.openInNewTab(u); return; } } catch (e) {} try { if (window.parent && window.parent !== window) { window.parent.postMessage({ type: 'navigate-current-tab', url: u }, '*'); return; } } catch (e) {} location.href=u;">
           ${ui.watchDirect}
@@ -18999,8 +22288,9 @@ function getDevicePlaylistsRoot(clientId, req) {
   <div class="cast-toast" id="cast-toast"></div>
 
   <script src="/fab-drag.js?v=1"></script>
-  <script src="/client-cast.js?v=12"></script>
-  <script src="/cast-hub.js?v=8"></script>
+  <script src="/client-cast.js?v=14"></script>
+  <script src="/ppl-net-crypto.js?v=1"></script>
+  <script src="/cast-hub.js?v=10"></script>
   <script>
     (function() {
       // Sincroniza barra de endereço do app pai de forma limpa (sem URL externa da Pluto TV)
@@ -19072,56 +22362,9 @@ function getDevicePlaylistsRoot(clientId, req) {
       }
       const cinemaMiniClose = document.getElementById('cinema-mini-close');
       if (cinemaMiniClose) cinemaMiniClose.addEventListener('click', closeCinemaFloatingPlayer);
-      function enterCinemaMiniPlayer(usePip) {
-        if (cinemaPlayerClosed) return;
-        const section = document.querySelector('.cinema-player-section');
-        if (section) {
-          section.style.display = '';
-          section.classList.add('mini-mode');
-        }
-        if (!usePip) return;
-        const v = document.getElementById('cinema-pip-video');
-        const vid = currentCinemaVid || window.currentCinemaVid;
-        if (v && vid) {
-          (async function () {
-            try {
-              const origin = window.location.origin && window.location.origin.indexOf('http') === 0 ? window.location.origin : 'http://localhost:8080';
-              v.setAttribute('playsinline', 'true');
-              v.setAttribute('webkit-playsinline', 'true');
-              v.playsInline = true;
-              v.loop = false;
-              v.muted = false;
-              v.disablePictureInPicture = false;
-              if (v.dataset.vid !== vid || !v.src || v.src.indexOf('stream-video') === -1) {
-                if (v.srcObject) {
-                  try { v.srcObject.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
-                  v.srcObject = null;
-                }
-                v.src = origin + '/api/stream-video?v=' + encodeURIComponent(vid);
-                v.dataset.vid = vid;
-                await new Promise(function (resolve) {
-                  var done = function () { v.removeEventListener('loadeddata', done); v.removeEventListener('error', fail); resolve(); };
-                  var fail = function () { v.removeEventListener('loadeddata', done); v.removeEventListener('error', fail); resolve(); };
-                  if (v.readyState >= 2) return resolve();
-                  v.addEventListener('loadeddata', done);
-                  v.addEventListener('error', fail);
-                  setTimeout(resolve, 4000);
-                });
-              }
-              await v.play().catch(function () {});
-              if (document.pictureInPictureEnabled && !document.pictureInPictureElement) {
-                await v.requestPictureInPicture();
-              } else if (v.webkitSupportsPresentationMode && v.webkitSetPresentationMode) {
-                v.webkitSetPresentationMode('picture-in-picture');
-              }
-            } catch (e) {}
-          })();
-        }
-        try {
-          if (window.parent && window.parent !== window) {
-            window.parent.postMessage({ type: 'youtube-enter-pip', videoId: vid, title: currentCinemaTitle || 'Filme' }, '*');
-          }
-        } catch (e) {}
+      function enterCinemaMiniPlayer() {
+        // Picture-in-Picture / Mini Player desativado na página de Filmes
+        return;
       }
       document.addEventListener('click', function (e) {
         const section = document.querySelector('.cinema-player-section.mini-mode');
@@ -19173,6 +22416,11 @@ function getDevicePlaylistsRoot(clientId, req) {
         cinemaFsArmed = true;
         document.documentElement.classList.add('video-true-fs');
         document.body.classList.add('video-true-fs');
+        try {
+          if (window.history && typeof window.history.pushState === 'function') {
+            window.history.pushState({ plCinemaFs: true }, '');
+          }
+        } catch (e) {}
 
         const playerEl = document.querySelector('.cinema-player-section');
         if (playerEl) {
@@ -19210,6 +22458,11 @@ function getDevicePlaylistsRoot(clientId, req) {
         }
       }
       window.toggleCinemaMaximize = toggleCinemaMaximize;
+      window.addEventListener('popstate', function () {
+        if (document.documentElement.classList.contains('video-true-fs') || isCinemaFullscreen()) {
+          minimizeCinemaVideo();
+        }
+      });
 
       // Auto-dim para o botão de minimizar não atrapalhar o filme
       let cinemaMinDimTimer = null;
@@ -19258,17 +22511,7 @@ function getDevicePlaylistsRoot(clientId, req) {
           }
         });
       });
-      document.addEventListener('visibilitychange', function () {
-        if (document.hidden && (currentCinemaVid || window.currentCinemaVid)) {
-          enterCinemaMiniPlayer(true);
-        }
-      });
-      window.addEventListener('pagehide', function () {
-        if (currentCinemaVid || window.currentCinemaVid) enterCinemaMiniPlayer(true);
-      });
-      window.addEventListener('freeze', function () {
-        if (currentCinemaVid || window.currentCinemaVid) enterCinemaMiniPlayer(true);
-      });
+      // Picture-in-Picture automático em visibilitychange/pagehide/freeze removido em /filmes
       let cinemaDetectedCountry = ${JSON.stringify(countryCode)};
       let cinemaDetectedHl = ${JSON.stringify(hl)};
       let cinemaDetectedLang = ${JSON.stringify(langShort)};
@@ -19318,7 +22561,8 @@ function getDevicePlaylistsRoot(clientId, req) {
         const nv = document.getElementById('cinema-native-video');
         if (!nv || !targetId) return;
         const origin = window.location.origin && window.location.origin.indexOf('http') === 0 ? window.location.origin : 'http://localhost:8080';
-        const streamSrc = origin + '/api/stream-video?v=' + encodeURIComponent(targetId) + '&lang=' + encodeURIComponent(cinemaDetectedLang) + (cinemaDetectedCountry ? '&country=' + encodeURIComponent(cinemaDetectedCountry) : '');
+        const rawStreamSrc = origin + '/api/stream-video?v=' + encodeURIComponent(targetId) + '&lang=' + encodeURIComponent(cinemaDetectedLang) + (cinemaDetectedCountry ? '&country=' + encodeURIComponent(cinemaDetectedCountry) : '');
+        const streamSrc = (typeof window.__pplCinemaEncUrl === 'function') ? window.__pplCinemaEncUrl(rawStreamSrc) : rawStreamSrc;
         if (iframe) {
           iframe.style.display = 'none';
           iframe.src = 'about:blank';
@@ -19346,7 +22590,7 @@ function getDevicePlaylistsRoot(clientId, req) {
           iframe.style.display = '';
           iframe.referrerPolicy = 'origin';
           const originEnc = encodeURIComponent(window.location.origin || 'http://localhost:8080');
-          iframe.src = 'https://www.youtube.com/embed/' + encodeURIComponent(id) + '?autoplay=1&enablejsapi=1&playsinline=1&hl=' + encodeURIComponent(cinemaDetectedHl) + '&cc_lang_pref=' + encodeURIComponent(cinemaDetectedLang) + (extraParams || '') + '&rel=0&origin=' + originEnc + '&widget_referrer=' + originEnc;
+          iframe.src = 'https://www.youtube.com/embed/' + encodeURIComponent(id) + '?autoplay=0&enablejsapi=1&playsinline=1&hl=' + encodeURIComponent(cinemaDetectedHl) + '&cc_lang_pref=' + encodeURIComponent(cinemaDetectedLang) + (extraParams || '') + '&rel=0&origin=' + originEnc + '&widget_referrer=' + originEnc;
         }
       }
 
@@ -19361,6 +22605,10 @@ function getDevicePlaylistsRoot(clientId, req) {
           const data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
           if (data && data.type === 'papaleguas-yt-control' && data.action === 'enter-mini') {
             enterCinemaMiniPlayer(false);
+            return;
+          }
+          if (data && data.type === 'papaleguas-yt-control' && data.action === 'exit-fullscreen') {
+            minimizeCinemaVideo();
             return;
           }
           if (data && data.event === 'onError') {
@@ -20348,13 +23596,12 @@ function getDevicePlaylistsRoot(clientId, req) {
 </body>
 </html>`;
 
-    res.writeHead(200, {
+    sendCompressed(req, res, 200, {
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
       'Pragma': 'no-cache',
       'Expires': '0'
-    });
-    res.end(filmesHtml);
+    }, filmesHtml);
     return;
   }
 
@@ -20374,7 +23621,7 @@ function getDevicePlaylistsRoot(clientId, req) {
     res.end();
     return;
   }
-  if (!isAppShellPathname(pathname) && (isProxiedPageReferer(req) || (proxyCtx.target && destKind && destKind !== 'document')) && !/^\/(proxy|api\/|youtube|filmes|musica|search|baixatube)/i.test(pathname)) {
+  if (!isAppShellPathname(pathname) && (isProxiedPageReferer(req) || (proxyCtx.target && destKind && destKind !== 'document')) && !/^\/(proxy|api\/|youtube|filmes|musica|search|baixatube|ipcam-live|video-watch)/i.test(pathname)) {
     const ref = parseRefererProxy(req);
     if (ref.target) {
       let dest = '';
@@ -20510,9 +23757,9 @@ function getDevicePlaylistsRoot(clientId, req) {
   } else if (hasVersion) {
     cacheControlHeader = 'public, max-age=31536000, immutable';
   } else if (pathname.endsWith('.js') || pathname.endsWith('.css')) {
-    cacheControlHeader = 'public, max-age=86400, stale-while-revalidate=604800';
+    cacheControlHeader = 'public, max-age=604800, stale-while-revalidate=2592000';
   } else if (isStaticAsset) {
-    cacheControlHeader = 'public, max-age=2592000, immutable';
+    cacheControlHeader = 'public, max-age=31536000, immutable';
   }
 
   fs.stat(filePath, (statErr, stats) => {
@@ -20534,54 +23781,82 @@ function getDevicePlaylistsRoot(clientId, req) {
       return;
     }
 
-    let cached = staticAssetMemoryCache.get(filePath);
-    if (!cached || cached.mtimeMs !== stats.mtimeMs) {
-      fs.readFile(filePath, (readErr, content) => {
-        if (readErr) {
-          res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
-          res.end('Erro ao carregar arquivo');
-          return;
-        }
-
-        const isCompressible = /text|javascript|json|xml|svg/i.test(contentType);
-        let brBuf = null;
-        let gzipBuf = null;
-        if (isCompressible && content.length > 64) {
-          try {
-            if (typeof zlib.brotliCompressSync === 'function') {
-              brBuf = zlib.brotliCompressSync(content, {
-                params: {
-                  [zlib.constants.BROTLI_PARAM_QUALITY]: 5
-                }
-              });
-            }
-          } catch (e) { swallowed(e, 'server:top@17278'); }
-          try {
-            gzipBuf = zlib.gzipSync(content, { level: 6 });
-          } catch (e) { swallowed(e, 'server:top@17281'); }
-        }
-
-        cached = {
-          mtimeMs: stats.mtimeMs,
-          content,
-          brBuf,
-          gzipBuf,
-          etag
-        };
-
-        if (stats.size <= 10 * 1024 * 1024) {
-          if (staticAssetMemoryCache.size > 150) {
-            const firstKey = staticAssetMemoryCache.keys().next().value;
-            if (firstKey) staticAssetMemoryCache.delete(firstKey);
+    const readLocalFallback = () => {
+      let cached = staticAssetMemoryCache.get(filePath);
+      if (!cached || cached.mtimeMs !== stats.mtimeMs) {
+        fs.readFile(filePath, (readErr, content) => {
+          if (readErr) {
+            res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+            res.end('Erro ao carregar arquivo');
+            return;
           }
-          staticAssetMemoryCache.set(filePath, cached);
-        }
 
+          const isCompressible = /text|javascript|json|xml|svg|wasm/i.test(contentType);
+          let brBuf = null;
+          let gzipBuf = null;
+          if (isCompressible && content.length > 64) {
+            const tunerMod = pplRuntime ? pplRuntime.loadNativeModule('auto_tuner') : null;
+            const brQuality = (tunerMod && typeof tunerMod.optimal_static_brotli_quality === 'function')
+              ? Number(tunerMod.optimal_static_brotli_quality(content.length, 25)) || 5
+              : 5;
+            try {
+              if (typeof zlib.brotliCompressSync === 'function') {
+                brBuf = zlib.brotliCompressSync(content, {
+                  params: {
+                    [zlib.constants.BROTLI_PARAM_QUALITY]: brQuality
+                  }
+                });
+              }
+            } catch (e) { swallowed(e, 'server:top@17278'); }
+            try {
+              gzipBuf = zlib.gzipSync(content, { level: 6 });
+            } catch (e) { swallowed(e, 'server:top@17281'); }
+          }
+
+          cached = {
+            mtimeMs: stats.mtimeMs,
+            content,
+            brBuf,
+            gzipBuf,
+            etag
+          };
+
+          if (stats.size <= 10 * 1024 * 1024) {
+            if (staticAssetMemoryCache.size > 150) {
+              const firstKey = staticAssetMemoryCache.keys().next().value;
+              if (firstKey) staticAssetMemoryCache.delete(firstKey);
+            }
+            staticAssetMemoryCache.set(filePath, cached);
+          }
+
+          deliverCachedAsset(req, res, cached, contentType, cacheControlHeader, isAppShell);
+        });
+      } else {
         deliverCachedAsset(req, res, cached, contentType, cacheControlHeader, isAppShell);
-      });
-    } else {
-      deliverCachedAsset(req, res, cached, contentType, cacheControlHeader, isAppShell);
+      }
+    };
+
+    const isCompressibleAsset = /text|javascript|json|xml|svg|wasm/i.test(contentType);
+    const acceptEncHeader = String((req.headers && req.headers['accept-encoding']) || '');
+    const clientAcceptsCompressed = /\b(br|gzip)\b/i.test(acceptEncHeader);
+    const tunerModStatic = pplRuntime ? pplRuntime.loadNativeModule('auto_tuner') : null;
+    const preferCompressedRam = (tunerModStatic && typeof tunerModStatic.should_serve_compressed_ram === 'function')
+      ? Boolean(tunerModStatic.should_serve_compressed_ram(isCompressibleAsset, clientAcceptsCompressed, stats.size))
+      : (isCompressibleAsset && clientAcceptsCompressed && stats.size >= 128);
+
+    if (
+      !preferCompressedRam &&
+      req.method === 'GET' &&
+      isStaticAsset &&
+      !pathname.startsWith('/api/') &&
+      !pathname.startsWith('/proxy') &&
+      /\.(css|js|json|png|svg|ico|webp|jpg|jpeg|woff2|wasm)$/i.test(pathname)
+    ) {
+      tryOffloadToNativePpl(req, res, pathname, { 'ETag': etag, 'Cache-Control': cacheControlHeader }, readLocalFallback);
+      return;
     }
+
+    readLocalFallback();
   });
 });
 

@@ -9,18 +9,87 @@ if (typeof window !== 'undefined' && window.self !== window.top) {
   throw new Error('[Papaléguas] Shell do navegador bloqueado dentro de iframe.');
 }
 
-// Polyfill de fetch para ambiente local Electron (file://) rotear requisições /api/ para http://localhost:8080
-if (typeof window !== 'undefined' && window.location && window.location.protocol === 'file:') {
+// Criptografia PPL (WebAssembly + stream cipher 64-bit) para buscas e APIs + polyfill file:// -> localhost:8080
+(function installRendererPplCrypto() {
+  if (typeof window === 'undefined') return;
   const _origFetch = window.fetch;
-  window.fetch = function(input, init) {
-    if (typeof input === 'string' && (input.startsWith('/api/') || input.startsWith('/youtube') || input.startsWith('/search') || input.startsWith('/filmes'))) {
-      input = 'http://localhost:8080' + input;
-    } else if (input instanceof URL && input.protocol === 'file:' && input.pathname.startsWith('/api/')) {
-      input = new URL('http://localhost:8080' + input.pathname + input.search);
+  const MASK_64 = (1n << 64n) - 1n;
+  window.__pplRendererWasm = null;
+  (async function () {
+    try {
+      if (typeof WebAssembly === 'undefined') return;
+      const origin = (window.location && window.location.protocol !== 'file:' && window.location.origin !== 'null') ? '' : 'http://localhost:8080';
+      const r = await _origFetch.call(window, origin + '/api/ppl-wasm?module=client_guard');
+      if (!r.ok) return;
+      const inst = await WebAssembly.instantiate(await r.arrayBuffer(), {});
+      if (inst && inst.instance && inst.instance.exports) window.__pplRendererWasm = inst.instance.exports;
+    } catch (e) {}
+  })();
+
+  function pplKeystreamByte(nonce, idx) {
+    const w = window.__pplRendererWasm;
+    if (w && typeof w.ppl_keystream_byte === 'function') {
+      try { return Number(w.ppl_keystream_byte(BigInt(nonce >>> 0), BigInt(idx))) & 0xFF; } catch (e) {}
     }
+    const seed = (BigInt(nonce >>> 0) ^ 0x50504C5F32303236n) & MASK_64;
+    let z = (seed + (((BigInt(idx) + 1n) * 0x9E3779B97F4A7C15n) & MASK_64)) & MASK_64;
+    z = ((z ^ (z >> 30n)) * 0xBF58476D1CE4E5B9n) & MASK_64;
+    z = ((z ^ (z >> 27n)) * 0x94D049BB133111EBn) & MASK_64;
+    z = (z ^ (z >> 31n)) & MASK_64;
+    return Number(z & 0xFFn);
+  }
+
+  function encryptPplObj(obj) {
+    const arr = new Uint32Array(1);
+    if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(arr);
+    else arr[0] = (Math.random() * 0xFFFFFFFF) >>> 0;
+    const nonce = arr[0] >>> 0;
+    const plain = new TextEncoder().encode(JSON.stringify(obj || {}));
+    const out = new Uint8Array(plain.length);
+    for (let i = 0; i < plain.length; i++) out[i] = plain[i] ^ pplKeystreamByte(nonce, i);
+    let bin = '';
+    for (let i = 0; i < out.length; i++) bin += String.fromCharCode(out[i]);
+    return nonce.toString(16).padStart(8, '0') + '.' + btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  }
+
+  window.encryptPplSearchUrl = function(rawUrl) {
+    try {
+      const base = (window.location && window.location.protocol !== 'file:' && window.location.origin !== 'null') ? window.location.origin : 'http://localhost:8080';
+      const u = new URL(rawUrl, base);
+      if ((u.pathname === '/search' || u.pathname === '/proxy' || u.pathname.startsWith('/api/')) && u.search && !u.searchParams.has('ppl')) {
+        const payload = {};
+        u.searchParams.forEach((v, k) => { payload[k] = v; });
+        const token = encryptPplObj(payload);
+        const prefix = (typeof rawUrl === 'string' && rawUrl.startsWith('http')) ? u.origin : '';
+        return prefix + u.pathname + '?ppl=' + encodeURIComponent(token);
+      }
+    } catch (e) {}
+    return rawUrl;
+  };
+
+  const ENCRYPTED_API = /^\/api\/(?:search|search-picks|url-suggest|search-rich|search-images|search-videos|ai-answer|preview-img|ipcam-frame|youtube-recent|youtube-trending|youtube-liked-feed|youtube-suggest|suggest|google-trends|curator-recommendations|country-detect)\b/;
+  window.fetch = function(input, init) {
+    let urlStr = typeof input === 'string' ? input : (input && input.url ? input.url : '');
+    try {
+      const isFile = window.location && window.location.protocol === 'file:';
+      const parsed = new URL(urlStr, isFile ? 'http://localhost:8080' : window.location.origin);
+      if (ENCRYPTED_API.test(parsed.pathname) && parsed.search && !parsed.searchParams.has('ppl')) {
+        const payload = {};
+        parsed.searchParams.forEach((v, k) => { payload[k] = v; });
+        const prefix = isFile ? 'http://localhost:8080' : '';
+        urlStr = prefix + parsed.pathname + '?ppl=' + encodeURIComponent(encryptPplObj(payload));
+        input = (typeof input === 'string') ? urlStr : new Request(urlStr, input);
+      } else if (isFile) {
+        if (typeof input === 'string' && (input.startsWith('/api/') || input.startsWith('/youtube') || input.startsWith('/search') || input.startsWith('/filmes') || input.startsWith('/ipcam-live') || input.startsWith('/video-watch'))) {
+          input = 'http://localhost:8080' + input;
+        } else if (input instanceof URL && input.protocol === 'file:' && input.pathname.startsWith('/api/')) {
+          input = new URL('http://localhost:8080' + input.pathname + input.search);
+        }
+      }
+    } catch (e) {}
     return _origFetch.call(this, input, init);
   };
-}
+})();
 
 let tabs = [];
 let activeTabId = null;
@@ -41,9 +110,11 @@ function extractYoutubeVideoId(raw) {
     // 1. YouTube padrão, embed, shorts ou youtu.be
     const m = s.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?|shorts)\/|.*[?&]v=)|youtu\.be\/|baixatube(?:\.html)?\?.*[?&]v=)([^"&?\/\s]{11})/i);
     if (m && m[1]) return m[1];
-    // 2. Parâmetro v= de 11 caracteres em qualquer rota interna ou externa
-    const vMatch = s.match(/[?&]v=([^"&?\/\s]{11})/i);
-    if (vMatch && vMatch[1]) return vMatch[1];
+    // 2. Parâmetro v= de 11 caracteres apenas em rotas de vídeo (YouTube / BaixaTube / watch)
+    if (/(?:youtube\.com|youtu\.be|youtube-nocookie\.com|\/(?:baixatube|youtube|watch)(?:[/?#.]|$))/i.test(s)) {
+      const vMatch = s.match(/[?&]v=([^"&?\/\s]{11})/i);
+      if (vMatch && vMatch[1]) return vMatch[1];
+    }
     // 3. ID puro de 11 caracteres
     if (/^[a-zA-Z0-9_-]{11}$/.test(s)) return s;
   } catch (e) { swallowed(e, 'renderer:extractYoutubeVideoId@48'); }
@@ -57,6 +128,12 @@ function routeUrlInsideTorApp(raw) {
   if (ytId) {
     return resolveAppNavUrl('/baixatube?v=' + encodeURIComponent(ytId));
   }
+  if (/^https?:\/\/\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\/(?:cgi-bin\/snapshot\.cgi|SnapshotJPEG|oneshotimage|axis-cgi\/(?:jpg|mjpg)|mjpg\/video\.mjpg|nphMotionJpeg)/i.test(target)) {
+    return resolveAppNavUrl('/ipcam-live?url=' + encodeURIComponent(target));
+  }
+  if (/^https?:\/\/(?:(?:www|vm|vt|m)\.)?(?:tiktok\.com\/(?:@[^/]+\/video\/|v\/|t\/)|(?:vm|vt)\.tiktok\.com\/|dailymotion\.com\/video\/|dai\.ly\/|vimeo\.com\/\d+|kwai\.com\/(?:photo|video)\/)/i.test(target)) {
+    return resolveAppNavUrl('/video-watch?url=' + encodeURIComponent(target) + '&clientId=' + encodeURIComponent(CLIENT_ID));
+  }
   if (target.startsWith('/') && !/^\/proxy(?:\?|$)/i.test(target)) return resolveAppNavUrl(target);
   try {
     const parsed = new URL(target, publicAppOrigin() + '/');
@@ -68,7 +145,7 @@ function routeUrlInsideTorApp(raw) {
       }
       return resolveAppNavUrl(parsed.pathname + parsed.search + parsed.hash);
     }
-    if (isLocalAppHost(parsed.hostname) || (window.location && parsed.origin === window.location.origin)) {
+    if ((window.location && parsed.origin === window.location.origin) || parsed.origin === publicAppOrigin() || /^(localhost|127\.0\.0\.1|0\.0\.0\.0):8080$/i.test(parsed.host)) {
       return resolveAppNavUrl(parsed.pathname + parsed.search + parsed.hash);
     }
     // No Electron desktop, o <webview> já usa a partição persist:tor-browser configurada com Tor SOCKS5.
@@ -95,8 +172,12 @@ function resolveAppNavUrl(raw) {
       return publicAppOrigin() + '/' + s;
     }
   }
-  if (/^https?:\/\//i.test(s) || s.startsWith('file:') || s.startsWith('data:') || s.startsWith('blob:')) return s;
-  if (s.startsWith('/')) return publicAppOrigin() + s;
+  if (/^https?:\/\//i.test(s)) return (typeof window.encryptPplSearchUrl === 'function') ? window.encryptPplSearchUrl(s) : s;
+  if (s.startsWith('file:') || s.startsWith('data:') || s.startsWith('blob:')) return s;
+  if (s.startsWith('/')) {
+    const full = publicAppOrigin() + s;
+    return (typeof window.encryptPplSearchUrl === 'function') ? window.encryptPplSearchUrl(full) : full;
+  }
   return s;
 }
 
@@ -125,23 +206,36 @@ function isInternalPortalUrl(url) {
   const s = String(url).trim();
   if (!s || s === '/' || s === '/index.html') return true;
   const lower = s.toLowerCase();
-  if (lower.includes('newtab.html') || lower.includes('musica.html')) return true;
-  if (/(?:^|\/)(?:baixatube|youtube|filmes?|musicas?|music|home|inicio|menu)(?:[/?#]|$)/i.test(lower)) {
+  if (lower.startsWith('/proxy') || lower.includes('/proxy?') || lower.startsWith('/search') || lower.includes('/search?')) {
+    return false;
+  }
+  if (lower.startsWith('file:')) {
     return true;
   }
   try {
-    const origin = (typeof publicAppOrigin === 'function' ? publicAppOrigin() : window.location.origin).toLowerCase();
-    if (lower.startsWith(origin)) {
-      const rest = lower.slice(origin.length);
-      if (!rest || rest === '/' || rest === '/index.html') return true;
-      if (/^\/(?:baixatube|youtube|filmes?|musicas?|music|home|inicio|menu)(?:[/?#]|$)/i.test(rest)) {
+    const appOrigin = (typeof publicAppOrigin === 'function' ? publicAppOrigin() : window.location.origin).toLowerCase();
+    const locOrigin = (window.location && window.location.origin ? window.location.origin : appOrigin).toLowerCase();
+    if (/^https?:\/\//i.test(s)) {
+      const parsed = new URL(s);
+      const o = parsed.origin.toLowerCase();
+      const isAppHost = (
+        o === appOrigin ||
+        o === locOrigin ||
+        /^https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?$/i.test(o) ||
+        /^https?:\/\/(?:www\.)?papaleguas\.app$/i.test(o)
+      );
+      if (!isAppHost) {
+        return false;
+      }
+      const p = parsed.pathname.toLowerCase();
+      if (p === '/' || p === '/index.html' || p.endsWith('/newtab.html') || p.endsWith('/musica.html')) return true;
+      if (/^\/(?:baixatube|youtube|filmes?|musicas?|music|home|inicio|menu)(?:\/|$)/i.test(p)) {
         return true;
       }
+      return false;
     }
-    const parsed = new URL(s, window.location.origin);
-    const p = parsed.pathname.toLowerCase();
-    if (p === '/' || p === '/index.html') return true;
-    if (/^\/(?:baixatube|youtube|filmes?|musicas?|music|home|inicio|menu)(?:\/|$)/i.test(p)) {
+    if (lower.includes('newtab.html') || lower.includes('musica.html')) return true;
+    if (/^\/?(?:baixatube|youtube|filmes?|musicas?|music|home|inicio|menu)(?:[/?#]|$)/i.test(lower)) {
       return true;
     }
   } catch (e) { swallowed(e, 'renderer:isInternalPortalUrl@137'); }
@@ -165,17 +259,22 @@ function prettyAddressBarUrl(raw) {
   if (!s) return '';
 
   try {
-    if (s.includes('/proxy?url=')) {
-      const proxied = new URL(s, window.location.origin).searchParams.get('url');
-      if (proxied) return prettyAddressBarUrl(proxied);
-    }
-  } catch (e) { swallowed(e, 'renderer:prettyAddressBarUrl@151'); }
-
-  try {
     const parsed = new URL(s, publicAppOrigin() + '/');
-    const q = parsed.searchParams.get('q') || parsed.searchParams.get('query');
-    if (q && (/\/search(?:\?|$)/i.test(parsed.pathname) || /duckduckgo\.com/i.test(parsed.hostname))) {
-      return q;
+    if (parsed.pathname === '/proxy' || parsed.pathname === '/proxy/') {
+      let proxied = parsed.searchParams.get('url');
+      if (!proxied && parsed.searchParams.has('ppl') && typeof window.__pplDecryptPayload === 'function') {
+        const dec = window.__pplDecryptPayload(parsed.searchParams.get('ppl'));
+        if (dec && dec.url) proxied = String(dec.url);
+      }
+      return proxied ? prettyAddressBarUrl(proxied) : '';
+    }
+    if (/\/search(?:\?|$)/i.test(parsed.pathname) || /duckduckgo\.com/i.test(parsed.hostname)) {
+      let q = parsed.searchParams.get('q') || parsed.searchParams.get('query');
+      if (!q && parsed.searchParams.has('ppl') && typeof window.__pplDecryptPayload === 'function') {
+        const dec = window.__pplDecryptPayload(parsed.searchParams.get('ppl'));
+        if (dec) q = dec.q || dec.query || '';
+      }
+      return q ? String(q) : '';
     }
   } catch (e) { swallowed(e, 'renderer:prettyAddressBarUrl@159'); }
 
@@ -190,11 +289,12 @@ function prettyAddressBarUrl(raw) {
 
 function enforceCleanPortalUrl() {
   try {
-    if (urlInput && (isInternalPortalUrl(urlInput.value) || urlInput.value.includes('baixatube') || urlInput.value.includes('ngrok.app') || urlInput.value.includes('ngrok-free.app') || urlInput.value.includes('trycloudflare.com'))) {
+    const isRawInternal = (v) => isInternalPortalUrl(v) || /^\/(?:search|proxy)(?:\?|$)/i.test(String(v || '').trim()) || String(v || '').includes('baixatube') || String(v || '').includes('ngrok.app') || String(v || '').includes('ngrok-free.app') || String(v || '').includes('trycloudflare.com');
+    if (urlInput && isRawInternal(urlInput.value)) {
       urlInput.value = '';
       if (typeof syncSearchClearButton === 'function') syncSearchClearButton();
     }
-    if (searchFsInput && (isInternalPortalUrl(searchFsInput.value) || searchFsInput.value.includes('baixatube') || searchFsInput.value.includes('ngrok.app') || searchFsInput.value.includes('ngrok-free.app') || searchFsInput.value.includes('trycloudflare.com'))) {
+    if (searchFsInput && isRawInternal(searchFsInput.value)) {
       searchFsInput.value = '';
       if (typeof syncSearchFsClearButton === 'function') syncSearchFsClearButton();
     }
@@ -278,7 +378,7 @@ function reportConnectingDeviceIpv4() {
 
 // Se acessado pelo navegador do celular ou fora do Electron, cria o polyfill das APIs via HTTP
 if (!window.torBrowserAPI) {
-  reportConnectingDeviceIpv4();
+  setTimeout(reportConnectingDeviceIpv4, 2500);
   window.torBrowserAPI = {
     getNewTabUrl: async () => 'newtab.html',
     getTorStatus: async () => {
@@ -286,7 +386,9 @@ if (!window.torBrowserAPI) {
         const res = await fetch(`/api/tor-status?clientId=${encodeURIComponent(CLIENT_ID)}`, {
           headers: { 'X-Client-Id': CLIENT_ID }
         });
-        return await res.json();
+        const data = await res.json();
+        window.__plTorConnected = Boolean(data && data.connected);
+        return data;
       } catch (e) {
         return { enabled: false, connected: false };
       }
@@ -505,6 +607,8 @@ function isInternalAppUrl(u) {
     str.startsWith('/search') ||
     str.startsWith('/filmes') ||
     str.startsWith('/ip-check') ||
+    str.startsWith('/ipcam-live') ||
+    str.startsWith('/video-watch') ||
     str.startsWith('/papaleguas') ||
     str.startsWith('data:') ||
     str.startsWith('blob:')
@@ -514,7 +618,7 @@ function isInternalAppUrl(u) {
   try {
     const parsed = new URL(str, window.location.origin || 'http://localhost:8080');
     if (parsed.origin === window.location.origin || isLocalAppHost(parsed.hostname) || /localhost:8080|127\.0\.0\.1:8080/i.test(parsed.host)) {
-      if (/^\/(search|youtube|filmes|musica|baixatube|ip-check|papaleguas)/i.test(parsed.pathname) || /newtab\.html|musica\.html/i.test(parsed.pathname)) {
+      if (/^\/(search|youtube|filmes|musica|baixatube|ip-check|ipcam-live|video-watch|papaleguas)/i.test(parsed.pathname) || /newtab\.html|musica\.html/i.test(parsed.pathname)) {
         return true;
       }
     }
@@ -1109,10 +1213,10 @@ function syncPortalHomeButton(url) {
 }
 
 function goHomeFromFullscreen() {
-  document.documentElement.classList.remove('video-true-fs');
-  document.body.classList.remove('video-true-fs');
-  document.documentElement.classList.remove('portal-home');
-  document.body.classList.remove('portal-home');
+  appVideoFullscreen = false;
+  document.documentElement.classList.remove('video-true-fs', 'portal-home', 'fullscreen-video-locked');
+  document.body.classList.remove('video-true-fs', 'portal-home', 'fullscreen-video-locked');
+  if (typeof hidePageLoading === 'function') hidePageLoading();
   const btn = document.getElementById('fs-home-btn');
   if (btn) {
     btn.style.display = 'none';
@@ -1138,11 +1242,26 @@ function goHomeFromFullscreen() {
   const isMusicTab = activeTab && activeTab.url && (activeTab.url.includes('musica.html') || activeTab.url.includes('/musica'));
   const isMusicActive = lastGlobalMusicState && (lastGlobalMusicState.isPlaying || lastGlobalMusicState.track);
 
-  // Procura aba Home / BaixaTube já carregada para alternar instantaneamente (0ms) sem destruir abas de Filmes ou Música
-  let homeTab = tabs.find(t => t.url && (t.url.includes('newtab.html') || t.url.includes('/baixatube') || t.url.includes('/youtube')));
-  if (homeTab) {
+  // Procura aba Home (newtab.html) já carregada ou restaura a Home na aba atual (0ms se em cache)
+  let homeTab = tabs.find(t => t.url && (t.url.includes('newtab.html') || t.url === DEFAULT_URL || t.url === '/'));
+  if (homeTab && (!activeTab || homeTab.id !== activeTab.id)) {
+    homeTab.lastSearchUrl = '';
     activateTab(homeTab.id);
     if (typeof hidePageLoading === 'function') hidePageLoading();
+  } else if (activeTab && activeTab.webview) {
+    activeTab.lastSearchUrl = '';
+    if (typeof activeTab.webview.goToCachedUrl === 'function' && activeTab.webview.goToCachedUrl(DEFAULT_URL)) {
+      activeTab.url = DEFAULT_URL;
+      if (typeof hidePageLoading === 'function') hidePageLoading();
+      updateNavControls(activeTab.webview);
+    } else if (typeof activeTab.webview.loadURL === 'function') {
+      activeTab.url = DEFAULT_URL;
+      activeTab.webview.loadURL(DEFAULT_URL);
+      if (typeof hidePageLoading === 'function') hidePageLoading();
+      updateNavControls(activeTab.webview);
+    } else {
+      homeTab = createTab(DEFAULT_URL);
+    }
   } else {
     homeTab = createTab(DEFAULT_URL);
   }
@@ -1266,7 +1385,7 @@ function createTab(initialUrl = DEFAULT_URL) {
   tabElem.className = 'tab';
   tabElem.id = 'header-' + tabId;
   tabElem.innerHTML = `
-    <img src="icon-192.png" alt="Papaléguas" style="width: 18px; height: 18px; object-fit: contain;" />
+    <img src="icon-192.png" alt="Papaléguas" width="18" height="18" decoding="async" style="width: 18px; height: 18px; object-fit: contain;" />
     <span class="tab-title">Papaléguas</span>
     <button class="tab-close" title="Fechar">&times;</button>
   `;
@@ -1293,9 +1412,8 @@ function createTab(initialUrl = DEFAULT_URL) {
 
     const viewHistory = [initialUrl];
     const historyViews = [];
-    // Cada página guardada é um processo de renderização a mais, então fica só
-    // a vizinha de cada lado: o suficiente para o voltar ser instantâneo.
-    const VIEW_CACHE_DISTANCE = 1;
+    // Mantém páginas vizinhas vivas em cache para que o botão Voltar continue de onde estava sem recarregar.
+    const VIEW_CACHE_DISTANCE = 4;
     let viewIndex = 0;
     let pageUserAgent = currentPageUserAgent();
 
@@ -1349,7 +1467,7 @@ function createTab(initialUrl = DEFAULT_URL) {
       const view = document.createElement('webview');
       view.className = 'web-client-frame';
       const uStr = String(url || '').toLowerCase();
-      const isDirectPortal = isInternalPortalUrl(url) || uStr.includes('newtab.html') || uStr.includes('musica.html') || uStr.includes('/filmes') || uStr.includes('/musica') || uStr.includes('/baixatube') || uStr.includes('/youtube');
+      const isDirectPortal = isInternalPortalUrl(url) && !uStr.includes('/proxy') && !uStr.includes('/search') && !uStr.includes('/ipcam-live') && !uStr.includes('/video-watch');
       const partName = isDirectPortal ? 'persist:papaleguas-direct' : 'persist:tor-browser';
       view.setAttribute('partition', partName);
       view.partition = partName;
@@ -1452,15 +1570,41 @@ function createTab(initialUrl = DEFAULT_URL) {
       } catch (e) { swallowed(e, 'renderer:dismissPageChrome@1234'); }
     }
 
+    function saveViewScroll(v) {
+      if (!v || typeof v.executeJavaScript !== 'function') return;
+      try {
+        Promise.resolve(v.executeJavaScript('({ x: window.scrollX || 0, y: window.scrollY || 0 })', true))
+          .then((pos) => { if (pos && typeof pos.y === 'number') v.__plSavedScroll = pos; })
+          .catch(() => {});
+      } catch (e) {}
+    }
+
+    function restoreViewScroll(v) {
+      if (!v || !v.__plSavedScroll || v.__plSavedScroll.y <= 0 || typeof v.executeJavaScript !== 'function') return;
+      const sx = Number(v.__plSavedScroll.x || 0);
+      const sy = Number(v.__plSavedScroll.y || 0);
+      const apply = () => {
+        try {
+          Promise.resolve(v.executeJavaScript(`window.scrollTo(${sx}, ${sy})`, true)).catch(() => {});
+        } catch (e) {}
+      };
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(apply);
+      else apply();
+    }
+
     function showView(view) {
       Array.prototype.forEach.call(webview.children, (child) => {
         const visible = child === view;
-        if (!visible && child.classList.contains('is-visible')) suspendView(child);
+        if (!visible && child.classList.contains('is-visible')) {
+          saveViewScroll(child);
+          suspendView(child);
+        }
         child.classList.toggle('is-visible', visible);
       });
       if (view) {
         try { view.setAudioMuted(false); } catch (e) { swallowed(e, 'renderer:showView@1244'); }
         dismissPageChrome(view);
+        restoreViewScroll(view);
       }
     }
 
@@ -1534,11 +1678,26 @@ function createTab(initialUrl = DEFAULT_URL) {
       }
     }
 
+    function findCachedViewIndex(targetUrl) {
+      if (!targetUrl) return -1;
+      for (let i = viewHistory.length - 1; i >= 0; i--) {
+        if (sameViewUrl(viewHistory[i], targetUrl) && historyViews[i] && historyViews[i].isConnected) {
+          return i;
+        }
+      }
+      return -1;
+    }
+
     function gotoViewIndex(nextIndex) {
       if (nextIndex < 0 || nextIndex >= viewHistory.length) return;
       const targetUrl = viewHistory[nextIndex];
       const isTargetHome = targetUrl && (targetUrl.includes('newtab.html') || targetUrl === DEFAULT_URL || targetUrl === '/');
       if (isTargetHome && tabObj && tabObj.lastSearchUrl && !sameViewUrl(tabObj.lastSearchUrl, targetUrl)) {
+        const cachedSearchIdx = findCachedViewIndex(tabObj.lastSearchUrl);
+        if (cachedSearchIdx !== -1) {
+          gotoViewIndex(cachedSearchIdx);
+          return;
+        }
         openInNewView(tabObj.lastSearchUrl);
         return;
       }
@@ -1568,6 +1727,13 @@ function createTab(initialUrl = DEFAULT_URL) {
         updateNavControls(webview);
       }
     }
+
+    webview.goToCachedUrl = (targetUrl) => {
+      const idx = findCachedViewIndex(targetUrl);
+      if (idx === -1) return false;
+      gotoViewIndex(idx);
+      return true;
+    };
 
     webview.loadURL = (url) => openInNewView(url);
     webview.getURL = () => (tabObj && tabObj.url) || '';
@@ -1616,9 +1782,10 @@ function createTab(initialUrl = DEFAULT_URL) {
     webview.canGoBack = () => {
       if (viewHasInPageBack()) return true;
       if (viewIndex <= 0) return false;
+      const curUrl = String(viewHistory[viewIndex] || '').toLowerCase();
       const prevUrl = String(viewHistory[viewIndex - 1] || '').toLowerCase();
       const isPrevHome = prevUrl.includes('newtab.html') || prevUrl === String(DEFAULT_URL).toLowerCase() || prevUrl === '/' || prevUrl === 'http://localhost:8080/';
-      if (isPrevHome && viewIndex === 1) {
+      if (isPrevHome && viewIndex === 1 && curUrl.includes('/search')) {
         return false;
       }
       return true;
@@ -1727,7 +1894,7 @@ function createTab(initialUrl = DEFAULT_URL) {
       if (!u) return u;
       try {
         const parsed = new URL(u, window.location.origin || publicAppOrigin());
-        if (parsed.origin === window.location.origin || isLocalAppHost(parsed.hostname) || /localhost:8080|127\.0\.0\.1:8080/i.test(parsed.host)) {
+        if (parsed.origin === window.location.origin || parsed.origin === publicAppOrigin() || /^(localhost|127\.0\.0\.1|0\.0\.0\.0):8080$/i.test(parsed.host)) {
           const path = parsed.pathname + parsed.search;
           if (isAppShellUrl(parsed.href)) return 'newtab.html';
           if (parsed.pathname === '/proxy' || parsed.pathname.indexOf('/proxy/') === 0) {
@@ -1741,12 +1908,13 @@ function createTab(initialUrl = DEFAULT_URL) {
                 parsed.searchParams.delete('q');
               } catch (err) { swallowed(err, 'renderer:resolveIframeUrl@1462'); }
             }
-            return parsed.pathname + parsed.search;
+            const rawProxy = parsed.pathname + parsed.search;
+            return (typeof window.encryptPplSearchUrl === 'function') ? window.encryptPplSearchUrl(rawProxy) : rawProxy;
           }
-          if (/^\/(search|youtube|filmes|musica|baixatube|ip-check)/.test(parsed.pathname) || /newtab\.html|musica\.html/.test(path)) {
+          if (/^\/(search|youtube|filmes|musica|baixatube|ip-check|ipcam-live|video-watch|papaleguas|api)/.test(parsed.pathname) || /newtab\.html|musica\.html/.test(path)) {
             return path.startsWith('/') ? resolveAppNavUrl(path) : path;
           }
-          return 'newtab.html';
+          return path.startsWith('/') ? resolveAppNavUrl(path) : path;
         }
       } catch (e) { swallowed(e, 'renderer:resolveIframeUrl@1471'); }
       if (
@@ -1757,6 +1925,8 @@ function createTab(initialUrl = DEFAULT_URL) {
         u.startsWith('/baixatube') ||
         u.startsWith('/search') || 
         u.startsWith('/filmes') || 
+        u.startsWith('/ipcam-live') || 
+        u.startsWith('/video-watch') || 
         u.startsWith('/proxy') || 
         u.startsWith('data:') || 
         u.startsWith('blob:')
@@ -1791,7 +1961,8 @@ function createTab(initialUrl = DEFAULT_URL) {
       }
 
       if (u.startsWith('http://') || u.startsWith('https://')) {
-        return `/proxy?url=${encodeURIComponent(u)}&clientId=${encodeURIComponent(CLIENT_ID)}`;
+        const rawProxy = `/proxy?url=${encodeURIComponent(u)}&clientId=${encodeURIComponent(CLIENT_ID)}`;
+        return (typeof window.encryptPplSearchUrl === 'function') ? window.encryptPplSearchUrl(rawProxy) : rawProxy;
       }
       return u;
     };
@@ -1799,7 +1970,7 @@ function createTab(initialUrl = DEFAULT_URL) {
     const iframeHistory = [initialUrl];
     const historyFrames = [];
     // Distância máxima, em páginas, que continua guardada em volta da atual.
-    const FRAME_CACHE_DISTANCE = 3;
+    const FRAME_CACHE_DISTANCE = 5;
     let iframeHistoryIndex = 0;
     let ignoreNextHistoryPush = false;
 
@@ -1813,9 +1984,8 @@ function createTab(initialUrl = DEFAULT_URL) {
       frame.title = 'Conteúdo da Página Papaléguas';
       frame.setAttribute('allow', 'autoplay; encrypted-media; fullscreen; picture-in-picture; screen-wake-lock; clipboard-write; camera; microphone; web-share');
       frame.setAttribute('allowfullscreen', 'true');
-      // Sem allow-top-navigation a página não toma a janela do app.
-      // allow-popups e allow-popups-to-escape-sandbox permitem popups, logins e desafios Cloudflare Turnstile
-      frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-presentation allow-pointer-lock allow-orientation-lock allow-storage-access-by-user-activation allow-popups allow-popups-to-escape-sandbox');
+      // Sem allow-top-navigation e sem allow-popups: nenhum site pode escapar do iframe ou abrir aba fora da rede Tor
+      frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-presentation allow-pointer-lock allow-orientation-lock allow-storage-access-by-user-activation');
       frame.setAttribute('referrerpolicy', 'no-referrer-when-downgrade');
       frame.setAttribute('loading', 'eager');
       frame.addEventListener('load', () => handleFrameLoad(frame));
@@ -1842,13 +2012,42 @@ function createTab(initialUrl = DEFAULT_URL) {
       } catch (e) { swallowed(e, 'renderer:pauseFrameMedia@1562'); }
     }
 
+    function saveFrameScroll(f) {
+      try {
+        const win = f && f.contentWindow;
+        const doc = f && f.contentDocument;
+        if (!win) return;
+        f.__plSavedScrollY = win.scrollY || (doc && doc.documentElement && doc.documentElement.scrollTop) || (doc && doc.body && doc.body.scrollTop) || 0;
+        f.__plSavedScrollX = win.scrollX || (doc && doc.documentElement && doc.documentElement.scrollLeft) || 0;
+      } catch (e) {}
+    }
+
+    function restoreFrameScroll(f) {
+      if (!f || typeof f.__plSavedScrollY !== 'number' || f.__plSavedScrollY <= 0) return;
+      const targetY = f.__plSavedScrollY;
+      const targetX = f.__plSavedScrollX || 0;
+      const apply = () => {
+        try {
+          if (f.contentWindow && typeof f.contentWindow.scrollTo === 'function') {
+            f.contentWindow.scrollTo(targetX, targetY);
+          }
+        } catch (e) {}
+      };
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(apply);
+      else apply();
+    }
+
     function showFrame(frame) {
       Array.prototype.forEach.call(webview.children, (child) => {
         const visible = child === frame;
-        if (!visible && child.classList.contains('is-visible')) pauseFrameMedia(child);
+        if (!visible && child.classList.contains('is-visible')) {
+          saveFrameScroll(child);
+          pauseFrameMedia(child);
+        }
         child.classList.toggle('is-visible', visible);
       });
       if (!frame) return;
+      restoreFrameScroll(frame);
       try {
         const doc = frame.contentDocument;
         if (doc) {
@@ -1872,7 +2071,7 @@ function createTab(initialUrl = DEFAULT_URL) {
         if (!frame) return;
         if (Math.abs(index - iframeHistoryIndex) <= FRAME_CACHE_DISTANCE) return;
         const u = iframeHistory[index] || '';
-        if (/\/search(?:\?|$)/i.test(u) || /duckduckgo\.com/i.test(u)) return;
+        if (u.includes('musica.html') || u.includes('/musica') || u.includes('/filmes') || u.includes('/baixatube') || u.includes('/youtube') || /\/search(?:\?|$)/i.test(u) || /duckduckgo\.com/i.test(u)) return;
         frame.remove();
         historyFrames[index] = null;
       });
@@ -1927,7 +2126,6 @@ function createTab(initialUrl = DEFAULT_URL) {
         tabObj.url = url;
         if (/\/search(?:\?|$)/i.test(String(url || ''))) {
           tabObj.lastSearchUrl = url;
-          try { sessionStorage.setItem('papaleguas_last_search_url', url); } catch (e) {}
         }
       }
       const pushed = record ? pushIframeHistory(url) : false;
@@ -1946,12 +2144,27 @@ function createTab(initialUrl = DEFAULT_URL) {
       }
     }
 
+    function findCachedFrameIndex(targetUrl) {
+      if (!targetUrl) return -1;
+      for (let i = iframeHistory.length - 1; i >= 0; i--) {
+        if (sameHistoryUrl(iframeHistory[i], targetUrl) && historyFrames[i] && historyFrames[i].isConnected) {
+          return i;
+        }
+      }
+      return -1;
+    }
+
     // Voltar/avançar: se a página já está carregada, é só mostrar de novo.
     function gotoHistoryIndex(nextIndex) {
       if (nextIndex < 0 || nextIndex >= iframeHistory.length) return;
       const targetUrl = iframeHistory[nextIndex];
       const isTargetHome = targetUrl && (targetUrl.includes('newtab.html') || targetUrl === DEFAULT_URL || targetUrl === '/');
       if (isTargetHome && tabObj && tabObj.lastSearchUrl && !sameViewUrl(tabObj.lastSearchUrl, targetUrl)) {
+        const cachedSearchIdx = findCachedFrameIndex(tabObj.lastSearchUrl);
+        if (cachedSearchIdx !== -1) {
+          gotoHistoryIndex(cachedSearchIdx);
+          return;
+        }
         applyIframeUrl(tabObj.lastSearchUrl, false);
         return;
       }
@@ -1974,6 +2187,13 @@ function createTab(initialUrl = DEFAULT_URL) {
       applyIframeUrl(url, false);
     }
 
+    webview.goToCachedUrl = (targetUrl) => {
+      const idx = findCachedFrameIndex(targetUrl);
+      if (idx === -1) return false;
+      gotoHistoryIndex(idx);
+      return true;
+    };
+
     // Histórico próprio da aba: history.back() do iframe sai do Papaléguas no Chrome.
     webview.loadURL = (url) => {
       applyIframeUrl(url, true);
@@ -1990,11 +2210,38 @@ function createTab(initialUrl = DEFAULT_URL) {
       applyIframeUrl(currentHistoryUrl(), false);
     };
     webview.goBack = () => {
+      const frame = activeFrame();
+      if (frame && frame.__plInFrameSteps > 0) {
+        try {
+          if (frame.contentWindow && frame.contentWindow.history) {
+            frame.__plInFrameSteps -= 1;
+            frame.__plInFrameFwd = (frame.__plInFrameFwd || 0) + 1;
+            if (iframeHistoryIndex > 0) {
+              historyFrames[iframeHistoryIndex - 1] = frame;
+              historyFrames[iframeHistoryIndex] = null;
+              iframeHistoryIndex -= 1;
+              if (tabObj) tabObj.url = iframeHistory[iframeHistoryIndex] || tabObj.url;
+            }
+            ignoreNextHistoryPush = true;
+            frame.contentWindow.history.back();
+            if (activeTabId === tabId) {
+              setAddressBar(currentHistoryUrl());
+              updateNavControls(webview);
+            }
+            return;
+          }
+        } catch (e) {}
+      }
       if (iframeHistoryIndex > 0) {
-        gotoHistoryIndex(iframeHistoryIndex - 1);
+        const curUrl = iframeHistory[iframeHistoryIndex];
+        let targetIdx = iframeHistoryIndex - 1;
+        // Pula entradas adjacentes duplicadas (ex: redirects) para voltar em 1 único clique
+        while (targetIdx > 0 && sameHistoryUrl(iframeHistory[targetIdx], curUrl)) {
+          targetIdx -= 1;
+        }
+        gotoHistoryIndex(targetIdx);
         return;
       }
-      const frame = activeFrame();
       try {
         if (frame && frame.contentWindow && frame.contentWindow.history && frame.contentWindow.history.length > 1) {
           frame.contentWindow.history.back();
@@ -2003,11 +2250,32 @@ function createTab(initialUrl = DEFAULT_URL) {
       } catch (e) {}
     };
     webview.goForward = () => {
+      const frame = activeFrame();
+      if (frame && frame.__plInFrameFwd > 0) {
+        try {
+          if (frame.contentWindow && frame.contentWindow.history) {
+            frame.__plInFrameFwd -= 1;
+            frame.__plInFrameSteps = (frame.__plInFrameSteps || 0) + 1;
+            if (iframeHistoryIndex < iframeHistory.length - 1) {
+              historyFrames[iframeHistoryIndex + 1] = frame;
+              historyFrames[iframeHistoryIndex] = null;
+              iframeHistoryIndex += 1;
+              if (tabObj) tabObj.url = iframeHistory[iframeHistoryIndex] || tabObj.url;
+            }
+            ignoreNextHistoryPush = true;
+            frame.contentWindow.history.forward();
+            if (activeTabId === tabId) {
+              setAddressBar(currentHistoryUrl());
+              updateNavControls(webview);
+            }
+            return;
+          }
+        } catch (e) {}
+      }
       if (iframeHistoryIndex < iframeHistory.length - 1) {
         gotoHistoryIndex(iframeHistoryIndex + 1);
         return;
       }
-      const frame = activeFrame();
       try {
         if (frame && frame.contentWindow && frame.contentWindow.history) {
           frame.contentWindow.history.forward();
@@ -2017,9 +2285,10 @@ function createTab(initialUrl = DEFAULT_URL) {
     };
     webview.canGoBack = () => {
       if (iframeHistoryIndex <= 0) return false;
+      const curUrl = String(iframeHistory[iframeHistoryIndex] || '').toLowerCase();
       const prevUrl = String(iframeHistory[iframeHistoryIndex - 1] || '').toLowerCase();
       const isPrevHome = prevUrl.includes('newtab.html') || prevUrl === String(DEFAULT_URL).toLowerCase() || prevUrl === '/' || prevUrl === 'http://localhost:8080/';
-      if (isPrevHome && iframeHistoryIndex === 1) {
+      if (isPrevHome && iframeHistoryIndex === 1 && curUrl.includes('/search')) {
         return false;
       }
       return true;
@@ -2053,8 +2322,15 @@ function createTab(initialUrl = DEFAULT_URL) {
             }
           } else if (recorded && !sameHistoryUrl(currentHistoryUrl(), recorded) && !sameHistoryUrl(currentHistoryUrl(), loc.href)) {
             // O mesmo iframe navegou para outra página interna ou resultado.
-            // Registra a nova URL empurrando no histórico para que o botão voltar fique ativo e retorne à página anterior!
-            pushIframeHistory(recorded);
+            // Registra a nova URL empurrando no histórico e marca passos internos para usar bfcache ao voltar!
+            const prevIdx = iframeHistoryIndex;
+            const pushed = pushIframeHistory(recorded);
+            if (pushed) {
+              historyFrames[prevIdx] = null;
+              historyFrames[iframeHistoryIndex] = frame;
+              frame.__plInFrameSteps = (frame.__plInFrameSteps || 0) + 1;
+              frame.__plInFrameFwd = 0;
+            }
             if (tabObj) {
               tabObj.url = recorded;
               if (/\/search(?:\?|$)/i.test(recorded)) tabObj.lastSearchUrl = recorded;
@@ -2132,7 +2408,13 @@ function activateTab(tabId) {
       tab.webview.classList.add('active');
       tab.webview.classList.remove('is-audio-background');
 
-      const isNewTab = tab.url && tab.url.includes('newtab.html');
+      const isNewTab = tab.url && (tab.url.includes('newtab.html') || tab.url === DEFAULT_URL || tab.url === '/');
+      if (!isPortalTabUrl(tab.url)) {
+        appVideoFullscreen = false;
+        document.documentElement.classList.remove('video-true-fs', 'portal-home', 'fullscreen-video-locked');
+        document.body.classList.remove('video-true-fs', 'portal-home', 'fullscreen-video-locked');
+      }
+      if (typeof hidePageLoading === 'function') hidePageLoading();
       setAddressBar(isNewTab ? '' : (tab.url || ''));
       syncPortalHomeButton(tab.url);
       urlInput.placeholder = isNewTab ? '✨ Pergunte ao GPT Astra ou digite uma URL...' : 'Digite uma URL ou pesquise com segurança...';
@@ -2232,11 +2514,28 @@ function setupWebviewListeners(tab) {
         wv.send('reply-execute-code-to-page', { success: false, error: err.message });
       }
     } else if (event.channel === 'open-new-tab') {
-      // Nova aba pedida pela página: abre dentro do app, pela mesma conexão (Tor ou direta).
+      // Nova aba pedida pela página: só abre link externo se estiver conectado ao Tor (evita vazamento de IP).
       const rawUrl = event.args[0];
       const ytVid = extractYoutubeVideoId(rawUrl);
       if (ytVid) {
         createTab('/baixatube?v=' + encodeURIComponent(ytVid));
+        return;
+      }
+      const isInternalTarget = String(rawUrl || '').startsWith('/') && !/^\/proxy(?:\?|$)/i.test(String(rawUrl || ''));
+      const isLocalTarget = /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(?:\/|$)/i.test(String(rawUrl || ''));
+      if (!isInternalTarget && !isLocalTarget && window.torBrowserAPI && typeof window.torBrowserAPI.getTorStatus === 'function') {
+        window.torBrowserAPI.getTorStatus().then(async (st) => {
+          if (!st || !st.connected) {
+            if (typeof window.torBrowserAPI.toggleTor === 'function') {
+              try { st = await window.torBrowserAPI.toggleTor(true); } catch (e) {}
+            }
+          }
+          const urlToOpen = routeUrlInsideTorApp(rawUrl);
+          if (urlToOpen && !isAppShellUrl(urlToOpen)) {
+            if (typeof showPageLoading === 'function') showPageLoading(urlToOpen, 'link');
+            createTab(urlToOpen);
+          }
+        }).catch(() => {});
         return;
       }
       const urlToOpen = routeUrlInsideTorApp(rawUrl);
@@ -2273,6 +2572,15 @@ function setupWebviewListeners(tab) {
       const ytVid = extractYoutubeVideoId(target);
       if (ytVid) {
         playYoutubeVideoInApp(ytVid);
+        return;
+      }
+      if (/(?:^|\/)filmes?(?:[/?#]|$)/i.test(String(target))) {
+        let fq = '';
+        try {
+          const u = new URL(target, window.location.origin || 'http://localhost:8080');
+          fq = u.searchParams.get('q') || '';
+        } catch (e) {}
+        openFilmesOnline(fq);
         return;
       }
       if (/(?:\/musica|musica\.html|spotify\.com|deezer\.com)/i.test(String(target))) {
@@ -2314,6 +2622,8 @@ function setupWebviewListeners(tab) {
       }
     } else if (event.channel === 'user-activity') {
       if (typeof fsHomeUserActivity === 'function') fsHomeUserActivity();
+    } else if (event.channel === 'go-back') {
+      if (typeof handleGoBack === 'function') handleGoBack();
     } else if (event.channel === 'video-watch') {
       const payload = event.args[0] || {};
       if (typeof fsHomeVideoWatch === 'function') fsHomeVideoWatch(!!payload.active);
@@ -2322,6 +2632,8 @@ function setupWebviewListeners(tab) {
       if (typeof fsHomeVideoWatch === 'function') fsHomeVideoWatch(true);
       document.documentElement.classList.add('video-true-fs');
       document.body.classList.add('video-true-fs');
+      const act = getActiveTab();
+      if (act && act.webview) updateNavControls(act.webview);
     } else if (event.channel === 'exit-video-fullscreen') {
       appVideoFullscreen = false;
       if (typeof fsHomeVideoWatch === 'function') fsHomeVideoWatch(false);
@@ -2333,6 +2645,8 @@ function setupWebviewListeners(tab) {
           exitFs.call(document);
         }
       } catch (e) { swallowed(e, 'renderer:setupWebviewListeners@1957'); }
+      const act = getActiveTab();
+      if (act && act.webview) updateNavControls(act.webview);
     } else if (event.channel === 'toggle-music-mini-player') {
       if (globalMusicMiniPlayer) {
         const isHidden = globalMusicMiniPlayer.classList.contains('hidden');
@@ -2563,14 +2877,23 @@ function updateFloatingNavPill(canBack, canForward) {
 function canActiveTabGoBack() {
   const activeTab = getActiveTab();
   if (!activeTab || !activeTab.webview) return false;
+  const isPortalFsOnly = document.body.classList.contains('portal-home') || document.documentElement.classList.contains('portal-home');
+  const isNativeFs = !!(document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement);
+  if (appVideoFullscreen || isNativeFs || (!isPortalFsOnly && (document.body.classList.contains('video-true-fs') || document.documentElement.classList.contains('video-true-fs')))) {
+    return true;
+  }
+  const curUrl = String(activeTab.url || '').toLowerCase();
+  const isStrictHome = curUrl === '' || curUrl === '/' || curUrl.includes('newtab.html') || curUrl === String(DEFAULT_URL || '').toLowerCase();
+  if (isStrictHome) {
+    return typeof activeTab.webview.canGoBack === 'function' && activeTab.webview.canGoBack();
+  }
   if (activeTab.returnToTabId && tabs.some(t => t.id === activeTab.returnToTabId)) return true;
   if (typeof activeTab.webview.canGoBack === 'function' && activeTab.webview.canGoBack()) return true;
   if (activeTab.lastSearchUrl && !sameViewUrl(activeTab.url, activeTab.lastSearchUrl)) return true;
-  try {
-    const savedSearchUrl = sessionStorage.getItem('papaleguas_last_search_url') || '';
-    if (savedSearchUrl && !sameViewUrl(activeTab.url, savedSearchUrl)) return true;
-  } catch (e) {}
   if (activeTab.openerTabId && tabs.some(t => t.id === activeTab.openerTabId)) return true;
+  if (curUrl.includes('/filmes') || curUrl.includes('/musica') || curUrl.includes('musica.html') || curUrl.includes('/baixatube') || curUrl.includes('/youtube')) {
+    return true;
+  }
   // Se a aba atual não tem páginas anteriores no histórico mas não é a Home ou veio de outra aba:
   const isHome = isHomeOrBaixaTubeTab(activeTab);
   if (!isHome && (activeTab.lastSearchUrl || previousActiveTabId)) return true;
@@ -2582,10 +2905,42 @@ function handleGoBack() {
   const activeTab = getActiveTab();
   if (!activeTab || !activeTab.webview) return;
 
-  // 1. Se abriu vídeo ou música a partir de uma busca, o Voltar retorna direto à aba da busca (ao tema pesquisado)
+  // 0. Se o player de vídeo estiver em tela cheia REAL (não apenas modo portal /musica, /filmes, /baixatube),
+  // o Voltar recolhe o vídeo primeiro. Em portais normais, volta imediatamente no 1º clique!
+  const isPortalFsOnly = document.body.classList.contains('portal-home') || document.documentElement.classList.contains('portal-home');
+  const isNativeFs = !!(document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement);
+  const isRealVideoFs = appVideoFullscreen || isNativeFs || (!isPortalFsOnly && (document.body.classList.contains('video-true-fs') || document.documentElement.classList.contains('video-true-fs')));
+  if (isRealVideoFs) {
+    appVideoFullscreen = false;
+    if (typeof fsHomeVideoWatch === 'function') fsHomeVideoWatch(false);
+    document.documentElement.classList.remove('video-true-fs', 'fullscreen-video-locked');
+    document.body.classList.remove('video-true-fs', 'fullscreen-video-locked');
+    try {
+      const exitFs = document.exitFullscreen || document.webkitExitFullscreen || document.msExitFullscreen;
+      if (exitFs && isNativeFs) {
+        exitFs.call(document);
+      }
+    } catch (e) {}
+    try {
+      if (typeof postYoutubeCommand === 'function') postYoutubeCommand('exit-fullscreen');
+      if (typeof activeTab.webview.executeJavaScript === 'function') {
+        activeTab.webview.executeJavaScript('(function(){ if (typeof window.exitVideoFullscreen === "function") window.exitVideoFullscreen(); if (typeof window.minimizeCinemaVideo === "function") window.minimizeCinemaVideo(); })()').catch(() => {});
+      }
+    } catch (e) {}
+    updateNavControls(activeTab.webview);
+    return;
+  }
+
+  // 1. Se abriu vídeo ou música a partir de uma busca/Home, o Voltar retorna direto à aba de origem
   if (activeTab.returnToTabId && tabs.some(t => t.id === activeTab.returnToTabId)) {
     const returnId = activeTab.returnToTabId;
     activeTab.returnToTabId = null;
+    const targetTab = tabs.find(t => t.id === returnId);
+    const targetIsHome = targetTab && (!targetTab.url || targetTab.url.includes('newtab.html') || targetTab.url === DEFAULT_URL || targetTab.url === '/');
+    if (targetIsHome) {
+      goHomeFromFullscreen();
+      return;
+    }
     activateTab(returnId);
     return;
   }
@@ -2596,14 +2951,25 @@ function handleGoBack() {
     return;
   }
 
+  // 2.5. Se a aba foi aberta a partir de outra aba (ex: link de resultado aberto em nova aba a partir de /search),
+  // retorna diretamente para a aba de origem sem duplicar a busca na aba atual!
+  if (activeTab.openerTabId) {
+    const openerTab = tabs.find(t => t.id === activeTab.openerTabId);
+    if (openerTab && !isHomeOrBaixaTubeTab(openerTab)) {
+      activateTab(openerTab.id);
+      return;
+    }
+  }
+
   // 3. Se a aba veio de uma busca anterior registrada e estamos em outro site ou link:
   // Volta ao tema pesquisado!
-  let savedSearchUrl = '';
-  try { savedSearchUrl = sessionStorage.getItem('papaleguas_last_search_url') || ''; } catch (e) {}
-  const targetSearchUrl = activeTab.lastSearchUrl || savedSearchUrl;
+  const targetSearchUrl = activeTab.lastSearchUrl || '';
   if (targetSearchUrl && !sameViewUrl(activeTab.url, targetSearchUrl)) {
     // NÃO anula activeTab.lastSearchUrl: mantém o tema pesquisado como âncora permanente
     activeTab.lastSearchUrl = targetSearchUrl;
+    if (typeof activeTab.webview.goToCachedUrl === 'function' && activeTab.webview.goToCachedUrl(targetSearchUrl)) {
+      return;
+    }
     if (typeof activeTab.webview.loadURL === 'function') {
       activeTab.webview.loadURL(targetSearchUrl);
     } else {
@@ -2638,7 +3004,9 @@ function handleGoBack() {
   }
 
   // 6. NUNCA volta para a Home se estivermos em uma pesquisa (/search) ou houver busca registrada!
-  if (!isSearchPage && !targetSearchUrl && !isHomeOrBaixaTubeTab(activeTab)) {
+  const curTabUrl = String(activeTab.url || '').toLowerCase();
+  const isPortalExitToHome = curTabUrl.includes('/filmes') || curTabUrl.includes('/musica') || curTabUrl.includes('musica.html') || curTabUrl.includes('/baixatube') || curTabUrl.includes('/youtube');
+  if (!isSearchPage && !targetSearchUrl && (isPortalExitToHome || !isHomeOrBaixaTubeTab(activeTab))) {
     goHomeFromFullscreen();
   }
 }
@@ -2728,11 +3096,18 @@ function finishTopProgressBar() {
 }
 
 let pageLoadingStartedAt = 0;
+let pageLoadingHideTimer = null;
 
 function showPageLoading(url, kind) {
+  if (pageLoadingHideTimer) {
+    clearTimeout(pageLoadingHideTimer);
+    pageLoadingHideTimer = null;
+  }
   pageLoadingStartedAt = Date.now();
   startTopProgressBar();
-  if (!shouldShowNavLoading(url) && kind !== 'search' && kind !== 'link') {
+  const isSearch = kind === 'search' || /\/search(?:\?|$)/i.test(String(url || '')) || /duckduckgo\.com\/\?q=/i.test(String(url || ''));
+  const isDirectPortal = isInternalPortalUrl(url) && !isSearch;
+  if (isDirectPortal || (!shouldShowNavLoading(url) && !isSearch && kind !== 'link')) {
     return;
   }
   const overlay = document.getElementById('page-tor-loading');
@@ -2744,8 +3119,7 @@ function showPageLoading(url, kind) {
   const hint = document.getElementById('page-tor-loading-hint');
   const torOrb = document.getElementById('page-tor-orb');
   const directOrb = document.getElementById('page-direct-orb');
-  const tor = isTorRoutingNow();
-  const isSearch = kind === 'search' || /\/search(?:\?|$)/i.test(String(url || '')) || /duckduckgo\.com\/\?q=/i.test(String(url || ''));
+  const tor = isTorRoutingNow() && !isDirectPortal;
   if (title) {
     title.textContent = tor
       ? (isSearch ? 'Pesquisando via Tor' : 'Abrindo via Tor')
@@ -2784,7 +3158,16 @@ function showPageLoading(url, kind) {
 }
 
 function hidePageLoading(force = false) {
-  if (!force && Date.now() - pageLoadingStartedAt < 700) {
+  if (pageLoadingHideTimer) {
+    clearTimeout(pageLoadingHideTimer);
+    pageLoadingHideTimer = null;
+  }
+  const elapsed = Date.now() - pageLoadingStartedAt;
+  if (!force && pageLoadingStartedAt > 0 && elapsed < 700) {
+    pageLoadingHideTimer = setTimeout(() => {
+      pageLoadingHideTimer = null;
+      hidePageLoading(true);
+    }, 700 - elapsed);
     return;
   }
   finishTopProgressBar();
@@ -2882,10 +3265,20 @@ function navigateToUrl(rawInput) {
   } else {
     // Se for no desktop Electron, pode usar o URL direto do DuckDuckGo.
     // Se for no celular / navegador web (iframe), usa a página de busca otimizada /search?q=
-    target = resolveAppNavUrl('/search?q=' + encodeURIComponent(target));
+    const modeSuffix = (typeof selectedSearchMode === 'string' && selectedSearchMode && selectedSearchMode !== 'all')
+      ? '&filter=' + encodeURIComponent(selectedSearchMode)
+      : '';
+    target = resolveAppNavUrl('/search?q=' + encodeURIComponent(target) + modeSuffix);
   }
 
   if (/^https?:\/\//i.test(target)) {
+    if (window.__pplWasmGuard && typeof window.__pplWasmGuard.score_client_nav === 'function') {
+      try {
+        const isHttps = /^https:\/\//i.test(target) ? 1 : 0;
+        const isOnion = /\.onion(?:\/|$|:)/i.test(target) ? 1 : 0;
+        window.__lastPplNavScore = Number(window.__pplWasmGuard.score_client_nav(isHttps, isOnion, 0n));
+      } catch (e) {}
+    }
     target = routeUrlInsideTorApp(target);
   }
 
@@ -2952,6 +3345,13 @@ document.addEventListener('click', (event) => {
   }
 }, true);
 
+if (window.torBrowserAPI && typeof window.torBrowserAPI.onTorRequiredForTab === 'function') {
+  window.torBrowserAPI.onTorRequiredForTab(() => {
+    if (typeof showToast === 'function') {
+      showToast('🔒 Nova aba bloqueada: conecte ao Tor primeiro para evitar vazamento de IP.', 'error');
+    }
+  });
+}
 if (window.torBrowserAPI && typeof window.torBrowserAPI.onOpenUrlInApp === 'function') {
   window.torBrowserAPI.onOpenUrlInApp((url) => {
     // window.open / target=_blank barrados pelo Electron voltam para uma aba do app ou tocam direto no BaixaTube.
@@ -2971,6 +3371,11 @@ window.addEventListener('message', (event) => {
   if (!data || typeof data !== 'object') return;
 
   const activeTab = getActiveTab();
+
+  if (data.type === 'papaleguas-go-back') {
+    handleGoBack();
+    return;
+  }
 
   if (data.type === 'media-video-detected' && data.video) {
     const videoData = data.video;
@@ -2995,6 +3400,11 @@ window.addEventListener('message', (event) => {
 
   if (data.type === 'open-spotify-player') {
     openPapaleguasMusic(data.query || '', true);
+    return;
+  }
+
+  if (data.type === 'go-back') {
+    if (typeof handleGoBack === 'function') handleGoBack();
     return;
   }
 
@@ -3025,6 +3435,8 @@ window.addEventListener('message', (event) => {
         exitFs.call(document);
       }
     } catch (e) { swallowed(e, 'renderer:top@2477'); }
+    const act = getActiveTab();
+    if (act && act.webview) updateNavControls(act.webview);
     return;
   }
 
@@ -3033,6 +3445,8 @@ window.addEventListener('message', (event) => {
     fsHomeVideoWatch(true);
     document.documentElement.classList.add('video-true-fs');
     document.body.classList.add('video-true-fs');
+    const act = getActiveTab();
+    if (act && act.webview) updateNavControls(act.webview);
     return;
   }
 
@@ -3112,6 +3526,15 @@ window.addEventListener('message', (event) => {
         createTab('/baixatube?v=' + encodeURIComponent(ytVid));
         return;
       }
+      if (/(?:^|\/)filmes?(?:[/?#]|$)/i.test(String(url))) {
+        let fq = '';
+        try {
+          const u = new URL(url, window.location.origin || 'http://localhost:8080');
+          fq = u.searchParams.get('q') || '';
+        } catch (e) {}
+        openFilmesOnline(fq);
+        return;
+      }
       if (/(?:\/musica|musica\.html|spotify\.com|deezer\.com)/i.test(String(url))) {
         let query = '';
         try {
@@ -3149,6 +3572,32 @@ window.addEventListener('message', (event) => {
       const ytVid = extractYoutubeVideoId(url);
       if (ytVid) {
         createTab('/baixatube?v=' + encodeURIComponent(ytVid));
+        return;
+      }
+      const isInternalTarget = String(url).startsWith('/') && !/^\/proxy(?:\?|$)/i.test(String(url));
+      const isLocalTarget = /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(?:\/|$)/i.test(String(url));
+      if (!isInternalTarget && !isLocalTarget && window.torBrowserAPI && typeof window.torBrowserAPI.getTorStatus === 'function') {
+        window.torBrowserAPI.getTorStatus().then(async (st) => {
+          if (!st || !st.connected) {
+            if (typeof window.torBrowserAPI.toggleTor === 'function') {
+              try { st = await window.torBrowserAPI.toggleTor(true); } catch (e) {}
+            }
+          }
+          const routedUrl = routeUrlInsideTorApp(url);
+          if (routedUrl && !isAppShellUrl(routedUrl)) {
+            if (typeof showPageLoading === 'function') showPageLoading(routedUrl, 'link');
+            createTab(routedUrl);
+          }
+        }).catch(() => {});
+        return;
+      }
+      if (/(?:^|\/)filmes?(?:[/?#]|$)/i.test(String(url))) {
+        let fq = '';
+        try {
+          const u = new URL(url, window.location.origin || 'http://localhost:8080');
+          fq = u.searchParams.get('q') || '';
+        } catch (e) {}
+        openFilmesOnline(fq);
         return;
       }
       if (/(?:\/musica|musica\.html|spotify\.com|deezer\.com)/i.test(String(url))) {
@@ -3191,7 +3640,25 @@ window.addEventListener('message', (event) => {
       }
     }
   } else if (data.type === 'navigate-sync') {
-    if (activeTab && data.url) {
+    let targetTab = activeTab;
+    try {
+      if (event && event.source && Array.isArray(tabs)) {
+        const matchedTab = tabs.find(t => {
+          if (!t || !t.webview) return false;
+          if (t.webview.contentWindow === event.source) return true;
+          try {
+            const iframes = t.webview.querySelectorAll ? t.webview.querySelectorAll('iframe') : [];
+            for (const f of iframes) {
+              if (f.contentWindow === event.source) return true;
+            }
+          } catch (e) {}
+          return false;
+        });
+        if (matchedTab) targetTab = matchedTab;
+      }
+    } catch (e) { swallowed(e, 'renderer:navigate-sync-source'); }
+
+    if (targetTab && data.url) {
       // Se a URL veio de um proxy (/proxy?url=...), restaura a URL original para exibir limpamente na barra
       let displayUrl = data.targetUrl || data.url;
       try {
@@ -3201,20 +3668,23 @@ window.addEventListener('message', (event) => {
         }
       } catch(e){ swallowed(e, 'renderer:top@2649'); }
 
-      activeTab.url = displayUrl;
-      if (activeTab && (/\/search(?:\?|$)/i.test(displayUrl || '') || /duckduckgo\.com/i.test(displayUrl || ''))) {
-        activeTab.lastSearchUrl = displayUrl;
+      targetTab.url = displayUrl;
+      if (/\/search(?:\?|$)/i.test(displayUrl || '') || /duckduckgo\.com/i.test(displayUrl || '')) {
+        targetTab.lastSearchUrl = displayUrl;
       }
-      const isInternal = isInternalPortalUrl(displayUrl);
-      setAddressBar(isInternal ? '' : displayUrl);
-      if (data.title && activeTab.header) {
-        activeTab.title = data.title;
-        const titleEl = activeTab.header.querySelector('.tab-title');
+      if (data.title && targetTab.header) {
+        targetTab.title = data.title;
+        const titleEl = targetTab.header.querySelector('.tab-title');
         if (titleEl) titleEl.textContent = data.title;
       }
       if (typeof renderOpenTabsMenu === 'function') renderOpenTabsMenu();
-      if (data.isFinal && typeof hidePageLoading === 'function') {
-        hidePageLoading();
+
+      if (targetTab.id === activeTabId) {
+        const isInternal = isInternalPortalUrl(displayUrl);
+        setAddressBar(isInternal ? '' : displayUrl);
+        if (data.isFinal && typeof hidePageLoading === 'function') {
+          hidePageLoading();
+        }
       }
 
       // Se navegou para um vídeo do YouTube e a TV estiver conectada, sincroniza com a TV automaticamente!
@@ -3302,7 +3772,28 @@ const searchFsRecent = document.getElementById('search-fs-recent');
 const searchFsClear = document.getElementById('search-fs-clear');
 const searchFsNet = document.getElementById('search-fs-net');
 const searchFsBody = document.getElementById('search-fs-body');
+const searchFsModes = document.getElementById('search-fs-modes');
 let searchFsOpen = false;
+let selectedSearchMode = 'all';
+
+if (searchFsModes) {
+  searchFsModes.addEventListener('click', (e) => {
+    const pill = e.target.closest('.search-fs-mode-pill');
+    if (!pill) return;
+    selectedSearchMode = pill.getAttribute('data-mode') || 'all';
+    searchFsModes.querySelectorAll('.search-fs-mode-pill').forEach((p) => {
+      p.classList.toggle('is-active', p === pill);
+    });
+    const typed = String(searchFsInput ? searchFsInput.value : '').trim();
+    if (typed) {
+      rememberRecentSearch(typed);
+      closeSearchFullscreen(true);
+      navigateToUrl(typed);
+      return;
+    }
+    if (searchFsInput) searchFsInput.focus();
+  });
+}
 
 // Enquanto a tela cheia está aberta, é o campo dela que comanda as sugestões
 function activeSuggestInput() {
@@ -3353,7 +3844,11 @@ function applySuggestion(item) {
     navigateToUrl(item.url);
     return;
   }
-  navigateToUrl(item.url || item.title);
+  let destUrl = item.url || item.title;
+  if (item.kind === 'search' && typeof selectedSearchMode === 'string' && selectedSearchMode !== 'all' && destUrl && destUrl.includes('/search?') && !destUrl.includes('filter=')) {
+    destUrl += '&filter=' + encodeURIComponent(selectedSearchMode);
+  }
+  navigateToUrl(destUrl);
 }
 
 // ===== Prévia dos resultados (imagem de capa + descrição da página) =====
@@ -3859,25 +4354,13 @@ async function fetchUrlSuggestions(reset) {
 
 function scheduleUrlSuggestions() {
   if (urlSuggestState.timer) clearTimeout(urlSuggestState.timer);
-  const input = activeSuggestInput();
-  const q = String(input && input.value || '').trim();
-  if (q.length < 2) {
-    hideUrlSuggestions();
-    if (searchFsOpen) {
-      urlSuggestState.items = [];
-      urlSuggestState.q = '';
-      renderFullscreenSuggestions();
-    }
-    return;
+  if (urlSuggestAbortCtrl) {
+    try { urlSuggestAbortCtrl.abort(); } catch (e) {}
+    urlSuggestAbortCtrl = null;
   }
-  // Exibe imediatamente (0ms) a sugestão "Papaléguas AI" e favoritos locais antes da consulta remota
-  if (urlSuggestState.q !== q || !urlSuggestState.items.length) {
-    urlSuggestState.q = q;
-    urlSuggestState.items = localUrlSuggestions(q);
-    urlSuggestState.active = -1;
-    renderUrlSuggestions();
-  }
-  urlSuggestState.timer = setTimeout(() => fetchUrlSuggestions(true), 160);
+  urlSuggestState.items = [];
+  urlSuggestState.active = -1;
+  hideUrlSuggestions();
 }
 
 urlInput.addEventListener('keydown', (e) => {
@@ -4353,7 +4836,8 @@ if (floatingNavPill) {
   // Arrastável: o usuário pode reposicionar o botão caso queira liberar espaço visual
   if (window.PapaleguasFab && typeof window.PapaleguasFab.makeDraggable === 'function') {
     window.PapaleguasFab.makeDraggable(floatingNavPill, {
-      storageKey: 'papaleguas_fab_pos_nav_pill'
+      storageKey: 'papaleguas_fab_pos_nav_pill',
+      dragThreshold: 14
     });
   }
 }
@@ -4913,6 +5397,8 @@ function hideTabsMenu() {
 }
 
 function renderOpenTabsMenu() {
+  const countBadge = document.getElementById('tabs-count-badge');
+  if (countBadge) countBadge.textContent = String((tabs && tabs.length) || 1);
   if (!tabsMenuList) return;
   tabsMenuList.innerHTML = '';
   if (!tabs.length) {
@@ -5493,14 +5979,14 @@ function ytNotifyStreamUrl(id) {
   const origin = window.location.origin && window.location.origin !== 'null'
     ? window.location.origin
     : 'http://localhost:8080';
-  return origin + '/api/stream-audio?v=' + encodeURIComponent(id);
+  return window.encryptPplSearchUrl(origin + '/api/stream-audio?v=' + encodeURIComponent(id));
 }
 
 function ytVideoStreamUrl(id) {
   const origin = window.location.origin && window.location.origin !== 'null'
     ? window.location.origin
     : 'http://localhost:8080';
-  return origin + '/api/stream-video?v=' + encodeURIComponent(id);
+  return window.encryptPplSearchUrl(origin + '/api/stream-video?v=' + encodeURIComponent(id));
 }
 
 function ytThumbProxyUrl(id) {
@@ -7116,14 +7602,12 @@ window.addEventListener('popstate', (e) => {
       enforceCleanPortalUrl();
       return;
     }
-    let savedSearchUrl = '';
-    try { savedSearchUrl = sessionStorage.getItem('papaleguas_last_search_url') || ''; } catch (err) {}
-    if (activeTab && savedSearchUrl && !sameViewUrl(activeTab.url, savedSearchUrl)) {
-      if (activeTab.webview && typeof activeTab.webview.loadURL === 'function') {
-        activeTab.webview.loadURL(savedSearchUrl);
-      }
-      return;
-    }
+    try {
+      sessionStorage.removeItem('papaleguas_last_search_url');
+      localStorage.removeItem('papaleguas_last_search_url');
+      localStorage.removeItem('papaleguas_search_history');
+      localStorage.removeItem('papaleguas_saved_tabs');
+    } catch (err) {}
     const p = (window.location && window.location.pathname) || '/';
     if (p === '/baixatube' || p === '/youtube') {
       openYoutube('');
@@ -7480,7 +7964,7 @@ async function openPagePlayer(data) {
             frame.hidden = true;
             frame.src = 'about:blank';
             video.hidden = false;
-            video.src = publicAppOrigin() + '/api/stream-video?v=' + encodeURIComponent(activeDetectedVideo.youtubeId);
+            video.src = window.encryptPplSearchUrl(publicAppOrigin() + '/api/stream-video?v=' + encodeURIComponent(activeDetectedVideo.youtubeId));
             video.play().catch(() => {});
           }
         } catch (e) { swallowed(e, 'renderer:openPagePlayer@6408'); }
@@ -8289,3 +8773,278 @@ setTimeout(() => {
     fetch(baseUrl + '/api/playlists?q=top%20playlists%20brasil', { method: 'GET', credentials: 'same-origin' }).catch(() => {});
   } catch (e) { swallowed(e, 'renderer:top@7192'); }
 }, 2000);
+
+// ====================================================
+// SUPER NAVEGADOR: MODO LEITURA, COMMAND PALETTE (CTRL+K) E SUSPENSÃO DE ABAS
+// ====================================================
+(function initSuperBrowserEnhancements() {
+  let readerFontPx = 16;
+
+  function resolveRealTabUrl(rawUrl) {
+    const s = String(rawUrl || '').trim();
+    if (!s) return '';
+    try {
+      const u = new URL(s, window.location.origin);
+      if (u.pathname === '/proxy' && u.searchParams.get('url')) {
+        return u.searchParams.get('url');
+      }
+      if (/^https?:\/\//i.test(s) && !isLocalAppHost(u.hostname)) {
+        return u.href;
+      }
+    } catch (e) {}
+    return '';
+  }
+
+  function escapeSafeHtml(str) {
+    return String(str || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  async function openReaderModeForActiveTab() {
+    const modal = document.getElementById('reader-mode-modal');
+    const bodyEl = document.getElementById('reader-modal-body');
+    const titleEl = document.getElementById('reader-modal-title');
+    if (!modal || !bodyEl) return;
+
+    const activeTab = typeof getActiveTab === 'function' ? getActiveTab() : null;
+    const rawCandidate = (activeTab && activeTab.url) || (urlInput && urlInput.value) || '';
+    const targetUrl = resolveRealTabUrl(rawCandidate);
+
+    modal.classList.remove('hidden');
+    if (!targetUrl) {
+      if (titleEl) titleEl.textContent = 'Modo Leitura Limpo';
+      bodyEl.innerHTML = '<div style="padding:18px;color:#94a3b8;text-align:center;">Abra qualquer site ou notícia para ativar o <b>Modo Leitura Limpo</b> (sem anúncios, banners de cookies ou distrações). Na página de buscas você também pode clicar em <b>📖 Modo Leitura Limpo</b> em qualquer resultado.</div>';
+      return;
+    }
+
+    if (titleEl) titleEl.textContent = targetUrl;
+    bodyEl.innerHTML = '<div style="padding:24px;color:#94a3b8;text-align:center;">⏳ Extraindo artigo limpo sem anúncios e sem rastreadores...</div>';
+
+    try {
+      const isElectron = !!(window.torBrowserAPI && window.torBrowserAPI.isElectron);
+      const baseUrl = isElectron ? 'http://localhost:8080' : '';
+      const res = await fetch(`${baseUrl}/api/reader?url=${encodeURIComponent(targetUrl)}`);
+      const data = await res.json();
+      if (!data || !data.success || !Array.isArray(data.paragraphs) || !data.paragraphs.length) {
+        bodyEl.innerHTML = '<div style="padding:18px;color:#94a3b8;">Não foi possível extrair texto corrido desta página.</div>';
+        return;
+      }
+      if (titleEl && data.title) titleEl.textContent = data.title;
+      let html = `<article style="max-width:680px;margin:0 auto;">
+        <div style="font-size:11.5px;color:#38bdf8;font-weight:700;text-transform:uppercase;margin-bottom:6px;">${escapeSafeHtml(data.siteName || '')} • Modo Leitura Papaléguas</div>
+        <h1 style="font-size:1.4em;color:#fff;margin:0 0 16px;line-height:1.3;">${escapeSafeHtml(data.title || '')}</h1>`;
+      data.paragraphs.forEach((b) => {
+        const txt = escapeSafeHtml(b.text || '');
+        if (b.tag === 'h2' || b.tag === 'h3') {
+          html += `<h2 style="font-size:1.15em;color:#f8fafc;margin:16px 0 8px;">${txt}</h2>`;
+        } else if (b.tag === 'blockquote') {
+          html += `<blockquote style="border-left:3px solid #38bdf8;padding-left:12px;color:#cbd5e1;margin:12px 0;">${txt}</blockquote>`;
+        } else {
+          html += `<p style="margin:0 0 14px;color:#e2e8f0;">${txt}</p>`;
+        }
+      });
+      html += '</article>';
+      bodyEl.innerHTML = html;
+    } catch (e) {
+      bodyEl.innerHTML = '<div style="padding:18px;color:#94a3b8;">Falha ao carregar Modo Leitura.</div>';
+    }
+  }
+
+  const btnReader = document.getElementById('btn-reader-mode');
+  const closeReaderBtn = document.getElementById('close-reader-modal-btn');
+  const readerModal = document.getElementById('reader-mode-modal');
+  const readerDec = document.getElementById('reader-font-dec');
+  const readerInc = document.getElementById('reader-font-inc');
+
+  if (btnReader) btnReader.addEventListener('click', openReaderModeForActiveTab);
+  if (closeReaderBtn && readerModal) {
+    closeReaderBtn.addEventListener('click', () => readerModal.classList.add('hidden'));
+  }
+  if (readerDec) {
+    readerDec.addEventListener('click', () => {
+      readerFontPx = Math.max(13, readerFontPx - 2);
+      const b = document.getElementById('reader-modal-body');
+      if (b) b.style.fontSize = `${readerFontPx}px`;
+    });
+  }
+  if (readerInc) {
+    readerInc.addEventListener('click', () => {
+      readerFontPx = Math.min(26, readerFontPx + 2);
+      const b = document.getElementById('reader-modal-body');
+      if (b) b.style.fontSize = `${readerFontPx}px`;
+    });
+  }
+
+  // Suspensão inteligente de abas em segundo plano para economizar RAM
+  function suspendInactiveTabs() {
+    let suspendedCount = 0;
+    (tabs || []).forEach((tab) => {
+      if (!tab || tab.id === activeTabId || tab.suspended) return;
+      const u = String(tab.url || '').toLowerCase();
+      // Nunca suspende abas de música, vídeo ou página inicial
+      if (u.includes('/musica') || u.includes('/baixatube') || u.includes('newtab.html') || u.includes('/filmes')) return;
+      if (tab.webview && tab.url && tab.url !== 'about:blank') {
+        tab.suspendedUrl = tab.url;
+        tab.suspended = true;
+        try { tab.webview.src = 'about:blank'; } catch (e) {}
+        suspendedCount += 1;
+      }
+    });
+    return suspendedCount;
+  }
+
+  // Restaura aba suspensa automaticamente quando o usuário clica nela
+  document.addEventListener('click', () => {
+    const active = typeof getActiveTab === 'function' ? getActiveTab() : null;
+    if (active && active.suspended && active.suspendedUrl && active.webview) {
+      const restoreUrl = active.suspendedUrl;
+      active.suspended = false;
+      active.suspendedUrl = '';
+      try { active.webview.src = restoreUrl; } catch (e) {}
+    }
+  });
+
+  // Command Palette (Ctrl+K)
+  const cmdModal = document.getElementById('command-palette-modal');
+  const cmdInput = document.getElementById('cmd-palette-input');
+  const cmdList = document.getElementById('cmd-palette-list');
+  const closeCmdBtn = document.getElementById('close-cmd-palette-btn');
+  const openCmdBtn = document.getElementById('btn-open-cmd-palette');
+
+  function closeCommandPalette() {
+    if (cmdModal) cmdModal.classList.add('hidden');
+  }
+
+  function renderCommandPaletteItems(filterText) {
+    if (!cmdList) return;
+    const q = String(filterText || '').trim().toLowerCase();
+    const items = [];
+
+    (tabs || []).forEach((t) => {
+      items.push({
+        icon: t.id === activeTabId ? '🟢' : '🗂️',
+        title: `Aba: ${tabDisplayTitle(t)}`,
+        sub: prettyAddressBarUrl(t.url) || 'Página aberta',
+        run: () => { activateTab(t.id); }
+      });
+    });
+
+    items.push(
+      { icon: '📖', title: 'Ativar Modo Leitura Limpo na aba atual', sub: 'Sem anúncios, pop-ups ou banners', run: () => openReaderModeForActiveTab() },
+      { icon: '📹', title: 'Buscar Câmeras IP Públicas Conectadas', sub: 'Filtro direto de câmeras ao vivo', run: () => navigateToUrl('/search?q=brasil&filter=ipcam') },
+      { icon: '📄', title: 'Buscar Documentos e Livros em PDF', sub: 'Filtro direto de arquivos PDF', run: () => navigateToUrl('/search?q=livros&filter=pdf') },
+      { icon: '⚡', title: 'Suspender abas inativas (Economizar RAM)', sub: 'Congela abas em segundo plano sem fechar', run: () => { suspendInactiveTabs(); } },
+      { icon: '➕', title: 'Abrir Nova Aba Privada', sub: 'Atalho rápido', run: () => createTab() },
+      { icon: '🎵', title: 'Abrir Papaléguas Músicas', sub: 'Streaming de áudio sem anúncios', run: () => { if (btnSpotify) btnSpotify.click(); } },
+      { icon: '🎬', title: 'Abrir Filmes Online', sub: 'Catálogo de filmes e canais', run: () => { if (btnMovies) btnMovies.click(); } },
+      { icon: '▶', title: 'Abrir BaixaTube', sub: 'Vídeos e downloads MP4/MP3', run: () => { if (btnYoutube) btnYoutube.click(); } }
+    );
+
+    const filtered = q
+      ? items.filter((it) => (`${it.title} ${it.sub}`).toLowerCase().includes(q))
+      : items;
+
+    cmdList.innerHTML = '';
+    filtered.slice(0, 14).forEach((it) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;padding:9px 12px;border-radius:10px;border:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.04);color:#f8fafc;text-align:left;cursor:pointer;transition:background 0.15s;';
+      btn.innerHTML = `<span style="display:flex;align-items:center;gap:9px;min-width:0;">
+        <span style="font-size:16px;">${it.icon}</span>
+        <span style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeSafeHtml(it.title)}</span>
+      </span>
+      <small style="font-size:11px;color:#94a3b8;flex-shrink:0;">${escapeSafeHtml(it.sub)}</small>`;
+      btn.addEventListener('click', () => {
+        closeCommandPalette();
+        hideTabsMenu();
+        it.run();
+      });
+      cmdList.appendChild(btn);
+    });
+  }
+
+  function openCommandPalette() {
+    if (!cmdModal) return;
+    cmdModal.classList.remove('hidden');
+    if (cmdInput) {
+      cmdInput.value = '';
+      setTimeout(() => cmdInput.focus(), 40);
+    }
+    renderCommandPaletteItems('');
+  }
+
+  if (openCmdBtn) openCmdBtn.addEventListener('click', () => { hideTabsMenu(); openCommandPalette(); });
+  if (closeCmdBtn) closeCmdBtn.addEventListener('click', closeCommandPalette);
+  if (cmdInput) cmdInput.addEventListener('input', () => renderCommandPaletteItems(cmdInput.value));
+
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && String(e.key || '').toLowerCase() === 'k') {
+      e.preventDefault();
+      if (cmdModal && !cmdModal.classList.contains('hidden')) {
+        closeCommandPalette();
+      } else {
+        openCommandPalette();
+      }
+    } else if (e.key === 'Escape') {
+      closeCommandPalette();
+      if (readerModal) readerModal.classList.add('hidden');
+    }
+  });
+})();
+
+// Carrega módulo Papaléguas WebAssembly (.ppl.wasm) nativo no navegador
+(function initPapaleguasWasmClient() {
+  if (typeof WebAssembly === 'undefined' || typeof fetch !== 'function') return;
+  const wasmUrl = '/api/ppl-wasm?module=client_guard';
+  const loadPromise = typeof WebAssembly.instantiateStreaming === 'function'
+    ? WebAssembly.instantiateStreaming(fetch(wasmUrl)).catch(() =>
+        fetch(wasmUrl).then((r) => (r.ok ? r.arrayBuffer() : null)).then((b) => (b ? WebAssembly.instantiate(b) : null))
+      )
+    : fetch(wasmUrl).then((r) => (r.ok ? r.arrayBuffer() : null)).then((b) => (b ? WebAssembly.instantiate(b) : null));
+  Promise.resolve(loadPromise).then((res) => {
+    if (res && res.instance && res.instance.exports) {
+      window.__pplWasmGuard = res.instance.exports;
+      window.sanitizePplZoom = (pct) => {
+        try {
+          return Number(window.__pplWasmGuard.sanitize_zoom_pct(BigInt(Math.round(Number(pct) || 100))));
+        } catch (e) {
+          return Math.max(50, Math.min(250, Math.round(Number(pct) || 100)));
+        }
+      };
+    }
+  }).catch(() => {});
+})();
+
+// Zero rastros ao fechar o navegador / aplicativo: apaga buscas, histórico e caches de sessão
+(function bindZeroTraceOnClose() {
+  const WIPE_KEYS = [
+    'papaleguas_active_theme',
+    'papaleguas_yt_prefs_v1',
+    'papaleguas_fast_feed_cache_v1',
+    'papaleguas_recent_searches',
+    'papaleguas_search_history',
+    'papaleguas_bt_recent_ids',
+    'papaleguas_bt_refresh_seq',
+    'papaleguas_last_url',
+    'papaleguas_tabs_backup'
+  ];
+  function purgeClientTraces(clearSession) {
+    try {
+      WIPE_KEYS.forEach((k) => {
+        try { localStorage.removeItem(k); } catch (e) {}
+      });
+      if (clearSession) {
+        try { sessionStorage.clear(); } catch (e) {}
+        try { if (typeof urlInput !== 'undefined' && urlInput) urlInput.value = ''; } catch (e) {}
+      }
+      try { document.cookie = 'papaleguas_device_id=; path=/; max-age=0; SameSite=Lax'; } catch (e) {}
+      try { if (window.indexedDB) window.indexedDB.deleteDatabase('papaleguas_yt_prefs_db'); } catch (e) {}
+    } catch (e) {}
+  }
+  purgeClientTraces(false);
+  window.addEventListener('beforeunload', () => purgeClientTraces(true));
+  window.addEventListener('pagehide', () => purgeClientTraces(true));
+})();

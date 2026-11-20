@@ -1,0 +1,77 @@
+@policy(max_loops=100, no_network=true, zero_traces=true)
+
+// Módulo nativo PPL: privacidade, pré-triagem de logs sensíveis, LAN/IP privado e códigos de país
+
+export fn is_private_or_lan_ip(raw_addr: str) -> bool {
+  let addr: str = str.trim(raw_addr);
+  if str.is_empty(addr) {
+    return false;
+  }
+  if str.equals_ci(addr, "127.0.0.1") or str.equals_ci(addr, "::1") or str.equals_ci(addr, "localhost") {
+    return true;
+  }
+  if str.starts_with_ci(addr, "::ffff:127.") or str.starts_with(addr, "127.") {
+    return true;
+  }
+  if str.starts_with(addr, "192.168.") or str.starts_with_ci(addr, "::ffff:192.168.") {
+    return true;
+  }
+  if str.starts_with(addr, "10.") or str.starts_with_ci(addr, "::ffff:10.") {
+    return true;
+  }
+  if str.starts_with(addr, "172.16.") or str.starts_with_ci(addr, "::ffff:172.16.") {
+    return true;
+  }
+  return false;
+}
+
+export fn has_sensitive_log_pattern(line: str) -> bool {
+  if str.len(line) < 4 {
+    return false;
+  }
+  if str.contains_ci(line, "http://") or str.contains_ci(line, "https://") or str.contains_ci(line, "file://") {
+    return true;
+  }
+  if str.contains_ci(line, "ws://") or str.contains_ci(line, "wss://") or str.contains_ci(line, "socks") {
+    return true;
+  }
+  if str.contains_ci(line, ".onion") or str.contains_ci(line, "bearer ") or str.contains_ci(line, "basic ") {
+    return true;
+  }
+  if str.contains_ci(line, "authorization") or str.contains_ci(line, "cookie") or str.contains_ci(line, "password") {
+    return true;
+  }
+  if str.contains_ci(line, "passwd") or str.contains_ci(line, "secret") or str.contains_ci(line, "token") {
+    return true;
+  }
+  if str.contains_ci(line, "api_key") or str.contains_ci(line, "apikey") or str.contains_ci(line, "cli_") {
+    return true;
+  }
+  if str.contains(line, "sk-") or str.contains(line, "pk-") or str.contains(line, "rk-") or str.contains(line, "@") {
+    return true;
+  }
+  return false;
+}
+
+export fn is_valid_country_code(code: str) -> bool {
+  let c: str = str.trim(code);
+  if str.len(c) != 2 {
+    return false;
+  }
+  if str.equals_ci(c, "AU") or str.equals_ci(c, "BR") or str.equals_ci(c, "US") or str.equals_ci(c, "PT") {
+    return true;
+  }
+  return str.is_ascii_alnum(c);
+}
+
+export fn normalize_country_code(code: str, fallback: str) -> str {
+  let c: str = str.to_upper(str.trim(code));
+  if str.len(c) == 2 and not str.eq(c, "XX") and str.is_ascii_alnum(c) {
+    return c;
+  }
+  let fb: str = str.to_upper(str.trim(fallback));
+  if str.len(fb) == 2 and str.is_ascii_alnum(fb) {
+    return fb;
+  }
+  return "BR";
+}

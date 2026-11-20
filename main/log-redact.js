@@ -1,7 +1,18 @@
 'use strict';
 
+let privacyShieldPpl = null;
+try {
+  const pplRuntime = require('../papaleguas-lang/runtime');
+  privacyShieldPpl = pplRuntime.loadNativeModule('privacy_shield');
+} catch (e) {}
+
 function redactSensitive(value) {
   const text = Buffer.isBuffer(value) ? value.toString('utf8') : String(value == null ? '' : value);
+  if (privacyShieldPpl && typeof privacyShieldPpl.has_sensitive_log_pattern === 'function') {
+    try {
+      if (!privacyShieldPpl.has_sensitive_log_pattern(text)) return text;
+    } catch (e) {}
+  }
   return text
     .replace(/(?:https?|file|wss?|socks5?):\/\/[^\s'")\]}>]+/gi, '[url]')
     .replace(/\b[a-z2-7]{16,63}\.onion(?:\/[^\s'")\]}>]*)?/gi, '[onion]')

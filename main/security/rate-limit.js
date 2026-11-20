@@ -2,8 +2,9 @@
 // =========================================================================
 // PAPALÉGUAS - LIMITADORES DE REQUISIÇÕES (janela deslizante + concorrência)
 // =========================================================================
-// Implementação em JS puro, sem dependências. Funciona mesmo quando o módulo
-// nativo em Rust não carrega.
+// Implementação em JS puro com aceleração PPL nativa (.ppl.node) quando disponível.
+let pplRuntime = null;
+try { pplRuntime = require('../../papaleguas-lang/runtime'); } catch (e) {}
 
 class RateLimiter {
   /**
@@ -35,10 +36,15 @@ class RateLimiter {
       e.curCount = 0;
       e.curStart += windowsPassed * this.windowMs;
     }
-    const weight = 1 - (now - e.curStart) / this.windowMs;
+    const curElapsed = Math.max(0, now - e.curStart);
+    const weight = 1 - curElapsed / this.windowMs;
     const estimated = e.prevCount * weight + e.curCount;
-    if (estimated >= this.max) {
-      const retryAfterSec = Math.max(1, Math.ceil((this.windowMs - (now - e.curStart)) / 1000));
+    const shieldMod = pplRuntime ? pplRuntime.loadNativeModule('shield_guard') : null;
+    const allowedByPpl = (shieldMod && typeof shieldMod.rate_allow === 'function')
+      ? Boolean(shieldMod.rate_allow(e.prevCount, e.curCount, curElapsed, this.windowMs, this.max))
+      : (estimated < this.max);
+    if (!allowedByPpl) {
+      const retryAfterSec = Math.max(1, Math.ceil((this.windowMs - curElapsed) / 1000));
       return { allowed: false, remaining: 0, retryAfterSec };
     }
     e.curCount++;

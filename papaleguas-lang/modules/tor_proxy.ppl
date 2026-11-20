@@ -1,0 +1,65 @@
+@policy(allow_network=true, zero_traces=true)
+
+// Cliente nativo Tor SOCKS5h + TLS (OpenSSL) em Papaléguas (.ppl)
+
+export fn tor_get(target_host: str, target_port: u64, req_path: str, use_tls: bool) -> str {
+  return net.tor_fetch("127.0.0.1", 9050, target_host, target_port, req_path, use_tls);
+}
+
+@policy(allow_network=true, zero_traces=true)
+export fn socks5_get(proxy_host: str, proxy_port: u64, target_host: str, target_port: u64, req_path: str, use_tls: bool) -> str {
+  return net.tor_fetch(proxy_host, proxy_port, target_host, target_port, req_path, use_tls);
+}
+
+@policy(allow_network=true, zero_traces=true)
+export fn tor_alive() -> bool {
+  return net.tor_alive("127.0.0.1", 9050);
+}
+
+@policy(allow_network=true, zero_traces=true)
+export fn score_tor_circuit(latency_ms: u64, status_code: u64, fail_count: u64) -> u64 {
+  if fail_count >= 3 {
+    return 0;
+  }
+  let score: u64 = 100;
+  match status_code {
+    403 | 429 | 502 | 503 | 504 => {
+      if score >= 60 {
+        score -= 60;
+      } else {
+        score = 0;
+      }
+    }
+    _ => {}
+  }
+  let fail_pen: u64 = fail_count * 25;
+  if score > fail_pen {
+    score -= fail_pen;
+  } else {
+    score = 0;
+  }
+  let lat_pen: u64 = latency_ms / 400;
+  if score > lat_pen {
+    score -= lat_pen;
+  } else {
+    score = 0;
+  }
+  return score;
+}
+
+@policy(allow_network=true, zero_traces=true)
+export fn optimal_proxy_timeout_ms(is_onion: bool, retry_step: u64) -> u64 {
+  if is_onion {
+    if retry_step == 0 {
+      return 28000;
+    }
+    return 42000;
+  }
+  if retry_step == 0 {
+    return 16000;
+  }
+  if retry_step == 1 {
+    return 24000;
+  }
+  return 32000;
+}

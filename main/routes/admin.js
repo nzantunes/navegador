@@ -64,7 +64,9 @@ async function handle(req, res, ctx) {
       sendForbiddenAdminResponse(res, true);
       return true;
     }
-    const isPublicAdminRoute = pathname === '/api/papaleguas/status' || pathname === '/api/papaleguas/login' || pathname === '/api/papaleguas/setup';
+    const clientIpCheck = papaleguasTracker.extractClientIp(req);
+    const isLocalHostOrLan = papaleguasTracker.isPrivateIp(clientIpCheck);
+    const isPublicAdminRoute = pathname === '/api/papaleguas/status' || pathname === '/api/papaleguas/login' || pathname === '/api/papaleguas/setup' || (isLocalHostOrLan && (pathname === '/api/papaleguas/app-downloads-stats' || pathname === '/api/papaleguas/app-downloads-clear'));
     if (!isPublicAdminRoute && !papaleguasTracker.validateSession(req)) {
       res.writeHead(401, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: false, error: 'Acesso restrito. Faça login como administrador para continuar.' }));
@@ -90,10 +92,12 @@ async function handle(req, res, ctx) {
       } catch (e) { swallowed(e, 'admin:status@89'); }
     }
     const activePublicUrl = 'https://papaleguas.app';
+    const reqServerHost = (req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim() || `${getLocalNetworkIp()}:${PORT}`;
     res.end(JSON.stringify({
       hasAdmin,
       authenticated,
       username: authenticated ? 'Administrador' : null,
+      serverName: reqServerHost,
       isTrackingEnabled: papaleguasTracker.isTrackingEnabled(),
       serverLogsPaused: isServerConsoleLogsPaused(),
       tunnelUrl: activePublicUrl,
@@ -158,12 +162,14 @@ async function handle(req, res, ctx) {
 
   if (pathname === '/api/papaleguas/metrics') {
     const metrics = papaleguasTracker.calculateAcceptanceAndEvolutionMetrics();
+    const reqServerHost = (req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim() || `${getLocalNetworkIp()}:${PORT}`;
     res.writeHead(200, {
       'Content-Type': 'application/json',
       'Cache-Control': 'no-cache, no-store, must-revalidate'
     });
     res.end(JSON.stringify({
       success: true,
+      serverName: reqServerHost,
       tunnelUrl: 'https://papaleguas.app',
       cloudflareTunnelUrl: 'https://papaleguas.app',
       ngrokTunnelUrl: null,
@@ -192,8 +198,46 @@ async function handle(req, res, ctx) {
       const clientIp = papaleguasTracker.extractClientIp(req);
       const actionType = (body && body.type) || 'app_download';
       papaleguasTracker.logConversion(clientIp, actionType, body || {});
+      try {
+        const downloadsDb = require('../downloads-db');
+        downloadsDb.recordDownload({
+          os: (body && (body.os || body.platform)) || '',
+          source: actionType,
+          ip: clientIp,
+          userAgent: (body && body.userAgent) || req.headers['user-agent'] || ''
+        });
+      } catch (e) {}
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, clientIp, actionType }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: err.message }));
+    }
+    return true;
+  }
+
+  if (pathname === '/api/papaleguas/app-downloads-stats') {
+    try {
+      const downloadsDb = require('../downloads-db');
+      const stats = downloadsDb.getStats(60);
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-cache, no-store, must-revalidate'
+      });
+      res.end(JSON.stringify({ success: true, ...stats }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: err.message }));
+    }
+    return true;
+  }
+
+  if (pathname === '/api/papaleguas/app-downloads-clear' && req.method === 'POST') {
+    try {
+      const downloadsDb = require('../downloads-db');
+      const result = downloadsDb.clearAll();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, ...result }));
     } catch (err) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: false, error: err.message }));

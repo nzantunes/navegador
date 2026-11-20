@@ -1,0 +1,64 @@
+@policy(max_loops=100, no_network=true, zero_traces=true)
+
+// Motor nativo PPL de Adblock & Anti-Tracker zero-overhead
+
+export fn should_block_ad_url(raw_url: str) -> bool {
+  if str.len(raw_url) < 8 {
+    return false;
+  }
+  if str.contains_ci(raw_url, "doubleclick.net") or str.contains_ci(raw_url, "googlesyndication.com") {
+    return true;
+  }
+  if str.contains_ci(raw_url, "googleadservices.com") or str.contains_ci(raw_url, "google-analytics.com") {
+    return true;
+  }
+  if str.contains_ci(raw_url, "adservice.google.") or str.contains_ci(raw_url, "admob.com") or str.contains_ci(raw_url, "adsafeprotected.com") {
+    return true;
+  }
+  if str.contains_ci(raw_url, "adnxs.com") or str.contains_ci(raw_url, "criteo.com") or str.contains_ci(raw_url, "criteo.net") {
+    return true;
+  }
+  if str.contains_ci(raw_url, "taboola.com") or str.contains_ci(raw_url, "outbrain.com") or str.contains_ci(raw_url, "pubmatic.com") {
+    return true;
+  }
+  if str.contains_ci(raw_url, "popads.net") or str.contains_ci(raw_url, "propellerads.com") or str.contains_ci(raw_url, "exoclick.com") {
+    return true;
+  }
+  if str.contains_ci(raw_url, "adsterra.com") or str.contains_ci(raw_url, "mgid.com") or str.contains_ci(raw_url, "monetag.com") {
+    return true;
+  }
+  if str.contains_ci(raw_url, "hotjar.com") or str.contains_ci(raw_url, "scorecardresearch.com") or str.contains_ci(raw_url, "coinhive.com") {
+    return true;
+  }
+  if str.contains_ci(raw_url, "/ads.js") or str.contains_ci(raw_url, "/pagead/") or str.contains_ci(raw_url, "/gpt.js") or str.contains_ci(raw_url, "/prebid.js") {
+    return true;
+  }
+  if str.contains_ci(raw_url, "/adserver") or str.contains_ci(raw_url, "/banner_ads") or str.contains_ci(raw_url, "popup-ad") {
+    return true;
+  }
+  return false;
+}
+
+export fn has_tracking_query(raw_url: str) -> bool {
+  if not str.contains(raw_url, "?") {
+    return false;
+  }
+  if str.contains_ci(raw_url, "utm_source=") or str.contains_ci(raw_url, "utm_medium=") or str.contains_ci(raw_url, "utm_campaign=") {
+    return true;
+  }
+  if str.contains_ci(raw_url, "fbclid=") or str.contains_ci(raw_url, "gclid=") or str.contains_ci(raw_url, "msclkid=") {
+    return true;
+  }
+  return false;
+}
+
+export fn is_safe_redirect_url(raw_url: str) -> bool {
+  let u: str = str.trim(raw_url);
+  if str.len(u) < 4 {
+    return false;
+  }
+  if str.contains_ci(u, "javascript:") or str.contains_ci(u, "vbscript:") or str.contains_ci(u, "data:text/html") {
+    return false;
+  }
+  return str.starts_with(u, "https://") or str.starts_with(u, "http://") or str.starts_with(u, "/");
+}

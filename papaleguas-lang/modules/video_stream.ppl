@@ -1,0 +1,130 @@
+@policy(max_loops=200, no_network=true, zero_traces=true)
+
+// Módulo nativo PPL para controle, validação, Range e prioridade de carregamento de vídeo/áudio
+
+export fn stream_cache_key(video_id: str, lang: str) -> str {
+  let clean_id: str = str.trim(video_id);
+  let clean_lang: str = str.to_lower(str.trim(lang));
+  if str.len(clean_lang) == 0 {
+    clean_lang = "pt";
+  } else if str.len(clean_lang) > 2 {
+    clean_lang = str.slice(clean_lang, 0, 2);
+  }
+  return str.concat(str.concat(clean_id, ":"), clean_lang);
+}
+
+export fn is_valid_stream_url(url: str) -> bool {
+  let u: str = str.trim(url);
+  if str.len(u) < 16 {
+    return false;
+  }
+  if not str.starts_with(u, "https://") and not str.starts_with(u, "http://") {
+    return false;
+  }
+  return true;
+}
+
+export fn should_retry_stream_status(status: u64) -> bool {
+  match status {
+    403 | 410 | 500 | 502 | 503 | 504 => { return true; }
+    _ => { return false; }
+  }
+}
+
+export fn normalize_range_header(raw_range: str) -> str {
+  let r: str = str.trim(raw_range);
+  if str.len(r) == 0 or not str.starts_with(r, "bytes=") {
+    return "bytes=0-";
+  }
+  return str.slice(r, 0, 64);
+}
+
+export fn score_prewarm_priority(is_trend: bool, is_liked: bool, position_idx: u64) -> u64 {
+  let score: u64 = 100;
+  if is_trend {
+    score += 40;
+  }
+  if is_liked {
+    score += 50;
+  }
+  let pos_penalty: u64 = position_idx * 10;
+  if score > pos_penalty {
+    score -= pos_penalty;
+  } else {
+    score = 0;
+  }
+  return score;
+}
+
+export fn optimal_frame_interval_ms(last_frame_ms: u64, error_streak: u64) -> u64 {
+  if error_streak >= 3 {
+    return 2500;
+  }
+  if error_streak > 0 {
+    return 1200 + (error_streak * 400);
+  }
+  let base: u64 = clamp_i64(last_frame_ms, 180, 1500);
+  return base;
+}
+
+export fn optimal_chunk_kb(throughput_kbps: u64, is_mobile: bool) -> u64 {
+  if throughput_kbps < 1500 {
+    return 256;
+  }
+  if is_mobile {
+    if throughput_kbps >= 8000 {
+      return 1024;
+    }
+    return 512;
+  }
+  if throughput_kbps >= 12000 {
+    return 2048;
+  }
+  return 1024;
+}
+
+export fn optimal_search_timeout_ms(mode_code: u64, via_tor: bool) -> u64 {
+  // mode_code: 0 = all, 1 = videos, 2 = images, 3 = web, 4 = news, 5 = wiki, 6 = bing_video_secondary
+  if mode_code == 5 {
+    if via_tor { return 2400; }
+    return 1500;
+  }
+  if mode_code == 6 {
+    if via_tor { return 3400; }
+    return 2200;
+  }
+  if mode_code == 1 or mode_code == 2 {
+    if via_tor { return 4600; }
+    return 2800;
+  }
+  if mode_code == 4 {
+    if via_tor { return 4200; }
+    return 2600;
+  }
+  if via_tor {
+    return 5200;
+  }
+  return 3200;
+}
+
+export fn optimal_thumb_width(is_grid: bool, is_mobile: bool) -> u64 {
+  if is_mobile {
+    if is_grid { return 220; }
+    return 180;
+  }
+  if is_grid {
+    return 280;
+  }
+  return 240;
+}
+
+export fn optimal_ssr_card_limit(is_mobile: bool) -> u64 {
+  if is_mobile {
+    return 6;
+  }
+  return 8;
+}
+
+export fn should_eager_load_card(card_index: u64) -> bool {
+  return card_index < 2;
+}

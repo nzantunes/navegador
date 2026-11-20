@@ -29,6 +29,8 @@
   const elIpTableBody = document.getElementById('ip-table-body');
   const elRecentFeed = document.getElementById('recent-feed');
   const elAdminUser = document.getElementById('admin-username-display');
+  const elAdminServerName = document.getElementById('admin-server-name');
+  let currentServerName = window.location.host || 'Papaléguas';
 
   // Elementos do Monitor de Requisições HTTP em Tempo Real
   let rawRequestsList = [];
@@ -97,7 +99,72 @@
     });
   }
 
+  function detectIsMobileDevice() {
+    const narrowViewport = window.innerWidth <= 960;
+    const uaMobile = Boolean(
+      (navigator.userAgentData && navigator.userAgentData.mobile) ||
+      /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile/i.test(navigator.userAgent || '')
+    );
+    const coarsePointer = Boolean(
+      window.matchMedia &&
+      window.matchMedia('(pointer: coarse)').matches &&
+      window.innerWidth <= 1180
+    );
+    return narrowViewport || uaMobile || coarsePointer;
+  }
+
+  function getAdminViewModePref() {
+    const saved = localStorage.getItem('papaleguas_admin_view_mode');
+    return (saved === 'mobile' || saved === 'pc' || saved === 'auto') ? saved : 'auto';
+  }
+
+  function applyAdminViewMode() {
+    const pref = getAdminViewModePref();
+    const detectedMobile = detectIsMobileDevice();
+    const isMobile = pref === 'mobile' ? true : (pref === 'pc' ? false : detectedMobile);
+
+    document.body.classList.toggle('mode-mobile', isMobile);
+    document.body.classList.toggle('mode-pc', !isMobile);
+    document.body.classList.toggle('force-mobile', pref === 'mobile');
+    document.body.classList.toggle('force-pc', pref === 'pc');
+    document.documentElement.setAttribute('data-admin-mode', isMobile ? 'mobile' : 'pc');
+
+    if (!isMobile) {
+      const actionsDrawer = document.getElementById('admin-header-actions');
+      const btnMenu = document.getElementById('btn-mobile-menu');
+      if (actionsDrawer) actionsDrawer.classList.remove('mobile-open');
+      if (btnMenu) btnMenu.classList.remove('active');
+    }
+
+    const badge = document.getElementById('admin-device-mode-badge');
+    if (badge) {
+      if (pref === 'auto') {
+        badge.textContent = isMobile ? '📱 Modo Mobile (Auto)' : '💻 Modo PC (Auto)';
+      } else if (pref === 'mobile') {
+        badge.textContent = '📱 Modo Mobile (Manual)';
+      } else {
+        badge.textContent = '💻 Modo PC (Manual)';
+      }
+    }
+  }
+
+  window.cycleAdminViewMode = function() {
+    const current = getAdminViewModePref();
+    const next = current === 'auto' ? 'mobile' : (current === 'mobile' ? 'pc' : 'auto');
+    localStorage.setItem('papaleguas_admin_view_mode', next);
+    applyAdminViewMode();
+    const label = next === 'auto'
+      ? `Automático (${detectIsMobileDevice() ? 'Mobile' : 'PC'} detectado)`
+      : (next === 'mobile' ? 'Modo Mobile ativado' : 'Modo PC ativado');
+    if (typeof showToast === 'function') {
+      showToast(`🖥️ Visualização: ${label}`, 'info');
+    }
+  };
+
   async function init() {
+    applyAdminViewMode();
+    window.addEventListener('resize', applyAdminViewMode);
+    window.addEventListener('orientationchange', applyAdminViewMode);
     setupMobileMenu();
     setupFilterListeners();
     setupRequestFilterListeners();
@@ -126,6 +193,12 @@
       } else {
         showScreen('dashboard');
         if (elAdminUser) elAdminUser.textContent = data.username || 'Administrador';
+        if (data.serverName) {
+          currentServerName = data.serverName;
+          if (elAdminServerName) elAdminServerName.textContent = currentServerName;
+        } else if (elAdminServerName) {
+          elAdminServerName.textContent = currentServerName;
+        }
         if (typeof data.isTrackingEnabled === 'boolean') updateTrackingUi(data.isTrackingEnabled);
         if (typeof data.torEnabled === 'boolean') updateAdminTorUi(data.torEnabled, data.torConnected);
         if (typeof data.serverLogsPaused === 'boolean' && elServerLogsSelect) {
@@ -327,6 +400,10 @@
       const data = await res.json();
       if (!data.success) return;
 
+      if (data.serverName) {
+        currentServerName = data.serverName;
+        if (elAdminServerName) elAdminServerName.textContent = currentServerName;
+      }
       if (typeof data.isTrackingEnabled === 'boolean') {
         updateTrackingUi(data.isTrackingEnabled);
       }
@@ -476,9 +553,14 @@
         const ispMatch = (item.geo?.isp || '').toLowerCase().includes(q);
         const deviceMatch = (item.device || '').toLowerCase().includes(q);
         const subnetMatch = (item.localSubnet || '').toLowerCase().includes(q);
+        const clientMatch = (item.clientName || item.geo?.reverse || item.geo?.org || '').toLowerCase().includes(q);
+        const serverMatch = (item.serverName || currentServerName || '').toLowerCase().includes(q);
+        const timeStr = item.lastSeen ? new Date(item.lastSeen).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).toLowerCase() : '';
+        const dateStr = item.lastSeen ? new Date(item.lastSeen).toLocaleDateString('pt-BR').toLowerCase() : '';
+        const timeMatch = timeStr.includes(q) || dateStr.includes(q);
         const discMatch = Array.isArray(item.discoveredDevices) && item.discoveredDevices.some(d => (d || '').toLowerCase().includes(q));
 
-        if (!ipMatch && !cityMatch && !countryMatch && !ispMatch && !deviceMatch && !subnetMatch && !discMatch) {
+        if (!ipMatch && !cityMatch && !countryMatch && !ispMatch && !deviceMatch && !subnetMatch && !clientMatch && !serverMatch && !timeMatch && !discMatch) {
           return false;
         }
       }
@@ -749,7 +831,11 @@
             <span>•</span>
             <span>🏢 ${escapeHtml(geo.isp || 'Provedor')}</span>
             <span>•</span>
-            <span>🖥️ ${escapeHtml(item.device || 'Navegador')}</span>
+            <span>🏷️ Cliente: ${escapeHtml(item.clientName || geo.reverse || geo.org || geo.isp || item.device || 'Cliente')}</span>
+            <span>•</span>
+            <span>🕒 Acesso: ${escapeHtml(dateStr ? `${dateStr} ${timeStr}` : timeStr)}</span>
+            <span>•</span>
+            <span>📱 ${escapeHtml(item.device || 'Navegador')}</span>
           </div>
         </div>
 
@@ -960,75 +1046,67 @@
   function renderIpTable(ipList) {
     if (!elIpTableBody || !Array.isArray(ipList)) return;
     if (ipList.length === 0) {
-      elIpTableBody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:26px;color:#94a3b8;font-size:13px;">🔍 Nenhum registro encontrado para o filtro selecionado.</td></tr>`;
+      elIpTableBody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:26px;color:#94a3b8;font-size:13px;">🔍 Nenhum registro encontrado para o filtro selecionado.</td></tr>`;
       return;
     }
 
     elIpTableBody.innerHTML = ipList.map(item => {
       const geo = item.geo || {};
       const flag = geo.flag || (item.isLocal ? '🏠' : '🌐');
-      const cityStr = geo.city ? `${geo.city} - ${geo.country}` : (geo.country || (item.isLocal ? 'Rede Local' : 'Desconhecido'));
-      const timeStr = item.lastSeen ? new Date(item.lastSeen).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '--:--';
-      const dateStr = item.lastSeen ? new Date(item.lastSeen).toLocaleDateString('pt-BR') : '';
-      const ipVer = item.ipVersion || 'IPv4';
+      const countryStr = geo.country || (item.isLocal ? 'Rede Local' : 'Desconhecido');
+      const clientNameStr = item.clientName || geo.reverse || geo.org || geo.isp || item.device || (item.isLocal ? 'Rede Local' : 'Cliente Externo');
+      const clientOrgStr = item.clientOrg || geo.org || geo.isp || '';
+      const showSubOrg = clientOrgStr && clientOrgStr !== clientNameStr;
+      const timeStr = item.lastSeen
+        ? new Date(item.lastSeen).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        : '--:--:--';
+      const dateStr = item.lastSeen
+        ? new Date(item.lastSeen).toLocaleDateString('pt-BR')
+        : '';
       const isOnline = !!item.isOnline;
       const ipKey = String(item.ip || 'ip').replace(/[^a-zA-Z0-9]/g, '_');
       const allReqs = getRequestsForIp(item);
 
       return `
         <tr class="ip-row-card ${isOnline ? 'ip-row-connected-now' : ''}">
-          <td class="td-ip" data-label="IP / Conexão">
-            <div class="ip-cell-col">
-              <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-                <span class="ip-badge clickable ${isOnline ? 'ip-badge-online' : ''}" onclick="window.openIpWindow('${ipKey}')" title="Clique para expandir relatório detalhado e requisições deste IP">${item.ip}</span>
-                ${isOnline 
-                  ? `<span class="ip-online-indicator" title="Ativo nos últimos 5 minutos"><span class="pulse-green-dot"></span> Conectado</span>` 
-                  : `<span class="ip-offline-indicator" title="Desconectado">⚪ Offline</span>`}
-              </div>
-              ${item.deviceLanIpv4 ? `<div style="font-size:10.5px;color:#38bdf8;margin-top:2px;">Aparelho: ${escapeHtml(item.deviceLanIpv4)}</div>` : ''}
-              <div class="ip-tags-row">
-                ${item.isBlocked ? `<span class="ip-ver-badge" style="background:rgba(239,68,68,0.25);color:#fca5a5;border:1px solid #ef4444;font-weight:800;">🚫 BLOQUEADO</span>` : ''}
-                <span class="ip-ver-badge ${item.isHuman ? 'ip-ver-human' : 'ip-ver-bot'}">${escapeHtml(item.clientCategory || (item.isHuman ? '👤 Usuário' : '🤖 Robô'))}</span>
-                <span class="ip-ver-badge ${ipVer === 'IPv6' ? 'ip-ver-v6' : 'ip-ver-v4'}">${ipVer}</span>
-                ${item.isLocal ? `<span class="ip-ver-badge ip-ver-local">🏠 Local</span>` : `<span class="ip-ver-badge ip-ver-ext">🌍 Externa</span>`}
-                ${item.isBlocked ? `
-                  <button type="button" onclick="event.stopPropagation(); window.unblockIpPrompt('${escapeHtml(item.ip)}')" style="background:rgba(16,185,129,0.18);border:1px solid rgba(16,185,129,0.4);color:#34d399;font-size:10px;font-weight:700;padding:2px 7px;border-radius:6px;cursor:pointer;" title="Desbloquear este IP">
-                    🟢 Desbloquear
-                  </button>
-                ` : (!item.isLocal ? `
-                  <button type="button" onclick="event.stopPropagation(); window.blockIpPrompt('${escapeHtml(item.ip)}')" style="background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.35);color:#fca5a5;font-size:10px;font-weight:700;padding:2px 7px;border-radius:6px;cursor:pointer;" title="Bloquear requisições deste IP">
-                    🚫 Bloquear
-                  </button>
-                ` : '')}
-              </div>
+          <td class="td-ip" data-label="IP">
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+              <span class="ip-badge clickable ${isOnline ? 'ip-badge-online' : ''}" onclick="window.openIpWindow('${ipKey}')" title="Clique para ver requests deste IP">${escapeHtml(item.ip)}</span>
+              ${isOnline
+                ? `<span class="ip-online-indicator" title="Conectado agora"><span class="pulse-green-dot"></span> Conectado</span>`
+                : `<span class="ip-offline-indicator" title="Desconectado">⚪ Offline</span>`}
+              ${item.isBlocked ? `<span class="ip-ver-badge" style="background:rgba(239,68,68,0.25);color:#fca5a5;border:1px solid #ef4444;font-weight:800;">🚫 BLOQUEADO</span>` : ''}
+              ${item.isBlocked ? `
+                <button type="button" onclick="event.stopPropagation(); window.unblockIpPrompt('${escapeHtml(item.ip)}')" style="background:rgba(16,185,129,0.18);border:1px solid rgba(16,185,129,0.4);color:#34d399;font-size:10px;font-weight:700;padding:2px 7px;border-radius:6px;cursor:pointer;" title="Desbloquear este IP">
+                  🟢 Desbloquear
+                </button>
+              ` : (!item.isLocal ? `
+                <button type="button" onclick="event.stopPropagation(); window.blockIpPrompt('${escapeHtml(item.ip)}')" style="background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.35);color:#fca5a5;font-size:10px;font-weight:700;padding:2px 7px;border-radius:6px;cursor:pointer;" title="Bloquear requisições deste IP">
+                  🚫 Bloquear
+                </button>
+              ` : '')}
             </div>
           </td>
-          <td class="td-geo" data-label="Localização">
+          <td class="td-geo" data-label="País">
             <div class="location-chip">
               <span style="font-size:16px;">${flag}</span>
-              <span>${escapeHtml(cityStr)}</span>
+              <span>${escapeHtml(countryStr)}</span>
             </div>
-            <div style="font-size:10.5px;color:#64748b;margin-top:2px;">${escapeHtml(geo.isp || 'Provedor')}</div>
           </td>
-          <td class="td-device" data-label="Dispositivo">
-            <span class="device-chip">${escapeHtml(item.device || 'Navegador')}</span>
-            ${item.screen ? `<div style="font-size:10px;color:#94a3b8;margin-top:3px;">🖥️ Tela: ${escapeHtml(item.screen)}</div>` : ''}
-            ${item.localSubnet ? `<div style="font-size:10px;color:#38bdf8;margin-top:2px;">📡 Wi-Fi Local: ${escapeHtml(item.localSubnet)}</div>` : ''}
-            ${item.discoveredDevices && item.discoveredDevices.length > 0 ? `
-              <div style="margin-top:5px;display:flex;flex-direction:column;gap:3px;">
-                <span style="font-size:9.5px;color:#34d399;font-weight:700;text-transform:uppercase;">Aparelhos no Wi-Fi:</span>
-                ${item.discoveredDevices.map(d => `<span style="background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.35);color:#34d399;font-size:10px;padding:2px 6px;border-radius:6px;font-weight:600;display:inline-block;max-width:max-content;">📺 ${escapeHtml(d)}</span>`).join('')}
-              </div>
-            ` : (item.device && item.device.includes('Rede Externa') ? `<div style="font-size:9.5px;color:#64748b;margin-top:3px;">Aguardando varredura da rede do cliente...</div>` : '')}
+          <td class="td-server" data-label="Cliente (IP Externo)">
+            <div style="display:flex;flex-direction:column;gap:2px;">
+              <span class="server-name-badge" title="Nome / Hostname do cliente IP">${escapeHtml(clientNameStr)}</span>
+              ${showSubOrg ? `<span style="font-size:11px;color:#94a3b8;">${escapeHtml(clientOrgStr)}</span>` : ''}
+            </div>
           </td>
-          <td class="td-urls" data-label="Requisições / URLs">
+          <td class="td-time" data-label="Horário de Acesso">
+            <div class="access-time-cell">
+              <span class="access-time-hour">🕒 ${escapeHtml(timeStr)}</span>
+              ${dateStr ? `<span class="access-time-date">${escapeHtml(dateStr)}</span>` : ''}
+            </div>
+          </td>
+          <td class="td-urls" data-label="Request">
             ${renderIpUrlsCell(item, ipKey, false, allReqs)}
-          </td>
-          <td class="td-visits" data-label="Quantidade de Acessos"><span class="visit-count-badge">${item.visitsCount}x</span></td>
-          <td class="td-downloads" data-label="Downloads"><span style="font-weight:700;color:${item.conversions > 0 ? '#10b981' : '#64748b'}">${item.conversions}</span></td>
-          <td class="td-time" data-label="Último Visto" style="font-size:11.5px;color:#94a3b8;white-space:nowrap;">
-            ${dateStr} <span style="color:${isOnline ? '#10b981' : '#f8fafc'};font-weight:${isOnline ? '700' : '600'};">${timeStr}</span>
-            ${isOnline ? `<div style="font-size:10px;color:#34d399;font-weight:700;margin-top:2px;">⚡ Ativo agora</div>` : ''}
           </td>
         </tr>
       `;
@@ -2039,6 +2117,448 @@
       }
     } catch (e) {}
   };
+
+  let pplActiveModulesCache = [];
+
+  window.syncPplRunnerFunctions = function(modName) {
+    const fnSel = document.getElementById('ppl-runner-fn');
+    if (!fnSel) return;
+    const mod = pplActiveModulesCache.find(function(m) { return m.name === modName; });
+    const fns = (mod && Array.isArray(mod.exportedFunctions)) ? mod.exportedFunctions : [];
+    fnSel.innerHTML = fns.length
+      ? fns.map(function(f) {
+          const sig = (f.params || []).map(function(p) { return p.name + ':' + p.paramType; }).join(', ');
+          return '<option value="' + escapeHtml(f.name) + '">' + escapeHtml(f.name) + '(' + escapeHtml(sig) + ') -> ' + escapeHtml(f.returnType) + '</option>';
+        }).join('')
+      : '<option value="">(nenhuma função)</option>';
+  };
+
+  window.loadPplLangPanel = async function() {
+    if (!authToken) return;
+    try {
+      const res = await fetch('/api/papaleguas/lang-status', {
+        headers: { 'Authorization': 'Bearer ' + authToken }
+      });
+      const data = await res.json();
+      if (!data || !data.success) return;
+      pplActiveModulesCache = data.activeModules || [];
+
+      const tunerBadge = document.getElementById('ppl-tuner-badge');
+      if (tunerBadge && data.autoTuner) {
+        const ct = data.autoTuner.cacheTuner;
+        const cacheInfo = ct ? (' • LRU Gerenciados: ' + ct.cachesCount + ' (' + ct.entriesAfter + ' itens' + (ct.shedLoad ? ', Shedding ativo' : '') + ')') : '';
+        tunerBadge.textContent = 'AutoTuner ativo: Limiar Bloqueio ' + data.autoTuner.adaptiveThreshold + ' | Cache Recomendado ' + data.autoTuner.recommendedCacheLimit + cacheInfo;
+      }
+
+      const histEl = document.getElementById('ppl-agent-history');
+      if (histEl) {
+        const hist = (data.agent && Array.isArray(data.agent.history)) ? data.agent.history : [];
+        histEl.innerHTML = hist.length
+          ? hist.map(function(h) {
+              const dt = h.at ? h.at.slice(11, 19) : '--:--:--';
+              const ops = Number(h.benchmarkOpsPerSec || 0).toLocaleString('pt-BR');
+              return '<div style="padding:6px 10px;border-radius:8px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);font-size:11.5px;">' +
+                '<div style="color:#94a3b8;">' + escapeHtml(dt) + ' • <strong>' + escapeHtml(h.profile || '') + '</strong></div>' +
+                '<div style="color:#34d399;">RAM ' + (h.memoryPressurePct || 0) + '% • ' + ops + ' ops/s</div>' +
+                '</div>';
+            }).join('')
+          : '<span style="font-size:12px;color:#94a3b8;">Sem histórico ainda — execute um ciclo do agente.</span>';
+      }
+
+      const editorSel = document.getElementById('ppl-editor-module');
+      if (editorSel && editorSel.value) window.syncPplRunnerFunctions(editorSel.value);
+
+      const hwEl = document.getElementById('ppl-hw-summary');
+      if (hwEl && data.hardware) {
+        const hw = data.hardware;
+        const sh = data.shieldStats || { pplScored: 0, pplBlocked: 0 };
+        const uf = data.urlFilterStats || { checked: 0, blockedTracker: 0, blockedUnsafe: 0 };
+        const prof = (data.agent && data.agent.adaptiveProfile && data.agent.adaptiveProfile.name) || 'auto';
+        const httpdOnline = data.nativeHttpd && data.nativeHttpd.online;
+        const httpdInfo = httpdOnline
+          ? ('🟢 Online (' + (data.nativeHttpd.latencyMs || 0) + ' ms • in-process)')
+          : '⚪ Standby';
+        hwEl.innerHTML =
+          '<div style="padding:10px 12px;border-radius:10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);"><div style="font-size:11px;color:#94a3b8;">CPU Hardware</div><div style="font-size:16px;font-weight:700;color:#38bdf8;">' + hw.cpuCores + ' núcleos</div></div>' +
+          '<div style="padding:10px 12px;border-radius:10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);"><div style="font-size:11px;color:#94a3b8;">RAM Livre / Total</div><div style="font-size:16px;font-weight:700;color:#34d399;">' + hw.ramFreeMb + ' / ' + hw.ramTotalMb + ' MB</div></div>' +
+          '<div style="padding:10px 12px;border-radius:10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);"><div style="font-size:11px;color:#94a3b8;">Pressão Memória</div><div style="font-size:16px;font-weight:700;color:#fbbf24;">' + hw.memoryPressurePct + '% (' + escapeHtml(prof) + ')</div></div>' +
+          '<div style="padding:10px 12px;border-radius:10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);"><div style="font-size:11px;color:#94a3b8;">Escudo .ppl (Req/Bloq)</div><div style="font-size:16px;font-weight:700;color:#c084fc;">' + sh.pplScored + ' / ' + sh.pplBlocked + '</div></div>' +
+          '<div style="padding:10px 12px;border-radius:10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);"><div style="font-size:11px;color:#94a3b8;">Filtro Proxy .ppl (Chk/Bloq)</div><div style="font-size:16px;font-weight:700;color:#f472b6;">' + uf.checked + ' / ' + (uf.blockedTracker + uf.blockedUnsafe) + '</div></div>' +
+          '<div style="padding:10px 12px;border-radius:10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);"><div style="font-size:11px;color:#94a3b8;">Motor PPL Nativo (:8080)</div><div style="font-size:16px;font-weight:700;color:' + (httpdOnline ? '#34d399' : '#94a3b8') + ';">' + httpdInfo + '</div></div>';
+      }
+
+      const tbody = document.getElementById('ppl-modules-table-body');
+      if (tbody) {
+        const mods = data.activeModules || [];
+        const agentResults = (data.agent && data.agent.results) || [];
+        if (!mods.length) {
+          tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:18px;color:#94a3b8;">Nenhum módulo .ppl ativo.</td></tr>';
+        } else {
+          tbody.innerHTML = mods.map(function(m) {
+            const ag = agentResults.find(function(r) { return r.module === m.name; }) || {};
+            const modeBadge = m.napiPath ? '⚡ N-API In-Process' : '🖥️ CLI Nativo';
+            const policyStr = JSON.stringify(m.policy || {});
+            const st = ag.status || 'active';
+            return '<tr>' +
+              '<td><strong>' + escapeHtml(m.name) + '.ppl</strong></td>' +
+              '<td>' + modeBadge + '</td>' +
+              '<td style="font-family:monospace;font-size:11px;color:#94a3b8;">' + escapeHtml(policyStr) + '</td>' +
+              '<td>' + (m.compileMs || 0) + ' ms</td>' +
+              '<td style="color:#34d399;font-weight:600;">✅ ' + escapeHtml(st) + '</td>' +
+              '</tr>';
+          }).join('');
+        }
+      }
+    } catch (e) {}
+  };
+
+  window.runPplAgentNow = async function() {
+    if (!authToken) return;
+    try {
+      const res = await fetch('/api/papaleguas/lang-agent-run', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + authToken }
+      });
+      const data = await res.json();
+      if (data && data.success) {
+        showToast('⚡ Ciclo do Agente Papaléguas concluído!');
+        window.loadPplLangPanel();
+      }
+    } catch (e) {
+      showToast('❌ Erro ao executar ciclo do Agente Papaléguas.');
+    }
+  };
+
+  window.runPplBenchmarkNow = async function() {
+    if (!authToken) return;
+    try {
+      const res = await fetch('/api/papaleguas/lang-benchmark', {
+        headers: { 'Authorization': 'Bearer ' + authToken }
+      });
+      const data = await res.json();
+      const out = document.getElementById('ppl-benchmark-out');
+      if (data && data.success && out) {
+        out.style.display = 'block';
+        out.textContent = '⚡ Benchmark Nativo (.ppl.node): ' + data.iterations + ' chamadas em ' + data.elapsedMs + ' ms (' + data.opsPerSec.toLocaleString('pt-BR') + ' ops/s) • Tracker bloqueado: ' + (data.trackerBlocked ? 'SIM' : 'NÃO');
+      }
+    } catch (e) {}
+  };
+
+  window.loadPplEditorSource = async function(modName) {
+    if (!authToken) return;
+    try {
+      const q = modName ? ('?module=' + encodeURIComponent(modName)) : '';
+      const res = await fetch('/api/papaleguas/lang-source' + q, {
+        headers: { 'Authorization': 'Bearer ' + authToken }
+      });
+      const data = await res.json();
+      if (!data || !data.success) return;
+      const sel = document.getElementById('ppl-editor-module');
+      const ta = document.getElementById('ppl-editor-source');
+      if (sel && Array.isArray(data.modules)) {
+        sel.innerHTML = data.modules.map(function(m) {
+          return '<option value="' + escapeHtml(m) + '"' + (m === data.module ? ' selected' : '') + '>' + escapeHtml(m) + '.ppl</option>';
+        }).join('');
+      }
+      if (ta) ta.value = data.source || '';
+      window.syncPplRunnerFunctions(data.module || (sel && sel.value) || '');
+    } catch (e) {}
+  };
+
+  window.createNewPplModule = function() {
+    const raw = window.prompt('Nome do novo módulo .ppl (apenas letras, números e _):', 'meu_modulo');
+    if (!raw) return;
+    const modName = raw.trim().replace(/\.ppl$/i, '');
+    if (!/^[a-zA-Z0-9_]+$/.test(modName)) {
+      showPplEditorMsg(false, '❌ Nome inválido. Use apenas letras, números e underscore (_).');
+      return;
+    }
+    const sel = document.getElementById('ppl-editor-module');
+    const ta = document.getElementById('ppl-editor-source');
+    if (sel) {
+      const opt = document.createElement('option');
+      opt.value = modName;
+      opt.textContent = modName + '.ppl';
+      sel.appendChild(opt);
+      sel.value = modName;
+    }
+    if (ta) {
+      ta.value = '@policy(max_loops=100, no_network=true, zero_traces=true)\n\nexport fn calcular(x: u64) -> u64 {\n  return x * 2 + 1;\n}\n';
+    }
+    showPplEditorMsg(true, '📝 Novo rascunho "' + modName + '.ppl" pronto. Clique em Verificar ou Compilar & Promover.');
+  };
+
+  window.runPplFunctionNow = async function() {
+    if (!authToken) return;
+    const sel = document.getElementById('ppl-editor-module');
+    const fnSel = document.getElementById('ppl-runner-fn');
+    const argsEl = document.getElementById('ppl-runner-args');
+    const out = document.getElementById('ppl-runner-out');
+    if (!sel || !fnSel || !sel.value || !fnSel.value) return;
+    let parsedArgs = [];
+    const rawArgs = (argsEl && argsEl.value.trim()) || '[]';
+    try {
+      parsedArgs = JSON.parse(rawArgs);
+      if (!Array.isArray(parsedArgs)) parsedArgs = [parsedArgs];
+    } catch (e) {
+      if (out) { out.style.display = 'block'; out.textContent = '❌ Args JSON inválido (ex: [100, 2, false, true])'; }
+      return;
+    }
+    try {
+      const res = await fetch('/api/papaleguas/lang-invoke', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + authToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ module: sel.value, fn: fnSel.value, args: parsedArgs })
+      });
+      const data = await res.json();
+      if (out) {
+        out.style.display = 'block';
+        out.textContent = data && data.success
+          ? ('⚡ ' + data.module + '.' + data.fn + ' => ' + JSON.stringify(data.result) + ' (' + data.elapsedUs + ' µs)')
+          : ('❌ ' + ((data && data.error) || 'erro'));
+      }
+    } catch (e) {
+      if (out) { out.style.display = 'block'; out.textContent = '❌ Falha de comunicação ao invocar função.'; }
+    }
+  };
+
+  function showPplEditorMsg(ok, text) {
+    const out = document.getElementById('ppl-editor-output');
+    if (!out) return;
+    out.style.display = 'block';
+    out.style.background = ok ? 'rgba(16,185,129,0.12)' : 'rgba(239,68,68,0.14)';
+    out.style.border = ok ? '1px solid rgba(16,185,129,0.35)' : '1px solid rgba(239,68,68,0.4)';
+    out.style.color = ok ? '#a7f3d0' : '#fca5a5';
+    out.textContent = text;
+  }
+
+  window.verifyPplSourceNow = async function() {
+    if (!authToken) return;
+    const ta = document.getElementById('ppl-editor-source');
+    if (!ta) return;
+    try {
+      const res = await fetch('/api/papaleguas/lang-verify', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + authToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: ta.value })
+      });
+      const data = await res.json();
+      if (data && data.success) {
+        showPplEditorMsg(true, '✅ Verificação estática aprovada! Funções: ' + data.functionsCount + ' | Structs: ' + data.structsCount + ' | Política: ' + JSON.stringify(data.policy || {}));
+      } else {
+        showPplEditorMsg(false, '❌ ' + ((data && data.error) || 'Falha na verificação'));
+      }
+    } catch (e) {
+      showPplEditorMsg(false, '❌ Erro de comunicação ao verificar .ppl.');
+    }
+  };
+
+  window.compilePplSourceNow = async function() {
+    if (!authToken) return;
+    const sel = document.getElementById('ppl-editor-module');
+    const ta = document.getElementById('ppl-editor-source');
+    if (!sel || !ta || !sel.value) return;
+    try {
+      const res = await fetch('/api/papaleguas/lang-compile', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + authToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ module: sel.value, source: ta.value })
+      });
+      const data = await res.json();
+      if (data && data.success) {
+        const r = data.result || {};
+        showPplEditorMsg(true, '⚡ Compilado & promovido para hardware (.ppl.node) em ' + (r.compileMs || 0) + ' ms! Status: ' + (r.status || 'ok'));
+        window.loadPplLangPanel();
+      } else {
+        showPplEditorMsg(false, '❌ Rejeitado com rollback automático: ' + ((data && (data.error || (data.result && data.result.error))) || 'erro desconhecido'));
+      }
+    } catch (e) {
+      showPplEditorMsg(false, '❌ Erro de comunicação ao compilar .ppl.');
+    }
+  };
+
+  // =========================================================================
+  // FEEDBACKS DO AGENTE PAPALÉGUAS IA (HUMANOS & ROBÔS)
+  // =========================================================================
+  let agentFeedbacksCache = [];
+  let agentFeedbackFilter = 'all';
+
+  function renderAgentFeedbacksTable() {
+    const tbody = document.getElementById('agent-feedbacks-table-body');
+    if (!tbody) return;
+    const list = agentFeedbacksCache.filter(function(item) {
+      if (!item) return false;
+      if (agentFeedbackFilter === 'bot') return item.senderType === 'bot';
+      if (agentFeedbackFilter === 'human') return item.senderType !== 'bot';
+      return true;
+    });
+    if (list.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#94a3b8;padding:18px;">Nenhum feedback registrado nesta categoria ainda.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = list.map(function(fb) {
+      const isBot = fb.senderType === 'bot';
+      const badge = isBot
+        ? '<span style="display:inline-block;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:700;background:rgba(168,85,247,0.2);color:#e9d5ff;border:1px solid rgba(168,85,247,0.5);">🤖 Robô</span>'
+        : '<span style="display:inline-block;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:700;background:rgba(56,189,248,0.18);color:#bae6fd;border:1px solid rgba(56,189,248,0.45);">👤 Humano</span>';
+      let when = fb.at || '';
+      try { when = fb.at ? new Date(fb.at).toLocaleString('pt-BR') : '--'; } catch (e) {}
+      return '<tr>' +
+        '<td>' + badge + '</td>' +
+        '<td style="font-weight:600;color:#e2e8f0;">' + escapeHtml(fb.senderName || (isBot ? 'Robô' : 'Visitante')) + '</td>' +
+        '<td style="font-size:12px;color:#94a3b8;white-space:nowrap;">' + escapeHtml(when) + '</td>' +
+        '<td style="color:#f8fafc;line-height:1.45;white-space:pre-line;max-width:340px;">' + escapeHtml(fb.message || '') + '</td>' +
+        '<td style="color:#cbd5e1;font-size:12.5px;line-height:1.45;white-space:pre-line;max-width:340px;">' + escapeHtml(fb.reply || '') + '</td>' +
+      '</tr>';
+    }).join('');
+  }
+
+  window.setAgentFeedbackFilter = function(mode) {
+    agentFeedbackFilter = mode || 'all';
+    ['all', 'human', 'bot'].forEach(function(k) {
+      const btn = document.getElementById('fb-filter-' + k);
+      if (btn) btn.classList.toggle('active', k === agentFeedbackFilter);
+    });
+    renderAgentFeedbacksTable();
+  };
+
+  window.loadAgentFeedbacks = async function() {
+    try {
+      const res = await fetch('/api/site-agent/feedbacks', { cache: 'no-store' });
+      const data = await res.json();
+      if (!data || !data.ok) return;
+      agentFeedbacksCache = Array.isArray(data.feedbacks) ? data.feedbacks : [];
+      const elTotal = document.getElementById('fb-count-total');
+      const elHuman = document.getElementById('fb-count-human');
+      const elBot = document.getElementById('fb-count-bot');
+      if (elTotal) elTotal.textContent = String(data.total || agentFeedbacksCache.length);
+      if (elHuman) elHuman.textContent = String(typeof data.humanCount === 'number' ? data.humanCount : agentFeedbacksCache.filter(function(f){ return f && f.senderType !== 'bot'; }).length);
+      if (elBot) elBot.textContent = String(typeof data.botCount === 'number' ? data.botCount : agentFeedbacksCache.filter(function(f){ return f && f.senderType === 'bot'; }).length);
+      renderAgentFeedbacksTable();
+    } catch (e) {}
+  };
+
+  window.clearAgentFeedbacks = async function() {
+    if (!window.confirm('Deseja limpar todos os feedbacks do Agente Papaléguas?')) return;
+    try {
+      await fetch('/api/site-agent/feedbacks/clear', {
+        method: 'POST',
+        headers: authToken ? { 'Authorization': 'Bearer ' + authToken } : {}
+      });
+      await window.loadAgentFeedbacks();
+    } catch (e) {}
+  };
+
+  // =========================================================================
+  // DOWNLOADS DA APLICAÇÃO POR SISTEMA (BANCO DE DADOS SQLITE)
+  // =========================================================================
+  let appDownloadsRecentCache = [];
+  let appDownloadsOsFilter = 'all';
+
+  function formatOsBadge(osId) {
+    const map = {
+      windows: { label: '🪟 Windows', bg: 'rgba(56,189,248,0.18)', color: '#7dd3fc', bd: 'rgba(56,189,248,0.45)' },
+      android: { label: '🤖 Android', bg: 'rgba(34,197,94,0.18)', color: '#86efac', bd: 'rgba(34,197,94,0.45)' },
+      ios: { label: '🍎 iOS', bg: 'rgba(226,232,240,0.14)', color: '#f1f5f9', bd: 'rgba(226,232,240,0.35)' },
+      linux: { label: '🐧 Linux', bg: 'rgba(245,158,11,0.18)', color: '#fde68a', bd: 'rgba(245,158,11,0.45)' },
+      macos: { label: '🍏 macOS', bg: 'rgba(168,85,247,0.2)', color: '#e9d5ff', bd: 'rgba(168,85,247,0.5)' }
+    };
+    const info = map[osId] || { label: '💻 Outro', bg: 'rgba(148,163,184,0.16)', color: '#cbd5e1', bd: 'rgba(148,163,184,0.35)' };
+    return '<span style="display:inline-block;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:700;background:' + info.bg + ';color:' + info.color + ';border:1px solid ' + info.bd + ';">' + info.label + '</span>';
+  }
+
+  function renderAppDownloadsTable() {
+    const tbody = document.getElementById('app-downloads-table-body');
+    if (!tbody) return;
+    const list = appDownloadsRecentCache.filter(function(item) {
+      if (!item) return false;
+      if (appDownloadsOsFilter === 'all') return true;
+      if (appDownloadsOsFilter === 'macos') return item.os === 'macos' || item.os === 'other';
+      return item.os === appDownloadsOsFilter;
+    });
+    if (list.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#94a3b8;padding:16px;">Nenhum download registrado para este sistema ainda.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = list.map(function(dl) {
+      let when = dl.created_at || '';
+      try { when = dl.created_at ? new Date(dl.created_at).toLocaleString('pt-BR') : '--'; } catch (e) {}
+      const srcLabel = dl.source === 'download_app' ? 'Download Instalador' : (dl.source === 'pwa_install' ? 'Instalação PWA' : String(dl.source || 'App'));
+      return '<tr>' +
+        '<td>' + formatOsBadge(dl.os) + '</td>' +
+        '<td style="font-weight:600;color:#e2e8f0;font-size:12px;">' + escapeHtml(srcLabel) + '</td>' +
+        '<td style="font-family:monospace;font-size:12px;color:#7dd3fc;">' + escapeHtml(dl.ip || '--') + '</td>' +
+        '<td style="font-size:12px;color:#94a3b8;white-space:nowrap;">' + escapeHtml(when) + '</td>' +
+        '<td style="font-size:11.5px;color:#94a3b8;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(dl.user_agent || '') + '">' + escapeHtml(dl.user_agent || '--') + '</td>' +
+      '</tr>';
+    }).join('');
+  }
+
+  window.setAppDownloadOsFilter = function(osId) {
+    appDownloadsOsFilter = osId || 'all';
+    ['all', 'windows', 'android', 'ios', 'linux', 'macos'].forEach(function(k) {
+      const btn = document.getElementById('dl-filter-' + k);
+      if (btn) btn.classList.toggle('active', k === appDownloadsOsFilter);
+    });
+    renderAppDownloadsTable();
+  };
+
+  window.loadAppDownloadsStats = async function() {
+    try {
+      const headers = authToken ? { 'Authorization': 'Bearer ' + authToken } : {};
+      const res = await fetch('/api/papaleguas/app-downloads-stats', { cache: 'no-store', headers });
+      const data = await res.json();
+      if (!data || !data.success) return;
+      const byOs = data.byOs || {};
+      const total = Number(data.total || 0);
+      const last24h = Number(data.last24h || 0);
+      const win = Number(byOs.windows || 0);
+      const andr = Number(byOs.android || 0);
+      const ios = Number(byOs.ios || 0);
+      const lin = Number(byOs.linux || 0);
+      const mac = Number(byOs.macos || 0) + Number(byOs.other || 0);
+
+      const setTxt = function(id, val) { const el = document.getElementById(id); if (el) el.textContent = String(val); };
+      setTxt('dl-count-total', total);
+      setTxt('dl-count-windows', win);
+      setTxt('dl-count-android', andr);
+      setTxt('dl-count-ios', ios);
+      setTxt('dl-count-linux', lin);
+      setTxt('dl-count-macos', mac);
+      setTxt('dl-kpi-total', total);
+      setTxt('dl-kpi-24h', last24h + ' nas últimas 24h');
+      setTxt('dl-kpi-windows', win);
+      setTxt('dl-kpi-android', andr);
+      setTxt('dl-kpi-ios', ios);
+      setTxt('dl-kpi-linux', lin);
+      setTxt('dl-kpi-macos', mac);
+      if (data.dbEngine) setTxt('dl-db-badge', data.dbEngine);
+
+      appDownloadsRecentCache = Array.isArray(data.recent) ? data.recent : [];
+      renderAppDownloadsTable();
+    } catch (e) {}
+  };
+
+  window.clearAppDownloadsStats = async function() {
+    if (!window.confirm('Deseja zerar todos os registros de downloads da aplicação no banco SQLite?')) return;
+    try {
+      const headers = authToken ? { 'Authorization': 'Bearer ' + authToken } : {};
+      await fetch('/api/papaleguas/app-downloads-clear', { method: 'POST', headers });
+      await window.loadAppDownloadsStats();
+      if (typeof showToast === 'function') showToast('🗑️ Registros de downloads zerados no banco SQLite.', 'info');
+    } catch (e) {}
+  };
+
+  setTimeout(function() {
+    window.loadAppDownloadsStats();
+    window.loadAgentFeedbacks();
+    if (authToken) { window.loadPplLangPanel(); window.loadPplEditorSource(); }
+  }, 900);
+  setInterval(function() {
+    window.loadAppDownloadsStats();
+    window.loadAgentFeedbacks();
+    if (authToken) window.loadPplLangPanel();
+  }, 15000);
 
   init();
 })();

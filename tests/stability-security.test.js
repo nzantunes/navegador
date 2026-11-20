@@ -430,3 +430,174 @@ test('segurança & privacidade: Adblocker ligado por padrão e /proxy sem fallba
     'Não deve existir fallback direto (forceDirect = true) em fetchUrlViaProxy'
   );
 });
+
+test('search-engines: parseBingVideosHtml e parseDailymotionVideosJson extraem vídeos de vários sites', () => {
+  const { parseBingVideosHtml, parseDailymotionVideosJson, spreadResultsByHost } = require('../main/search-engines');
+  const safeHost = (u) => {
+    try { return new URL(u).hostname.replace(/^www\./, ''); } catch (e) { return ''; }
+  };
+
+  const sampleBingHtml = `
+    <div vrhm="{&quot;purl&quot;:&quot;https://vimeo.com/123456&quot;,&quot;t&quot;:&quot;Documentário Oceano&quot;,&quot;du&quot;:&quot;05:12&quot;,&quot;thid&quot;:&quot;OVP.abc123&quot;,&quot;surl&quot;:&quot;vimeo.com&quot;}"></div>
+    <div vrhm="{&quot;purl&quot;:&quot;https://www.youtube.com/watch?v=dQw4w9WgXcQ&quot;,&quot;t&quot;:&quot;Clipe Musical&quot;,&quot;du&quot;:&quot;03:33&quot;,&quot;turl&quot;:&quot;https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg&quot;}"></div>
+  `;
+  const bingVids = parseBingVideosHtml(sampleBingHtml, 'oceano', safeHost, 10);
+  assert.equal(bingVids.length, 2);
+  assert.equal(bingVids[0].source, 'vimeo.com');
+  assert.equal(bingVids[0].isYoutube, false);
+  assert.equal(bingVids[0].duration, '05:12');
+  assert.equal(bingVids[1].isYoutube, true);
+  assert.equal(bingVids[1].id, 'dQw4w9WgXcQ');
+
+  const dmJson = JSON.stringify({
+    list: [
+      { id: 'x8abcde', title: 'Ciência Hoje', url: 'https://www.dailymotion.com/video/x8abcde', thumbnail_480_url: 'https://s2.dmcdn.net/v/1/x480', duration: 125, 'owner.screenname': 'Canal Ciência', views_total: 4200 }
+    ]
+  });
+  const dmVids = parseDailymotionVideosJson(dmJson, 10);
+  assert.equal(dmVids.length, 1);
+  assert.equal(dmVids[0].source, 'dailymotion.com');
+  assert.equal(dmVids[0].duration, '2:05');
+
+  const spread = spreadResultsByHost([...bingVids, ...dmVids], safeHost, 1);
+  assert.equal(spread.length, 3);
+
+  const { filterAndRankTopicVideos } = require('../main/search-engines');
+  const mixedCandidates = [
+    { id: 'QCZjNqtnGmM', title: 'The Dark Age - Animator vs. Animation 14', channel: 'Alan Becker', url: 'https://www.youtube.com/watch?v=QCZjNqtnGmM', _origin: 'bing' },
+    { id: 'Hkjp36hjzqo', title: '$1 vs $500,000,000 Futuristic Tech!', channel: 'Stokes Twins', url: 'https://www.youtube.com/watch?v=Hkjp36hjzqo', _origin: 'bing' },
+    { id: '', title: 'ELECCIONES BRASIL | Cierran las casillas | ElPaís', channel: 'EL PAÍS', url: 'https://www.dailymotion.com/video/x8e5dtc', _origin: 'dailymotion' },
+    { id: '8ET-Vk0Gn6g', title: 'DIRECTO | Diputación Permanente del Congreso | EL PAÍS', channel: 'EL PAÍS', url: 'https://www.youtube.com/watch?v=8ET-Vk0Gn6g', _origin: 'youtube' },
+  ];
+  const filteredElPais = filterAndRankTopicVideos(mixedCandidates, 'elpais');
+  assert.equal(filteredElPais.length, 2, 'Deve descartar vídeos aleatórios em alta do Bing que não pertencem ao tema');
+  assert.equal(filteredElPais[0].id, '8ET-Vk0Gn6g', 'Deve priorizar vídeo do YouTube do próprio tema no topo');
+
+  const { encryptPplPayload, decryptPplPayload } = require('../main/ppl-crypto');
+  const tok1 = encryptPplPayload({ u: 'https://example.com/img.jpg', clientId: 'c1' });
+  const tok2 = encryptPplPayload({ u: 'https://example.com/img.jpg', clientId: 'c1' });
+  assert.equal(tok1, tok2, 'Token PPL de imagem estática deve ser determinístico via FNV-1a para aproveitar cache HTTP');
+  assert.deepEqual(decryptPplPayload(tok1), { u: 'https://example.com/img.jpg', clientId: 'c1' });
+
+  const pplRuntime = require('../papaleguas-lang/runtime');
+  const vsMod = pplRuntime.loadNativeModule('video_stream');
+  const srMod = pplRuntime.loadNativeModule('search_rank');
+  assert.equal(typeof vsMod.optimal_search_timeout_ms, 'function');
+  assert.equal(typeof vsMod.optimal_thumb_width, 'function');
+  assert.equal(typeof vsMod.optimal_ssr_card_limit, 'function');
+  assert.equal(typeof vsMod.should_eager_load_card, 'function');
+  assert.equal(typeof srMod.score_topic_video, 'function');
+  assert.ok(Number(vsMod.optimal_search_timeout_ms(0, true)) <= 6000);
+  assert.equal(Number(vsMod.optimal_ssr_card_limit(true)), 6);
+  assert.equal(Boolean(vsMod.should_eager_load_card(0)), true);
+  assert.equal(Boolean(vsMod.should_eager_load_card(3)), false);
+});
+
+test('abertura de links do proxy em nova aba: openInNewTab e auxclick definidos no server.js e preload', () => {
+  const serverCode = fs.readFileSync(path.join(__dirname, '../main/server.js'), 'utf8');
+  const preloadCode = fs.readFileSync(path.join(__dirname, '../main/preload-webview.js'), 'utf8');
+  const newtabCode = fs.readFileSync(path.join(__dirname, '../src/newtab.html'), 'utf8');
+
+  // Verifica que openInNewTab está definido na página de busca do servidor
+  assert.ok(serverCode.includes('function openInNewTab('), 'server.js deve definir openInNewTab');
+  assert.ok(serverCode.includes('window.openInNewTab = openInNewTab'), 'server.js deve expor window.openInNewTab');
+  assert.ok(serverCode.includes("type: 'open-new-tab'"), 'server.js deve disparar open-new-tab');
+  assert.ok(serverCode.includes("addEventListener('auxclick'"), 'server.js deve tratar clique com o botão do meio (auxclick)');
+
+  // Verifica que o script injetado do proxy propaga OPEN_NEW_TAB e papaleguas-open-tab
+  assert.ok(serverCode.includes("window.postMessage({ type: 'OPEN_NEW_TAB'"), 'script do proxy deve notificar OPEN_NEW_TAB');
+  assert.ok(serverCode.includes("'papaleguas-open-tab'"), 'script do proxy deve disparar evento papaleguas-open-tab');
+
+  // Verifica que preload-webview trata URLs /proxy
+  assert.ok(preloadCode.includes("href.startsWith('/proxy')"), 'preload-webview deve aceitar URLs relativas /proxy');
+  assert.ok(preloadCode.includes('/proxy?url='), 'preload-webview deve extrair destino de rotas /proxy');
+
+  // Verifica que newtab.html possui suporte a auxclick e cliques modificados
+  assert.ok(newtabCode.includes("addEventListener('auxclick'"), 'newtab.html deve tratar auxclick');
+
+  // Verifica que botão de assistir câmera IP abre em nova aba e não redireciona para home
+  const rendererCode = fs.readFileSync(path.join(__dirname, '../src/renderer.js'), 'utf8');
+  assert.ok(rendererCode.includes('ipcam-live'), 'renderer.js deve conter ipcam-live nas rotas internas');
+  assert.ok(serverCode.includes("btn.classList.contains('btn-open-ipcam')"), 'server.js deve tratar clique em btn-open-ipcam');
+  assert.ok(serverCode.includes("openInNewTab(fullPlayerHref)"), 'btn-open-ipcam deve chamar openInNewTab diretamente');
+  assert.ok(serverCode.includes('target="_blank"'), 'server.js deve possuir target="_blank" para links externos/câmeras');
+});
+
+test('alternância instantânea de categorias na busca (Todos, Vídeos, Imagens, Web Rust, PDF, Câmera IP, .onion)', () => {
+  const serverCode = fs.readFileSync(path.join(__dirname, '../main/server.js'), 'utf8');
+  assert.ok(serverCode.includes('function selectSearchFilter('), 'server.js deve definir selectSearchFilter');
+  assert.ok(serverCode.includes('async function switchResultsListMode('), 'server.js deve definir switchResultsListMode para troca dinâmica entre web, pdf e ipcam');
+  assert.ok(serverCode.includes('async function loadOnionSectionDynamic('), 'server.js deve definir loadOnionSectionDynamic para carregar .onion sob demanda');
+  assert.ok(serverCode.includes("e.target.closest('.search-pill[data-filter]')"), 'setupFilterPills deve interceptar cliques nos botões de filtro com data-filter');
+  const pageHtmlStart = serverCode.indexOf('const pageHtml = `<!DOCTYPE html>');
+  const pageHtmlEnd = serverCode.indexOf('</html>`;', pageHtmlStart);
+  assert.ok(pageHtmlStart > 0 && pageHtmlEnd > pageHtmlStart, 'pageHtml deve existir em server.js');
+  const pageHtmlSlice = serverCode.slice(pageHtmlStart, pageHtmlEnd);
+  assert.doesNotMatch(
+    pageHtmlSlice,
+    /\/\^https\?:\\\/\\\//,
+    'pageHtml não deve conter regex literal /^https?:\\/\\// sem escape de template literal (causa comentário // no navegador)'
+  );
+});
+
+test('ipcam-search: busca por palavra-chave não cai em bynew genérico e filtra corretamente', () => {
+  const { buildInsecamSearchPlan, parseInsecamCards } = require('../main/ipcam-search');
+
+  const quartoPlan = buildInsecamSearchPlan('quarto', 0);
+  assert.equal(quartoPlan.hasExplicitCategory, true);
+  assert.ok(quartoPlan.urls.some((u) => u.includes('/bytag/House/')), 'quarto deve mapear para tag House');
+  assert.ok(quartoPlan.urls.some((u) => u.includes('/bytag/Hotel/')), 'quarto deve incluir tag Hotel');
+  assert.ok(!quartoPlan.urls.some((u) => u.includes('/bynew/')), 'quarto não deve usar /bynew/');
+
+  const praiaBrasilPlan = buildInsecamSearchPlan('praia brasil', 0);
+  assert.ok(praiaBrasilPlan.urls.some((u) => u.includes('/bytag/Beach/')), 'praia deve mapear para Beach');
+  assert.ok(praiaBrasilPlan.urls.some((u) => u.includes('/bycountry/BR/')), 'brasil deve mapear para BR');
+
+  const unknownPlan = buildInsecamSearchPlan('palavra_aleatoria_xyz', 0);
+  assert.equal(unknownPlan.isGenericCamQuery, false);
+  assert.ok(!unknownPlan.urls.some((u) => u.includes('/bynew/')), 'termo específico desconhecido não deve incluir /bynew/ diretamente');
+
+  const genericPlan = buildInsecamSearchPlan('camera', 0);
+  assert.equal(genericPlan.isGenericCamQuery, true);
+  assert.ok(genericPlan.urls.some((u) => u.includes('/bynew/')), 'busca genérica deve usar /bynew/');
+
+  const sampleHtml = `
+    <a class="thumbnail-item__wrap" href="/en/view/1012199/" title="Live camera in Brazil, Nova Granada">
+      <img src="http://187.103.87.253:3000/mjpg/video.mjpg" />
+    </a>
+    <a class="thumbnail-item__wrap" href="/en/view/1012198/" title="Live camera in Brazil, Marilia">
+      <img src="http://189.90.106.231:8085/mjpg/video.mjpg" />
+    </a>
+  `;
+  const filtered = parseInsecamCards([sampleHtml], 10, ['marilia']);
+  assert.equal(filtered.length, 1);
+  assert.equal(filtered[0].host, '189.90.106.231:8085');
+});
+
+test('voltar preserva página em cache e posição de rolagem sem recarregar', () => {
+  const rendererCode = fs.readFileSync(path.join(__dirname, '../src/renderer.js'), 'utf8');
+  const serverCode = fs.readFileSync(path.join(__dirname, '../main/server.js'), 'utf8');
+
+  assert.ok(rendererCode.includes('const VIEW_CACHE_DISTANCE = 4;'), 'VIEW_CACHE_DISTANCE deve manter múltiplas views em cache');
+  assert.ok(rendererCode.includes('const FRAME_CACHE_DISTANCE = 5;'), 'FRAME_CACHE_DISTANCE deve manter múltiplos iframes em cache');
+  assert.ok(rendererCode.includes('webview.goToCachedUrl ='), 'webview deve expor goToCachedUrl para restaurar sem recarregar');
+  assert.ok(rendererCode.includes('__plInFrameSteps'), 'navegação interna em iframe deve usar histórico nativo (bfcache)');
+  assert.ok(rendererCode.includes('saveFrameScroll') && rendererCode.includes('restoreFrameScroll'), 'showFrame deve salvar e restaurar rolagem');
+  assert.ok(rendererCode.includes("data.type === 'papaleguas-go-back'"), 'renderer deve tratar papaleguas-go-back');
+  assert.ok(rendererCode.includes('saveViewScroll') && rendererCode.includes('restoreViewScroll'), 'showView (Electron) deve salvar e restaurar rolagem');
+  assert.ok(serverCode.includes("postMessage({ type: 'papaleguas-go-back' }") || fs.readFileSync(path.join(__dirname, '../main/routes/ipcam-live.js'), 'utf8').includes("postMessage({ type: 'papaleguas-go-back' }"), 'botões Voltar de /video-watch e /ipcam-live devem acionar histórico da aba pai');
+});
+
+test('routes/ipcam-live.js e AbortController em ipcam-search.js', () => {
+  const { buildIpCamLiveHtml } = require('../main/routes/ipcam-live');
+  const html = buildIpCamLiveHtml({
+    camUrl: 'http://189.90.106.231:8085/mjpg/video.mjpg',
+    camTitle: 'Marilia Cam',
+    clientId: 'cli_1',
+    escapeHtml: (s) => String(s).replace(/</g, '&lt;')
+  });
+  assert.ok(html.includes('Marilia Cam') && html.includes('/api/ipcam-frame') && html.includes('papaleguas-go-back'));
+
+  const ipcamSearchCode = fs.readFileSync(path.join(__dirname, '../main/ipcam-search.js'), 'utf8');
+  assert.ok(ipcamSearchCode.includes('AbortController'), 'ipcam-search.js deve abortar sockets pendentes via AbortController');
+});

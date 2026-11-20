@@ -534,10 +534,12 @@
       const isCast = d.type === 'chromecast';
       const name = d.name || (isCast ? 'Chromecast / Google TV' : ('Smart TV (' + ip + ')'));
       const connecting = !!ip && state.connectingIp === ip;
+      const c = cc();
+      const canServerCast = Boolean(ip && (!state.remote || (c && c.lastScanInfo && c.lastScanInfo.serverSameNetwork)));
       const sub = connecting
         ? 'Conectando ao dispositivo…'
         : (ip ? 'IP ' + esc(ip) + ' · pronta para receber' : 'Pronta para conectar');
-      const btn = isCast
+      const btn = (isCast && !canServerCast)
         ? '<button type="button" data-cast="1">▶ Conectar</button>'
         : (connecting
           ? '<button type="button" class="is-busy" disabled data-ip="' + esc(ip) + '"><i class="pch-spin"></i>Conectando…</button>'

@@ -1,0 +1,42 @@
+@policy(max_loops=100, no_network=true, zero_traces=true)
+
+// Módulo nativo PPL (C11 N-API + WebAssembly): controle de rate limit, concorrência e backoff adaptativo
+
+export fn allow_rate_window(current_hits: u64, limit: u64, is_local: bool) -> bool {
+  if is_local {
+    return true;
+  }
+  if limit == 0 {
+    return false;
+  }
+  return current_hits < limit;
+}
+
+export fn retry_after_sec(window_ms: u64, elapsed_ms: u64) -> u64 {
+  if elapsed_ms >= window_ms {
+    return 1;
+  }
+  let rem_ms: u64 = window_ms - elapsed_ms;
+  let secs: u64 = (rem_ms + 999) / 1000;
+  return max_u64(secs, 1);
+}
+
+export fn allow_concurrency(active: u64, max_concurrent: u64, cpu_pressure_pct: u64) -> bool {
+  if max_concurrent == 0 {
+    return false;
+  }
+  let eff_max: u64 = max_concurrent;
+  if cpu_pressure_pct >= 90 {
+    eff_max = max_u64(1, max_concurrent / 2);
+  } else if cpu_pressure_pct >= 75 {
+    eff_max = max_u64(1, (max_concurrent * 3) / 4);
+  }
+  return active < eff_max;
+}
+
+export fn compute_backoff_ms(attempt: u64, base_ms: u64, max_ms: u64) -> u64 {
+  let step: u64 = clamp_u64(attempt, 1, 8);
+  let mult: u64 = 1 << (step - 1);
+  let raw: u64 = base_ms * mult;
+  return min_u64(raw, max_ms);
+}

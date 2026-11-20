@@ -9,6 +9,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { swallowed } = require('../logger');
+let pplRuntime = null;
+try { pplRuntime = require('../../papaleguas-lang/runtime'); } catch (e) {}
 
 const COUNTRY_NAMES = {
   BR: 'Brasil', US: 'Estados Unidos', GB: 'Reino Unido', AR: 'Argentina',
@@ -331,6 +333,19 @@ function filterAndRankVideosForDevice(videos, profile) {
     });
   });
 
+  const rankMod = pplRuntime ? pplRuntime.loadNativeModule('search_rank') : null;
+  const hasCuratorPpl = Boolean(rankMod && typeof rankMod.score_curator_candidate === 'function');
+  const topLikedKws = Array.from(likedKeywordsWeight.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map((e) => e[0]);
+  const kw1 = topLikedKws[0] || '';
+  const kw2 = topLikedKws[1] || '';
+  const kw3 = topLikedKws[2] || '';
+  const badKw = (dislikedPatterns[0] && dislikedPatterns[0][0]) ? String(dislikedPatterns[0][0]) : '';
+  const topLike = likes[0] || null;
+  const channelCounts = new Map();
+
   const filtered = [];
   for (const v of videos) {
     if (!v || !v.id) continue;
@@ -376,14 +391,48 @@ function filterAndRankVideosForDevice(videos, profile) {
       }
     }
 
+    const chKey = normChannel || String(v.channel || '').toLowerCase();
+    const seenChCount = chKey ? ((channelCounts.get(chKey) || 0) + 1) : 1;
+    if (chKey) channelCounts.set(chKey, seenChCount);
+
+    let pplScore = 0;
+    if (hasCuratorPpl) {
+      try {
+        pplScore = Number(rankMod.score_curator_candidate(
+          String(v.title || ''),
+          String(v.channel || ''),
+          String(topLike && topLike.channel || ''),
+          String(kw1),
+          String(kw2),
+          String(kw3),
+          String(badKw),
+          -1,
+          seenChCount,
+          Boolean(v.isGoogleTrend)
+        )) || 0;
+      } catch (e) {}
+    } else if (rankMod && typeof rankMod.score_baixatube_video === 'function') {
+      try {
+        pplScore = Number(rankMod.score_baixatube_video(
+          String(v.title || ''),
+          String(v.channel || ''),
+          String(topLike && topLike.title || ''),
+          String(topLike && topLike.channel || ''),
+          String(kw1 || ''),
+          -1
+        )) || 0;
+      } catch (e) {}
+    }
+
     filtered.push({
       ...v,
       liked: likedIds.has(vid),
       relatedToLiked: likeScore >= 12,
-      _likeScore: likeScore
+      _likeScore: likeScore + pplScore
     });
   }
 
+  filtered.sort((a, b) => (b._likeScore || 0) - (a._likeScore || 0));
   return filtered;
 }
 
@@ -809,6 +858,18 @@ async function handle(req, res, ctx) {
   // 1. RECOMENDAÇÕES INTELIGENTES DO CURADOR (/api/curator-recommendations)
   // -----------------------------------------------------------------------
   if (pathname === '/api/curator-recommendations') {
+    const sendCuratorJson = (payload) => {
+      if (payload && Array.isArray(payload.items) && typeof ctx.prewarmVideoStreams === 'function') {
+        const langShort = String(ctx.getHlForCountry ? ctx.getHlForCountry(payload.countryCode || 'BR') : 'pt').split('-')[0].toLowerCase();
+        ctx.prewarmVideoStreams(payload.items, langShort, 3);
+      }
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'X-Powered-By': 'Papaleguas-PPL/2.0 (Native C11)',
+        'X-Curator-Engine': 'PPL-Native'
+      });
+      res.end(JSON.stringify(payload));
+    };
     const { profile } = getDeviceProfile(req, reqUrl, body, ctx);
     const type = body.type || reqUrl.searchParams.get('type') || 'youtube';
     const currentQuery = body.currentQuery || reqUrl.searchParams.get('q') || '';
@@ -1145,8 +1206,16 @@ async function handle(req, res, ctx) {
         it: '🍿 Altri film completi in italiano selezionati per te'
       };
 
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({
+      const rankModCinema = pplRuntime ? pplRuntime.loadNativeModule('search_rank') : null;
+      if (rankModCinema && typeof rankModCinema.score_filme_candidate === 'function' && movies.length > 1) {
+        movies.sort((a, b) => {
+          const sa = Number(rankModCinema.score_filme_candidate(String(a && a.title || ''), String(a && a.channel || ''), String(catOrQ || 'todos'), String(currentQuery || ''), Math.floor(parseDur(a && a.duration) / 60) || -1, -1)) || 0;
+          const sb = Number(rankModCinema.score_filme_candidate(String(b && b.title || ''), String(b && b.channel || ''), String(catOrQ || 'todos'), String(currentQuery || ''), Math.floor(parseDur(b && b.duration) / 60) || -1, -1)) || 0;
+          return sb - sa;
+        });
+      }
+
+      sendCuratorJson({
         success: true,
         countryCode,
         countryName: COUNTRY_NAMES[countryCode] || countryCode,
@@ -1154,7 +1223,7 @@ async function handle(req, res, ctx) {
         clientIp,
         reason: `${COUNTRY_FLAGS[countryCode] || '🌍'} ${reasonByLang[langKey] || reasonByLang.en}`,
         items: movies.slice(0, 24)
-      }));
+      });
       return true;
     }
 
@@ -1254,8 +1323,7 @@ async function handle(req, res, ctx) {
         }
       }
 
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({
+      sendCuratorJson({
         success: true,
         countryCode,
         countryName: COUNTRY_NAMES[countryCode] || countryCode,
@@ -1263,7 +1331,7 @@ async function handle(req, res, ctx) {
         clientIp,
         reason: 'Mais notícias dos principais canais de jornalismo e temas em alta',
         items: filterAndRankVideosForDevice(fresh, profile).slice(0, 24)
-      }));
+      });
       return true;
     }
 
@@ -1272,8 +1340,7 @@ async function handle(req, res, ctx) {
       const likedRel = await fetchDeviceLikedRecommendations(profile, countryCode, clientIp, ctx, 24, page, false);
       const excludeLow = new Set(excludeTitles.map((x) => String(x || '').toLowerCase()));
       const fresh = (likedRel || []).filter((v) => v && v.id && !excludeLow.has(String(v.id).toLowerCase()));
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({
+      sendCuratorJson({
         success: true,
         countryCode,
         countryName: COUNTRY_NAMES[countryCode] || countryCode,
@@ -1281,7 +1348,7 @@ async function handle(req, res, ctx) {
         clientIp,
         reason: 'Mais recomendações personalizadas com base nas suas curtidas',
         items: filterAndRankVideosForDevice(fresh, profile).slice(0, 24)
-      }));
+      });
       return true;
     }
 
@@ -1340,8 +1407,7 @@ async function handle(req, res, ctx) {
         }
       }
 
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({
+      sendCuratorJson({
         success: true,
         countryCode,
         countryName: COUNTRY_NAMES[countryCode] || countryCode,
@@ -1349,7 +1415,7 @@ async function handle(req, res, ctx) {
         clientIp,
         reason: `Mais vídeos sobre "${currentQuery}"`,
         items: filterAndRankVideosForDevice(fresh, profile).slice(0, 24)
-      }));
+      });
       return true;
     }
 
@@ -1474,8 +1540,7 @@ async function handle(req, res, ctx) {
       }).catch(() => {});
     }, 80);
 
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(result));
+    sendCuratorJson(result);
     return true;
   }
 
@@ -1511,7 +1576,12 @@ async function handle(req, res, ctx) {
   // 2.1 AUTOCOMPLETE & SUGESTÕES DE BUSCA DO YOUTUBE (/api/youtube-suggest)
   // -----------------------------------------------------------------------
   if (pathname === '/api/youtube-suggest' || pathname === '/api/suggest') {
-    const q = String(reqUrl.searchParams.get('q') || '').trim();
+    const rawQ = String(reqUrl.searchParams.get('q') || '').trim();
+    const rankMod = pplRuntime ? pplRuntime.loadNativeModule('search_rank') : null;
+    let q = rawQ;
+    if (q && rankMod && typeof rankMod.sanitize_search_query === 'function') {
+      try { q = String(rankMod.sanitize_search_query(q) || '').trim(); } catch (e) {}
+    }
     if (!q || q.length < 2) {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'public, max-age=300' });
       res.end(JSON.stringify({ success: true, q: '', suggestions: [] }));
@@ -1556,6 +1626,14 @@ async function handle(req, res, ctx) {
             if (suggestions.length >= 6) break;
           }
         }
+      }
+
+      if (suggestions.length > 0 && rankMod && typeof rankMod.score_search_phrase === 'function') {
+        suggestions = suggestions
+          .map((s) => ({ s, score: Number(rankMod.score_search_phrase(String(s), q)) || 0 }))
+          .filter((x) => x.score > -50)
+          .sort((a, b) => b.score - a.score)
+          .map((x) => x.s);
       }
 
       if (global.__plYtSuggestCache.size > 200) {
@@ -1657,11 +1735,42 @@ async function handle(req, res, ctx) {
 
     const forceCustom = reqUrl.searchParams.get('custom') === '1' || (qParam && qParam.trim().split(/\s+/).length > 2);
     const pageParam = parseInt(reqUrl.searchParams.get('page') || '1', 10);
+    const isForceRefresh = reqUrl.searchParams.get('refresh') === '1';
+    if (!global.__plFeedRefreshCounter) global.__plFeedRefreshCounter = new Map();
+    if (!global.__plLastServedFeedIds) global.__plLastServedFeedIds = new Map();
+
+    const rawExclude = String(reqUrl.searchParams.get('exclude') || '');
+    const excludeSet = new Set(
+      rawExclude.split(',').map((s) => s.trim()).filter((s) => s.length >= 6 && s.length <= 20).slice(0, 80)
+    );
+    const serverSeqKey = `${clientId}:${countryCode}:${(qParam || 'noticias').trim().toLowerCase()}`;
+    const prevSeq = global.__plFeedRefreshCounter.get(serverSeqKey) || 0;
+    const reqRseq = parseInt(reqUrl.searchParams.get('rseq') || '0', 10) || 0;
+    const refreshSeq = isForceRefresh ? (reqRseq > 0 ? reqRseq : (prevSeq + 1)) : prevSeq;
+    if (isForceRefresh) {
+      global.__plFeedRefreshCounter.set(serverSeqKey, refreshSeq);
+      const lastIds = global.__plLastServedFeedIds.get(serverSeqKey);
+      if (Array.isArray(lastIds)) lastIds.forEach((id) => excludeSet.add(id));
+    }
+
+    let effectivePage = (pageParam > 1)
+      ? pageParam
+      : (isForceRefresh ? ((refreshSeq % 6) + 2) : 1);
+    try {
+      const mgPpl = require('../../papaleguas-lang/runtime').loadNativeModule('media_guard');
+      if (mgPpl && typeof mgPpl.compute_feed_rotation_page === 'function') {
+        effectivePage = Number(mgPpl.compute_feed_rotation_page(Math.max(1, pageParam || 1), Boolean(isForceRefresh), Math.max(0, refreshSeq || 0)));
+      }
+    } catch (e) {}
+
     let { query: dynamicQuery, sortByRecent, isCustomQuery, searchMode } = ctx.getDynamicRecentYoutubeQuery(qParam || 'noticias', forceCustom, countryCode);
-    if (pageParam > 1) {
-      const rotated = ctx.rotateThemeSearchQueries(qParam || 'noticias', pageParam, countryCode);
-      if (rotated.queries && rotated.queries[0]) dynamicQuery = rotated.queries[0];
-      if (rotated.searchMode) searchMode = rotated.searchMode;
+    if (effectivePage > 1 && typeof ctx.rotateThemeSearchQueries === 'function') {
+      const rotated = ctx.rotateThemeSearchQueries(qParam || 'noticias', effectivePage, countryCode);
+      if (rotated && rotated.queries && rotated.queries.length > 0) {
+        const pickIdx = isForceRefresh ? (refreshSeq % rotated.queries.length) : 0;
+        dynamicQuery = rotated.queries[pickIdx] || rotated.queries[0];
+      }
+      if (rotated && rotated.searchMode) searchMode = rotated.searchMode;
       sortByRecent = true;
     }
     // Por padrão, sempre busca vídeos relacionados ao tema nas últimas horas ('hour')
@@ -1676,7 +1785,6 @@ async function handle(req, res, ctx) {
       global.__plRecentFeedFastCache = new Map();
     }
     const recentFeedFastCache = global.__plRecentFeedFastCache;
-    const isForceRefresh = reqUrl.searchParams.get('refresh') === '1';
     const fastCacheKey = `${countryCode}:${(qParam || 'noticias').trim().toLowerCase()}:${timeFilter}:${pageParam}`;
     // Guarda o feed anterior: se a atualização forçada demorar demais, ele é devolvido na hora
     // (e o feed novo continua sendo buscado em segundo plano, populando o cache para o próximo toque).
@@ -1750,7 +1858,7 @@ async function handle(req, res, ctx) {
             timeFilter,
             country: countryCode,
             clientIp: effectiveClientIp,
-            page: pageParam,
+            page: effectivePage,
             forceRefresh: isForceRefresh
           }).catch(() => []);
 
@@ -1765,8 +1873,10 @@ async function handle(req, res, ctx) {
 
           let trendVideos = [];
           if (Array.isArray(googleTrendsList) && googleTrendsList.length > 0) {
-            // Busca vídeos mais recentes dos 6 tópicos líderes do Google Trends para intercalar com as notícias
-            const topQueries = googleTrendsList.slice(0, 6);
+            // Rotaciona a janela de tópicos do Google Trends a cada refresh para trazer vídeos inéditos
+            const rotStart = isForceRefresh && googleTrendsList.length > 6 ? ((refreshSeq * 3) % googleTrendsList.length) : 0;
+            const rotatedTrends = [...googleTrendsList.slice(rotStart), ...googleTrendsList.slice(0, rotStart)];
+            const topQueries = rotatedTrends.slice(0, 6);
             const trendResults = await Promise.all(
               topQueries.map((t) => searchFreshTrendVideos(t, 'news'))
             );
@@ -1954,6 +2064,41 @@ async function handle(req, res, ctx) {
 
     // Filtra conteúdos descurtidos pelo dispositivo e pontua afinidade com curtidas
     videos = filterAndRankVideosForDevice(videos || [], profile);
+
+    // Garante variedade real a cada atualização: prioriza vídeos ainda não exibidos (fora de excludeSet)
+    if (Array.isArray(videos) && videos.length > 0 && (isForceRefresh || excludeSet.size > 0)) {
+      const shuffleInPlace = (arr) => {
+        for (let i = arr.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          const tmp = arr[i];
+          arr[i] = arr[j];
+          arr[j] = tmp;
+        }
+        return arr;
+      };
+      const unseen = [];
+      const alreadySeen = [];
+      for (const v of videos) {
+        if (!v || !v.id) continue;
+        if (excludeSet.has(String(v.id))) alreadySeen.push(v);
+        else unseen.push(v);
+      }
+      if (isForceRefresh) {
+        shuffleInPlace(unseen);
+        shuffleInPlace(alreadySeen);
+      }
+      videos = unseen.length >= 6 ? [...unseen, ...alreadySeen] : [...unseen, ...alreadySeen];
+    }
+
+    if (Array.isArray(videos) && videos.length > 0) {
+      if (global.__plLastServedFeedIds.size > 300) {
+        const firstK = global.__plLastServedFeedIds.keys().next().value;
+        if (firstK) global.__plLastServedFeedIds.delete(firstK);
+      }
+      const prevList = global.__plLastServedFeedIds.get(serverSeqKey) || [];
+      const nextIds = [...videos.slice(0, 20).map((v) => v && v.id).filter(Boolean), ...prevList].slice(0, 60);
+      global.__plLastServedFeedIds.set(serverSeqKey, Array.from(new Set(nextIds)));
+    }
     const likedRelatedVideos = await likedRecommendationsPromise;
 
     let countryGoogleTrends = (typeof ctx.getCachedGoogleTrends === 'function') ? ctx.getCachedGoogleTrends(countryCode) : [];
@@ -1969,6 +2114,11 @@ async function handle(req, res, ctx) {
       : (searchMode === 'live'
         ? (countryCode === 'BR' ? 'ao vivo' : 'live')
         : (searchMode === 'podcast' ? 'podcast' : (qParam || 'noticias')));
+
+    if (typeof ctx.prewarmVideoStreams === 'function' && Array.isArray(videos) && videos.length > 0) {
+      const langShort = String(hl || 'pt').split('-')[0].toLowerCase();
+      ctx.prewarmVideoStreams(videos, langShort, 4);
+    }
 
     res.writeHead(200, {
       'Content-Type': 'application/json; charset=utf-8',

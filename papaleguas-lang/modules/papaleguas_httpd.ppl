@@ -1,0 +1,103 @@
+@policy(allow_network=true, allow_fs=true, daemon=true, zero_traces=true)
+
+// Servidor HTTP Nativo Papaléguas (.pplbin) - Execução direta no hardware sem Node.js
+const PPL_HTTPD_VERSION: u64 = 1;
+
+export fn health_json() -> str {
+  let cores: str = str.from_u64(hw.cpu_cores());
+  let ram_free: str = str.from_u64(hw.ram_free_mb());
+  let ram_total: str = str.from_u64(hw.ram_total_mb());
+  let uptime: str = str.from_u64(hw.uptime_sec());
+  let p1: str = str.concat("{\"ok\":true,\"engine\":\"Papaleguas-Native-PPL\",\"cpuCores\":", cores);
+  let p2: str = str.concat(",\"ramFreeMb\":", ram_free);
+  let p3: str = str.concat(",\"ramTotalMb\":", ram_total);
+  let p4: str = str.concat(",\"uptimeSec\":", uptime);
+  return str.concat(str.concat(p1, p2), str.concat(p3, str.concat(p4, "}")));
+}
+
+export fn fetch_meta(raw_url: str) -> str {
+  return net.fetch_meta(raw_url);
+}
+
+export fn handle_client(cli_fd: i64) -> bool {
+  if cli_fd < 0 {
+    return false;
+  }
+  let raw: str = net.read_req(cli_fd);
+  let method: str = net.req_method(raw);
+  let path: str = net.req_path(raw);
+  if str.eq(method, "HEAD") {
+    net.send_http(cli_fd, 200, "text/plain; charset=utf-8", "");
+  } else if str.eq(method, "OPTIONS") {
+    net.send_http(cli_fd, 200, "text/plain; charset=utf-8", "");
+  } else if str.eq(method, "TRACE") or str.eq(method, "TRACK") or str.eq(method, "CONNECT") {
+    net.send_http(cli_fd, 405, "application/json; charset=utf-8", "{\"error\":\"method_not_allowed\",\"shield\":\"papaleguas-ppl\"}");
+  } else if net.client_ip_blocked(cli_fd, raw) {
+    net.send_http(cli_fd, 403, "application/json; charset=utf-8", "{\"error\":\"ip_blocked\",\"shield\":\"papaleguas-ppl\"}");
+  } else if str.eq(path, "/api/ppl-metrics") {
+    net.send_http(cli_fd, 200, "application/json; charset=utf-8", net.metrics_json());
+  } else if str.eq(path, "/health") or str.eq(path, "/api/status") or str.eq(path, "/api/hw") {
+    net.send_http(cli_fd, 200, "application/json; charset=utf-8", health_json());
+  } else if str.eq(path, "/api/ping") or str.eq(path, "/api/conn-probe") {
+    let up_s: str = str.from_u64(hw.uptime_sec());
+    let probe_body: str = str.concat("{\"ok\":true,\"pong\":true,\"alive\":true,\"engine\":\"Papaleguas-Native-PPL\",\"uptimeSec\":", str.concat(up_s, "}"));
+    net.send_http(cli_fd, 200, "application/json; charset=utf-8", probe_body);
+  } else if str.eq(path, "/ppl-info") {
+    net.send_http(cli_fd, 200, "application/json; charset=utf-8", "{\"language\":\"Papaleguas (.ppl)\",\"runtime\":\"Native ELF (Zero Node.js)\",\"concurrency\":\"pthread\"}");
+  } else if str.starts_with(path, "/api/url-check") {
+    let chk_u: str = net.req_query(raw, "u");
+    let h_chk: str = str.from_u64(hw.hash_fnv1a(chk_u));
+    let is_unsafe: bool = str.starts_with(chk_u, "javascript:") or str.starts_with(chk_u, "vbscript:") or str.starts_with(chk_u, "data:text/html");
+    let safe_flag: str = "true";
+    if is_unsafe {
+      safe_flag = "false";
+    }
+    let res_a: str = str.concat("{\"ok\":true,\"safe\":", safe_flag);
+    let res_b: str = str.concat(",\"hash\":\"", str.concat(h_chk, "\",\"engine\":\"Papaleguas-Native-PPL\"}"));
+    net.send_http(cli_fd, 200, "application/json; charset=utf-8", str.concat(res_a, res_b));
+  } else if str.starts_with(path, "/api/native-hash") {
+    let target_url: str = net.req_query(raw, "url");
+    let h_str: str = str.from_u64(hw.hash_fnv1a(target_url));
+    let j1: str = str.concat("{\"ok\":true,\"hash\":\"", h_str);
+    net.send_http(cli_fd, 200, "application/json; charset=utf-8", str.concat(j1, "\",\"engine\":\"Papaleguas-Native-PPL\"}"));
+  } else if str.contains(path, "..") or str.eq(path, "/package.json") or str.eq(path, "/package-lock.json") or str.starts_with(path, "/.") or str.starts_with(path, "/wp-") or str.starts_with(path, "/phpmyadmin") or str.eq(path, "/xmlrpc.php") or str.starts_with(path, "/cgi-bin/") {
+    net.send_http(cli_fd, 404, "application/json; charset=utf-8", "{\"error\":\"not_found\",\"shield\":\"papaleguas-ppl\"}");
+  } else if str.starts_with(path, "/papaleguas/") and net.serve_static(cli_fd, ".", path) {
+    // Arquivo administrativo estático entregue em streaming nativo pelo papaleguas_httpd.pplbin
+  } else if net.serve_static(cli_fd, "src", path) {
+    // Arquivo estático entregue em streaming nativo pelo papaleguas_httpd.pplbin
+  } else if str.starts_with(path, "/api/meta") {
+    net.send_http(cli_fd, 200, "application/json; charset=utf-8", fetch_meta(net.req_query(raw, "u")));
+  } else if str.starts_with(path, "/api/preview-img") and net.relay_image(cli_fd, net.req_query(raw, "u")) {
+    // Imagem de prévia entregue diretamente em C nativo + OpenSSL pelo papaleguas_httpd.pplbin
+  } else if not net.proxy_pass(cli_fd, "127.0.0.1", 8080, raw) {
+    net.send_http(cli_fd, 502, "application/json; charset=utf-8", "{\"error\":\"upstream_unavailable\"}");
+  }
+  net.close(cli_fd);
+  return true;
+}
+
+export fn serve_once(port: u64) -> u64 {
+  let srv: i64 = net.listen(port);
+  if srv < 0 {
+    return 0;
+  }
+  let cli: i64 = net.accept(srv);
+  handle_client(cli);
+  net.close(srv);
+  return 1;
+}
+
+export fn serve(port: u64) -> void {
+  let srv: i64 = net.listen(port);
+  if srv < 0 {
+    return;
+  }
+  while true {
+    let cli: i64 = net.accept(srv);
+    if cli >= 0 {
+      net.spawn_handle_client(cli);
+    }
+  }
+  net.close(srv);
+}

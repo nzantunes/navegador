@@ -1,0 +1,424 @@
+@policy(max_loops=100, no_network=true, zero_traces=true)
+
+// Motor nativo de ranking e anti-spam de busca em Papaléguas (.ppl)
+
+struct RankWeights {
+  puny_penalty: i64,
+  sub_penalty: i64,
+  long_penalty: i64,
+  root_bonus: i64
+}
+
+struct RelevanceWeights {
+  exact_url: u64,
+  exact_title: u64,
+  exact_snip: u64,
+  tok_title: u64,
+  tok_url: u64,
+  tok_snip: u64
+}
+
+export fn score_relevance_signals(exact_url: bool, exact_title: bool, exact_snip: bool, title_hits: u64, url_hits: u64, snip_hits: u64) -> u64 {
+  let rw: RelevanceWeights = RelevanceWeights {
+    exact_url: 10,
+    exact_title: 8,
+    exact_snip: 4,
+    tok_title: 4,
+    tok_url: 3,
+    tok_snip: 2
+  };
+  let score: u64 = 0;
+  if exact_url {
+    score = score + rw.exact_url;
+  }
+  if exact_title {
+    score = score + rw.exact_title;
+  }
+  if exact_snip {
+    score = score + rw.exact_snip;
+  }
+  score = score + (title_hits * rw.tok_title) + (url_hits * rw.tok_url) + (snip_hits * rw.tok_snip);
+  return score;
+}
+
+export fn score_url_signals(url_len: u64, dot_count: u64, hyphen_count: u64, is_root: bool, is_puny_or_ip: bool) -> i64 {
+  let w: RankWeights = RankWeights {
+    puny_penalty: -20,
+    sub_penalty: -8,
+    long_penalty: -6,
+    root_bonus: 4
+  };
+  let adj: i64 = 0;
+  if is_puny_or_ip {
+    adj = adj + w.puny_penalty;
+  }
+  if dot_count >= 4 {
+    adj = adj + w.sub_penalty;
+  }
+  if url_len > 140 or hyphen_count >= 8 {
+    adj = adj + w.long_penalty;
+  }
+  if is_root {
+    adj = adj + w.root_bonus;
+  }
+  return adj;
+}
+
+export fn is_spam_url(url: str) -> bool {
+  if str.contains(url, "xn--") or str.contains(url, "/click?aff=") or str.contains(url, "utm_source=spam") {
+    return true;
+  }
+  return false;
+}
+
+export fn compute_tier_bonus(tier: u64) -> u64 {
+  let tiers: [4]u64 = [20, 12, 6, 2];
+  return tiers[tier];
+}
+
+export fn levenshtein_dist(a: str, b: str) -> u64 {
+  return str.levenshtein(a, b);
+}
+
+export fn score_title_signals(title: str) -> i64 {
+  let adj: i64 = 0;
+  if str.upper_ratio_pct(title) > 75 {
+    adj = adj - 5;
+  }
+  return adj;
+}
+
+export fn sanitize_text(raw: str) -> str {
+  return str.strip_html(raw);
+}
+
+export fn fold_text(s: str) -> str {
+  return str.fold_diacritics(s);
+}
+
+export fn score_baixatube_video(
+  title: str,
+  channel: str,
+  seed_title: str,
+  seed_channel: str,
+  seed_query: str,
+  age_days: i64
+) -> i64 {
+  let t: str = str.to_lower(str.fold_diacritics(title));
+  let c: str = str.to_lower(str.fold_diacritics(channel));
+  let st: str = str.to_lower(str.fold_diacritics(seed_title));
+  let sc: str = str.to_lower(str.fold_diacritics(seed_channel));
+  let sq: str = str.to_lower(str.fold_diacritics(seed_query));
+
+  let score: i64 = 0;
+
+  if str.len(sc) > 0 and not str.eq(sc, "baixatube") and str.len(c) > 0 {
+    if str.contains(c, sc) or str.contains(sc, c) {
+      score += 95;
+    }
+  }
+
+  if str.len(sq) >= 3 {
+    if str.contains(t, sq) {
+      score += 40;
+    }
+    if str.contains(c, sq) {
+      score += 15;
+    }
+  }
+
+  if str.len(st) >= 4 {
+    if str.contains(t, st) {
+      score += 18;
+    }
+    if str.contains(c, st) {
+      score += 8;
+    }
+  }
+
+  if age_days >= 0 {
+    if age_days <= 1 {
+      score += 45;
+    } else if age_days <= 6 {
+      score += 30;
+    } else if age_days <= 21 {
+      score += 18;
+    } else if age_days >= 30 {
+      score -= 75;
+    }
+  }
+
+  if str.upper_ratio_pct(title) >= 75 {
+    score -= 20;
+  }
+
+  return score;
+}
+
+export fn score_filme_candidate(
+  title: str,
+  channel: str,
+  category: str,
+  search_query: str,
+  duration_mins: i64,
+  age_days: i64
+) -> i64 {
+  let t: str = str.to_lower(str.fold_diacritics(title));
+  let c: str = str.to_lower(str.fold_diacritics(channel));
+  let cat: str = str.to_lower(str.fold_diacritics(category));
+  let sq: str = str.to_lower(str.fold_diacritics(search_query));
+
+  let score: i64 = 0;
+
+  // Duração: prioriza filmes completos em vez de trailers/cortes curtos
+  if duration_mins >= 60 {
+    score += 50;
+  } else if duration_mins >= 25 {
+    score += 25;
+  } else if duration_mins >= 0 and duration_mins < 10 {
+    score -= 40;
+  }
+
+  // Sinais de filme completo vs trailer
+  if str.contains(t, "trailer") or str.contains(t, "teaser") {
+    score -= 45;
+  }
+  if str.contains(t, "completo") or str.contains(t, "dublado") or str.contains(t, "full movie") {
+    score += 25;
+  }
+  if str.contains(t, "hd") or str.contains(t, "4k") {
+    score += 10;
+  }
+
+  // Correspondência com busca ou categoria
+  if str.len(sq) >= 3 {
+    if str.contains(t, sq) {
+      score += 45;
+    }
+    if str.contains(c, sq) {
+      score += 15;
+    }
+  }
+  if str.len(cat) >= 3 and not str.eq(cat, "todos") {
+    if str.contains(t, cat) {
+      score += 20;
+    }
+  }
+
+  // Recência
+  if age_days >= 0 {
+    if age_days <= 30 {
+      score += 20;
+    } else if age_days <= 180 {
+      score += 10;
+    }
+  }
+
+  if str.upper_ratio_pct(title) >= 75 {
+    score -= 15;
+  }
+
+  return score;
+}
+
+export fn sanitize_search_query(raw: str) -> str {
+  let clean: str = str.trim(str.strip_html(raw));
+  return str.slice(clean, 0, 240);
+}
+
+export fn score_search_phrase(phrase: str, query: str) -> i64 {
+  let p: str = str.to_lower(str.fold_diacritics(str.trim(phrase)));
+  let q: str = str.to_lower(str.fold_diacritics(str.trim(query)));
+  if str.len(p) == 0 {
+    return -100;
+  }
+  let score: i64 = 0;
+  if str.len(q) > 0 {
+    if str.eq(p, q) {
+      score += 100;
+    } else if str.starts_with(p, q) {
+      score += 80;
+    } else if str.contains(p, q) {
+      score += 45;
+    }
+    let dist: u64 = str.levenshtein(p, q);
+    if dist <= 3 {
+      score += 25;
+    }
+  }
+  let plen: u64 = str.len(p);
+  if plen >= 3 and plen <= 45 {
+    score += 15;
+  } else if plen > 80 {
+    score -= 20;
+  }
+  if str.contains(p, "http://") or str.contains(p, "https://") or str.upper_ratio_pct(phrase) >= 80 {
+    score -= 30;
+  }
+  return score;
+}
+
+export fn score_curator_candidate(
+  title: str,
+  channel: str,
+  seed_channel: str,
+  kw1: str,
+  kw2: str,
+  kw3: str,
+  bad_kw: str,
+  age_days: i64,
+  same_channel_count: u64,
+  is_trend: bool
+) -> i64 {
+  let t: str = str.to_lower(str.fold_diacritics(title));
+  let c: str = str.to_lower(str.fold_diacritics(channel));
+  let sc: str = str.to_lower(str.fold_diacritics(seed_channel));
+  let k1: str = str.to_lower(str.fold_diacritics(kw1));
+  let k2: str = str.to_lower(str.fold_diacritics(kw2));
+  let k3: str = str.to_lower(str.fold_diacritics(kw3));
+  let bk: str = str.to_lower(str.fold_diacritics(bad_kw));
+
+  let score: i64 = 0;
+
+  // 1. Afinidade de canal (com controle de saturação/diversidade)
+  if str.len(sc) >= 3 and not str.eq(sc, "baixatube") and str.len(c) > 0 {
+    if str.contains(c, sc) or str.contains(sc, c) {
+      score += 85;
+    }
+  }
+  if same_channel_count >= 2 {
+    let penalty: u64 = (same_channel_count - 1) * 35;
+    if penalty > 140 {
+      penalty = 140;
+    }
+    score -= clamp_i64(penalty, 0, 140);
+  }
+
+  // 2. Correspondência multi-tópico com preferências do usuário
+  if str.len(k1) >= 3 {
+    if str.contains(t, k1) { score += 38; }
+    if str.contains(c, k1) { score += 14; }
+  }
+  if str.len(k2) >= 3 {
+    if str.contains(t, k2) { score += 28; }
+    if str.contains(c, k2) { score += 10; }
+  }
+  if str.len(k3) >= 3 {
+    if str.contains(t, k3) { score += 20; }
+    if str.contains(c, k3) { score += 8; }
+  }
+
+  // 3. Filtro negativo (tópico descurtido)
+  if str.len(bk) >= 3 and (str.contains(t, bk) or str.contains(c, bk)) {
+    score -= 90;
+  }
+
+  // 4. Tendências e recência
+  if is_trend {
+    score += 30;
+  }
+  if age_days >= 0 {
+    if age_days <= 1 {
+      score += 45;
+    } else if age_days <= 6 {
+      score += 30;
+    } else if age_days <= 21 {
+      score += 16;
+    } else if age_days >= 30 {
+      score -= 70;
+    }
+  }
+
+  // 5. Qualidade: penaliza #shorts e clickbait/caixa alta
+  if str.contains(t, "#shorts") or str.contains(t, "/shorts/") {
+    score -= 35;
+  }
+  if str.contains(t, "!!!") or str.contains(t, "???") or str.upper_ratio_pct(title) >= 75 {
+    score -= 25;
+  }
+
+  return score;
+}
+
+export fn score_topic_video(
+  title: str,
+  channel: str,
+  query: str,
+  compact_query: str,
+  origin_code: u64
+) -> i64 {
+  let t: str = str.to_lower(str.fold_diacritics(title));
+  let c: str = str.to_lower(str.fold_diacritics(channel));
+  let q: str = str.to_lower(str.fold_diacritics(str.trim(query)));
+  let cq: str = str.to_lower(str.fold_diacritics(str.trim(compact_query)));
+
+  let score: i64 = 0;
+
+  if str.len(q) >= 3 {
+    if str.contains(t, q) {
+      score += 55;
+    }
+    if str.contains(c, q) {
+      score += 50;
+    }
+  }
+  if str.len(cq) >= 3 {
+    if str.contains(t, cq) {
+      score += 45;
+    }
+    if str.contains(c, cq) {
+      score += 40;
+    }
+  }
+
+  // origin_code: 1 = youtube, 2 = dailymotion, 3 = bing
+  if origin_code == 1 {
+    score += 20;
+  } else if origin_code == 2 {
+    score += 6;
+  }
+
+  if str.upper_ratio_pct(title) >= 80 {
+    score -= 12;
+  }
+
+  return score;
+}
+
+export fn score_web_result_v2(
+  exact_url: bool,
+  exact_title: bool,
+  exact_snip: bool,
+  title_hits: u64,
+  url_hits: u64,
+  snip_hits: u64,
+  is_https: bool,
+  is_official_tld: bool,
+  has_date: bool,
+  is_spam: bool
+) -> i64 {
+  let score: i64 = 0;
+  if is_spam {
+    score -= 60;
+  }
+  if exact_url {
+    score += 24;
+  }
+  if exact_title {
+    score += 18;
+  }
+  if exact_snip {
+    score += 8;
+  }
+  score += (title_hits * 6) + (url_hits * 4) + (snip_hits * 2);
+  if is_https {
+    score += 4;
+  }
+  if is_official_tld {
+    score += 14;
+  }
+  if has_date {
+    score += 5;
+  }
+  return score;
+}

@@ -46,16 +46,37 @@
     headersObj[NGROK_SKIP_HEADER] = NGROK_SKIP_VALUE;
     init.headers = headersObj;
 
-    if (typeof resource === 'string') {
-      return originalFetch.call(this, url, init);
-    } else {
+    const t0 = Date.now();
+    const doCall = () => {
+      if (typeof resource === 'string') {
+        return originalFetch.call(this, url, init);
+      }
       try {
         const req = new Request(url, init);
         return originalFetch.call(this, req);
       } catch (e) {
         return originalFetch.call(this, url, init);
       }
-    }
+    };
+
+    return doCall().then((res) => {
+      window.__pplLastRttMs = Math.max(1, Date.now() - t0);
+      window.__pplConnErrorStreak = 0;
+      return res;
+    }).catch((err) => {
+      window.__pplConnErrorStreak = (window.__pplConnErrorStreak || 0) + 1;
+      const isGet = !init.method || String(init.method).toUpperCase() === 'GET';
+      if (!isGet || (init && init.signal && init.signal.aborted)) throw err;
+      const isMobile = /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent || '');
+      const waitMs = (typeof window.__pplAdaptiveBackoffMs === 'function')
+        ? window.__pplAdaptiveBackoffMs(window.__pplConnErrorStreak, window.__pplLastRttMs || 120, isMobile)
+        : 350;
+      return new Promise((resolve, reject) => {
+        setTimeout(() => {
+          doCall().then(resolve).catch(reject);
+        }, waitMs);
+      });
+    });
   };
 
   // Intercepta XMLHttpRequest para injetar o cabeçalho anti-aviso

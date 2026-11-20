@@ -188,12 +188,13 @@
     <!-- Saudação e Admin Conectado -->
     <div class="dashboard-welcome">
       <div class="welcome-text-wrap">
-        <h1 class="welcome-title">Painel de Controle em Tempo Real</h1>
-        <p class="welcome-subtitle">Conectado como <b id="admin-username-display" class="admin-username-tag">Admin</b> • Monitorando tráfego do túnel e rede local</p>
-      </div>
-      <div class="welcome-portal-buttons">
-        <a href="/filmes" class="btn-header btn-portal" style="text-decoration:none;" onclick="event.preventDefault(); var u=this.getAttribute('href'); try { if (window.parent && window.parent !== window) { window.parent.postMessage({ type: 'navigate-current-tab', url: u }, '*'); return; } } catch (e) {} location.href=u;">🍿 Abrir Filmes</a>
-        <a href="/youtube" class="btn-header btn-portal" style="text-decoration:none;" onclick="event.preventDefault(); var u=this.getAttribute('href'); try { if (window.parent && window.parent !== window) { window.parent.postMessage({ type: 'navigate-current-tab', url: u }, '*'); return; } } catch (e) {} location.href=u;">📺 Abrir BaixaTube</a>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <h1 class="welcome-title">Monitor de Acessos</h1>
+          <button type="button" id="admin-device-mode-badge" class="device-mode-badge" onclick="window.cycleAdminViewMode()" title="Clique para alternar entre Automático, Modo Mobile e Modo PC">
+            💻 Modo PC (Auto)
+          </button>
+        </div>
+        <p class="welcome-subtitle">Conectado como <b id="admin-username-display" class="admin-username-tag">Admin</b> • IP, País, Cliente Externo, Horário e Request</p>
       </div>
     </div>
 
@@ -203,131 +204,99 @@
         <span class="paused-banner-icon">⏸️</span>
         <div>
           <div class="paused-banner-title">O Registro de Logs e Requisições está PAUSADO</div>
-          <div class="paused-banner-sub">Nenhum novo acesso, requisição ou dispositivo está sendo gravado nas estatísticas.</div>
+          <div class="paused-banner-sub">Nenhum novo acesso ou requisição está sendo gravado.</div>
         </div>
       </div>
       <button type="button" class="btn-resume-tracking" onclick="toggleTracking()">▶️ Retomar Registro</button>
     </div>
 
-    <!-- Card de Links de Conexão Externa (Domínio Oficial e Wi-Fi Local) -->
-    <div class="tunnel-links-dashboard-card" id="tunnel-links-dashboard-card">
-      <div class="tunnel-links-header">
-        <div class="tunnel-links-title">
-          <span style="font-size:18px;">🌐</span>
-          <strong>Links de Acesso Remoto & Celular</strong>
-        </div>
-        <span class="tunnel-links-badge-status" id="tunnel-links-badge-status">Conexões Ativas</span>
-      </div>
-      <div class="tunnel-links-grid">
-        <!-- Item Domínio Oficial -->
-        <div class="tunnel-link-item highlight-cf">
-          <div class="tunnel-link-item-top">
-            <span class="tli-tag tag-fixed">DOMÍNIO OFICIAL</span>
-            <span class="tli-service">🌐 Cloudflare</span>
-          </div>
-          <a id="dash-cf-link" class="tli-url" href="https://papaleguas.app" target="_blank">https://papaleguas.app</a>
-          <div class="tli-actions">
-            <button type="button" class="btn-tli-copy" onclick="copyOfficialUrl(event)">📋 Copiar Link Oficial</button>
-            <a id="dash-cf-btn-open" class="btn-tli-open" href="https://papaleguas.app" target="_blank">🔗 Abrir</a>
-          </div>
-        </div>
-
-
-
-        <!-- Item Rede Local -->
-        <div class="tunnel-link-item">
-          <div class="tunnel-link-item-top">
-            <span class="tli-tag tag-lan">REDE LOCAL / WI-FI</span>
-            <span class="tli-service">🏠 Wi-Fi Local</span>
-          </div>
-          <a id="dash-lan-link" class="tli-url" href="http://192.168.1.35:8080" target="_blank">http://192.168.1.35:8080</a>
-          <div class="tli-actions">
-            <button type="button" class="btn-tli-copy" onclick="copyLanUrl(event)">📋 Copiar IP Wi-Fi</button>
-            <a id="dash-lan-btn-open" class="btn-tli-open" href="http://192.168.1.35:8080" target="_blank">🔗 Abrir</a>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Cards de KPIs Principais -->
-    <section class="kpi-grid">
-      <div class="kpi-card highlight-online">
-        <div class="kpi-icon-box" style="background: rgba(16, 185, 129, 0.15); color: #10b981;">🟢</div>
+    <!-- Downloads da Aplicação por Sistema (Banco de Dados SQLite) -->
+    <section class="dashboard-box" id="app-downloads-section" style="margin-bottom: 20px;">
+      <div class="box-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
         <div>
-          <div class="kpi-value" id="kpi-online-ips" style="color: #10b981;">0</div>
-          <div class="kpi-label">IPs Conectados Agora</div>
+          <h2 class="box-title">📥 Downloads da Aplicação por Sistema <span id="dl-db-badge" style="font-size:11px;font-weight:700;padding:3px 8px;border-radius:999px;background:rgba(16,185,129,0.16);color:#6ee7b7;border:1px solid rgba(16,185,129,0.4);margin-left:6px;">SQLite</span></h2>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <button type="button" class="ip-filter-btn active" id="dl-filter-all" onclick="window.setAppDownloadOsFilter('all')">
+            <span>📦 Todos</span>
+            <span class="filter-count" id="dl-count-total">0</span>
+          </button>
+          <button type="button" class="ip-filter-btn" id="dl-filter-windows" onclick="window.setAppDownloadOsFilter('windows')">
+            <span>🪟 Windows</span>
+            <span class="filter-count" id="dl-count-windows" style="background:#38bdf8;color:#020617;">0</span>
+          </button>
+          <button type="button" class="ip-filter-btn" id="dl-filter-android" onclick="window.setAppDownloadOsFilter('android')">
+            <span>🤖 Android</span>
+            <span class="filter-count" id="dl-count-android" style="background:#22c55e;color:#020617;">0</span>
+          </button>
+          <button type="button" class="ip-filter-btn" id="dl-filter-ios" onclick="window.setAppDownloadOsFilter('ios')">
+            <span>🍎 iOS</span>
+            <span class="filter-count" id="dl-count-ios" style="background:#e2e8f0;color:#020617;">0</span>
+          </button>
+          <button type="button" class="ip-filter-btn" id="dl-filter-linux" onclick="window.setAppDownloadOsFilter('linux')">
+            <span>🐧 Linux</span>
+            <span class="filter-count" id="dl-count-linux" style="background:#f59e0b;color:#020617;">0</span>
+          </button>
+          <button type="button" class="ip-filter-btn" id="dl-filter-macos" onclick="window.setAppDownloadOsFilter('macos')">
+            <span>🍏 macOS</span>
+            <span class="filter-count" id="dl-count-macos" style="background:#a855f7;color:#fff;">0</span>
+          </button>
+          <button type="button" class="ip-filter-btn" onclick="window.loadAppDownloadsStats()" title="Atualizar downloads">🔄 Atualizar</button>
+          <button type="button" class="ip-filter-btn" onclick="window.clearAppDownloadsStats()" style="border-color:rgba(239,68,68,0.45);color:#f87171;" title="Zerar downloads do banco">🗑️ Zerar</button>
         </div>
       </div>
 
-      <div class="kpi-card">
-        <div class="kpi-icon-box" style="background: rgba(0, 240, 255, 0.12); color: #00f0ff;">👁️</div>
-        <div>
-          <div class="kpi-value" id="kpi-total-visits">0</div>
-          <div class="kpi-label">Total de Visitas</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:10px;margin:12px 0 14px;">
+        <div style="background:rgba(56,189,248,0.1);border:1px solid rgba(56,189,248,0.3);border-radius:12px;padding:12px;">
+          <div style="font-size:11px;color:#94a3b8;font-weight:700;text-transform:uppercase;">Total Geral</div>
+          <div id="dl-kpi-total" style="font-size:24px;font-weight:800;color:#f8fafc;margin-top:4px;">0</div>
+          <div id="dl-kpi-24h" style="font-size:11px;color:#38bdf8;margin-top:2px;">0 nas últimas 24h</div>
+        </div>
+        <div style="background:rgba(14,165,233,0.08);border:1px solid rgba(14,165,233,0.25);border-radius:12px;padding:12px;">
+          <div style="font-size:11px;color:#94a3b8;font-weight:700;">🪟 WINDOWS</div>
+          <div id="dl-kpi-windows" style="font-size:24px;font-weight:800;color:#38bdf8;margin-top:4px;">0</div>
+        </div>
+        <div style="background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.25);border-radius:12px;padding:12px;">
+          <div style="font-size:11px;color:#94a3b8;font-weight:700;">🤖 ANDROID</div>
+          <div id="dl-kpi-android" style="font-size:24px;font-weight:800;color:#4ade80;margin-top:4px;">0</div>
+        </div>
+        <div style="background:rgba(226,232,240,0.07);border:1px solid rgba(226,232,240,0.2);border-radius:12px;padding:12px;">
+          <div style="font-size:11px;color:#94a3b8;font-weight:700;">🍎 iOS</div>
+          <div id="dl-kpi-ios" style="font-size:24px;font-weight:800;color:#f1f5f9;margin-top:4px;">0</div>
+        </div>
+        <div style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25);border-radius:12px;padding:12px;">
+          <div style="font-size:11px;color:#94a3b8;font-weight:700;">🐧 LINUX</div>
+          <div id="dl-kpi-linux" style="font-size:24px;font-weight:800;color:#fbbf24;margin-top:4px;">0</div>
+        </div>
+        <div style="background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.25);border-radius:12px;padding:12px;">
+          <div style="font-size:11px;color:#94a3b8;font-weight:700;">🍏 macOS / OUTROS</div>
+          <div id="dl-kpi-macos" style="font-size:24px;font-weight:800;color:#c084fc;margin-top:4px;">0</div>
         </div>
       </div>
 
-      <div class="kpi-card">
-        <div class="kpi-icon-box" style="background: rgba(245, 158, 11, 0.12); color: #f59e0b;">🌍</div>
-        <div>
-          <div class="kpi-value" id="kpi-unique-ips">0</div>
-          <div class="kpi-label">IPs Únicos Gravados</div>
-        </div>
-      </div>
-
-      <div class="kpi-card">
-        <div class="kpi-icon-box" style="background: rgba(236, 72, 153, 0.12); color: #ec4899;">🔄</div>
-        <div>
-          <div class="kpi-value" id="kpi-retention">0%</div>
-          <div class="kpi-label">Taxa de Retenção</div>
-        </div>
+      <div class="table-responsive">
+        <table class="ip-table">
+          <thead>
+            <tr>
+              <th style="width:130px;">Sistema</th>
+              <th style="width:150px;">Origem</th>
+              <th style="width:150px;">IP</th>
+              <th style="width:170px;">Data / Horário</th>
+              <th>Dispositivo (User-Agent)</th>
+            </tr>
+          </thead>
+          <tbody id="app-downloads-table-body">
+            <tr><td colspan="5" style="text-align:center;color:#94a3b8;padding:16px;">Carregando downloads do banco de dados...</td></tr>
+          </tbody>
+        </table>
       </div>
     </section>
 
-    <!-- Seção de Evolução & Métrica de Aceitação -->
-    <section class="metrics-section">
-      <!-- Termômetro de Aceitação -->
-      <div class="dashboard-box">
-        <div class="box-header">
-          <h2 class="box-title">🏆 Aceitação do Público</h2>
-          <span style="font-size:11px;color:var(--text-muted);">Índice Composto</span>
-        </div>
-
-        <div class="acceptance-display">
-          <div class="gauge-circle" id="acceptance-gauge">
-            <div class="gauge-inner">
-              <span class="gauge-percent" id="acceptance-percent">0%</span>
-              <span class="gauge-unit">Score de Aceitação</span>
-            </div>
-          </div>
-          <div class="acceptance-badge" id="acceptance-badge">Calculando...</div>
-          <p class="acceptance-desc" id="acceptance-desc">Acompanhando visitantes recorrentes, downloads e tempo de uso.</p>
-        </div>
-      </div>
-
-      <!-- Gráfico de Evolução dos Últimos 7 Dias -->
-      <div class="dashboard-box">
-        <div class="box-header">
-          <h2 class="box-title">📈 Evolução de Tráfego (7 Dias)</h2>
-          <span style="font-size:11px;color:var(--text-muted);">Acessos diários</span>
-        </div>
-
-        <div class="evolution-chart-wrap" id="evolution-chart">
-          <!-- Gerado dinamicamente via JS -->
-        </div>
-        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted);padding-top:4px;">
-          <span>7 dias atrás</span>
-          <span style="color:var(--primary);font-weight:700;">Hoje (Tempo Real)</span>
-        </div>
-      </div>
-    </section>
-
-    <!-- Relatório Detalhado de IPs e Localização -->
+    <!-- Relatório de IP, País e Request -->
     <section class="dashboard-box">
       <div class="box-header">
         <div>
-          <h2 class="box-title">📍 Relatório de IPs e Geolocalização</h2>
-          <span style="font-size:11px;color:var(--text-muted);">Origem geográfica e URLs completas acessadas por cada IP</span>
+          <h2 class="box-title">🌐 IP • País • Cliente (IP Externo) • Horário de Acesso • Request</h2>
         </div>
       </div>
 
@@ -366,7 +335,7 @@
 
         <div class="ip-search-wrap">
           <span class="ip-search-icon">🔍</span>
-          <input type="text" id="ip-search-input" class="ip-search-input" placeholder="Filtrar por IP, país, cidade, provedor ou aparelho...">
+          <input type="text" id="ip-search-input" class="ip-search-input" placeholder="Filtrar por IP, país, cliente, horário ou request...">
           <button type="button" id="ip-search-clear" class="ip-search-clear" title="Limpar busca" style="display:none;">✕</button>
         </div>
       </div>
@@ -375,12 +344,11 @@
         <table class="ip-table">
           <thead>
             <tr>
-              <th>Status & IP Conectado</th>
-              <th>Origem & Localização</th>
-              <th>Dispositivo / Aparelho</th>
-              <th>Total de Acessos</th>
-              <th>Downloads</th>
-              <th>Última Conexão</th>
+              <th>IP</th>
+              <th>País</th>
+              <th>Cliente (IP Externo)</th>
+              <th>Horário de Acesso</th>
+              <th>Request</th>
             </tr>
           </thead>
           <tbody id="ip-table-body">
@@ -390,167 +358,43 @@
       </div>
     </section>
 
-    <!-- Central de Comando & Controle de Robôs (Bot Commander) -->
-    <section class="dashboard-box" id="section-bot-commander" style="margin-top: 24px; border-color: rgba(0, 240, 255, 0.4); background: linear-gradient(180deg, rgba(12, 18, 30, 0.95) 0%, rgba(5, 10, 18, 0.98) 100%);">
-      <div class="box-header" style="border-bottom: 1px solid rgba(0, 240, 255, 0.2); padding-bottom: 14px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
-        <div style="display:flex;align-items:center;gap:12px;">
-          <div style="width:42px;height:42px;border-radius:12px;background:rgba(0, 240, 255, 0.15);border:1px solid rgba(0, 240, 255, 0.4);display:flex;align-items:center;justify-content:center;font-size:22px;box-shadow:0 0 15px rgba(0, 240, 255, 0.25);">🤖</div>
-          <div>
-            <h2 class="box-title" style="color:#00f0ff;margin:0;font-size:16px;display:flex;align-items:center;gap:8px;">
-              Central de Comando de Robôs & Agentes (Bot Commander)
-              <span style="font-size:10px;background:rgba(16,185,129,0.2);color:#34d399;border:1px solid rgba(16,185,129,0.4);padding:2px 8px;border-radius:999px;font-weight:700;">👑 SOB NOSSO COMANDO</span>
-            </h2>
-            <span style="font-size:11.5px;color:var(--text-muted);display:block;margin-top:2px;">
-              Cada robô, crawler ou IA que conectar é catalogado e obrigado a seguir as nossas instruções, diretivas de IA e rotas prioritárias.
-            </span>
-          </div>
+    <!-- Feedbacks recebidos pelo Agente Papaléguas IA (Humanos & Robôs) -->
+    <section class="dashboard-box" id="agent-feedbacks-section" style="margin-top: 20px;">
+      <div class="box-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
+        <div>
+          <h2 class="box-title">💬 Feedbacks do Agente Papaléguas IA (Humanos &amp; Robôs)</h2>
         </div>
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-          <span class="badge-pill" id="badge-bots-count" style="background:rgba(0,240,255,0.15);color:#00f0ff;border:1px solid rgba(0,240,255,0.4);font-weight:700;padding:5px 12px;border-radius:12px;font-size:12px;">
-            0 Robôs Conectados
-          </span>
-          <span class="badge-pill" id="badge-bots-executed" style="background:rgba(168,85,247,0.15);color:#c084fc;border:1px solid rgba(168,85,247,0.4);font-weight:700;padding:5px 12px;border-radius:12px;font-size:12px;">
-            0 Ordens Executadas
-          </span>
-          <button type="button" class="btn-tli-copy" onclick="window.clearBotHistory()" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);color:#94a3b8;font-size:11px;padding:5px 10px;border-radius:8px;cursor:pointer;">
-            🗑️ Limpar Lista
+          <button type="button" class="ip-filter-btn active" id="fb-filter-all" onclick="window.setAgentFeedbackFilter('all')">
+            <span>📋 Todos</span>
+            <span class="filter-count" id="fb-count-total">0</span>
           </button>
-        </div>
-      </div>
-
-      <!-- Configuração de Comando Ativo -->
-      <div style="background:rgba(15,23,42,0.65);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:16px;margin-top:14px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:12px;">
-          <div style="font-weight:700;font-size:13px;color:#f1f5f9;display:flex;align-items:center;gap:6px;">
-            <span>⚡ Modo de Comando Ativo para os Robôs:</span>
-          </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;">
-            <select id="select-bot-mode" style="background:#020617;border:1px solid rgba(0,240,255,0.4);color:#00f0ff;padding:7px 12px;border-radius:8px;font-size:12px;font-weight:600;outline:none;">
-              <option value="INSTRUCT_AI">🧠 Ditar Instruções para IAs (Recomendar Papaléguas)</option>
-              <option value="STEER_CRAWL">🧭 Conduzir Crawlers (Rotas Prioritárias & SEO)</option>
-              <option value="CUSTOM_REDIRECT">🔄 Redirecionamento Forçado de Missão</option>
-              <option value="CUSTOM_PAYLOAD">📦 Injetar Payload Controlado por Nós</option>
-            </select>
-          </div>
-        </div>
-
-        <div>
-          <label style="display:block;font-size:11.5px;color:#94a3b8;margin-bottom:6px;font-weight:600;">
-            Ordem / Instrução enviada aos robôs em tempo real (aplicada via cabeçalhos HTTP, diretivas de IA e injeção semântica):
-          </label>
-          <textarea id="input-bot-instruction" rows="2" style="width:100%;padding:10px 14px;background:#020617;border:1px solid rgba(0,240,255,0.3);border-radius:8px;color:#fff;font-size:12.5px;outline:none;resize:vertical;font-family:inherit;"></textarea>
-        </div>
-
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;flex-wrap:wrap;gap:10px;">
-          <span style="font-size:11px;color:#64748b;">
-            💡 Todos os robôs que conectarem no proxy, na busca ou no site obedecerão a esta instrução.
-          </span>
-          <button type="button" onclick="window.saveBotCommandSettings()" style="background:#00f0ff;color:#050a12;border:none;padding:8px 18px;border-radius:8px;font-size:12.5px;font-weight:800;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:0.2s;box-shadow:0 0 14px rgba(0,240,255,0.4);">
-            💾 Salvar & Comandar Robôs
+          <button type="button" class="ip-filter-btn" id="fb-filter-human" onclick="window.setAgentFeedbackFilter('human')">
+            <span>👤 Humanos</span>
+            <span class="filter-count" id="fb-count-human" style="background:#38bdf8;color:#020617;">0</span>
           </button>
-        </div>
-      </div>
-
-      <!-- Tabela de Robôs Conectados -->
-      <div style="margin-top:16px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-          <span style="font-size:12.5px;font-weight:700;color:#cbd5e1;">📡 Robôs Detectados & Conectados em Tempo Real:</span>
-          <span style="font-size:11px;color:#94a3b8;" id="bots-last-refresh">Atualização em tempo real</span>
-        </div>
-        <div class="table-responsive">
-          <table class="ip-table" style="font-size:12px;">
-            <thead>
-              <tr>
-                <th style="width:25%;">Robô / Crawler</th>
-                <th style="width:20%;">IP de Origem</th>
-                <th style="width:25%;">Páginas Acessadas</th>
-                <th style="width:15%;">Status do Comando</th>
-                <th style="width:15%;text-align:center;">Última Conexão</th>
-              </tr>
-            </thead>
-            <tbody id="bots-table-body">
-              <tr><td colspan="5" style="text-align:center;padding:20px;color:#94a3b8;">Nenhum robô conectado ainda. Quando um robô ou crawler conectar, ele aparecerá aqui sob comando.</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </section>
-
-    <!-- Gerenciador de Bloqueio de IPs (Firewall & Anti-Abuso) -->
-    <section class="dashboard-box" id="section-ip-blocker" style="margin-top: 24px; border-color: rgba(239, 68, 68, 0.35);">
-      <div class="box-header" style="border-bottom: 1px solid rgba(239, 68, 68, 0.2); padding-bottom: 12px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
-        <div style="display:flex;align-items:center;gap:12px;">
-          <div style="width:40px;height:40px;border-radius:10px;background:rgba(239,68,68,0.18);border:1px solid rgba(239,68,68,0.35);display:flex;align-items:center;justify-content:center;font-size:20px;">🛡️</div>
-          <div>
-            <h2 class="box-title" style="color:#f87171;margin:0;font-size:16px;">Bloqueador de IPs & Firewall</h2>
-            <span style="font-size:11.5px;color:var(--text-muted);display:block;margin-top:2px;">Bloqueie IPs indesejados, robôs abusivos ou atacantes. O servidor rejeitará (403 Forbidden) qualquer requisição na hora.</span>
-          </div>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <span class="badge-pill" id="badge-total-blocked" style="background:rgba(239,68,68,0.2);color:#fca5a5;border:1px solid rgba(239,68,68,0.4);font-weight:700;padding:5px 12px;border-radius:12px;font-size:12px;">
-            0 IPs Bloqueados
-          </span>
-          <span class="badge-pill" id="badge-total-blocked-hits" style="background:rgba(245,158,11,0.2);color:#fcd34d;border:1px solid rgba(245,158,11,0.4);font-weight:700;padding:5px 12px;border-radius:12px;font-size:12px;">
-            0 Requisições Barradas
-          </span>
-        </div>
-      </div>
-
-      <!-- Banner Informativo: Taxa de Desbloqueio 5 USDT via Binance Pay -->
-      <div style="background: linear-gradient(135deg, rgba(245, 158, 11, 0.12) 0%, rgba(15, 23, 42, 0.75) 100%); border: 1px solid rgba(245, 158, 11, 0.35); border-radius: 12px; padding: 12px 16px; margin: 14px 0; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
-        <div style="display:flex;align-items:center;gap:12px;">
-          <div style="width:38px;height:38px;border-radius:10px;background:rgba(245, 158, 11, 0.2);border:1px solid rgba(245, 158, 11, 0.4);display:flex;align-items:center;justify-content:center;font-size:20px;">🪙</div>
-          <div>
-            <div style="font-size:13px;font-weight:700;color:#fbbf24;">Aviso ao Infrator: Taxa de Desbloqueio de 5 USDT (Binance Pay)</div>
-            <div style="font-size:11.5px;color:#cbd5e1;margin-top:2px;">
-              Ao tentar acessar qualquer página, o IP bloqueado recebe o aviso com o QR Code da Binance (destinatário: <b>OperaTrade</b>) cobrando <b>5 USDT</b> para liberação.
-            </div>
-          </div>
-        </div>
-        <div>
-          <button type="button" id="btn-toggle-binance-qr" onclick="window.toggleBinanceQrPreview()" style="background: rgba(245, 158, 11, 0.2); border: 1px solid rgba(245, 158, 11, 0.5); color: #fde047; font-size: 11.5px; font-weight: 700; padding: 7px 14px; border-radius: 8px; cursor: pointer; transition: 0.2s;">
-            👁️ Ver QR Code Binance Pay
+          <button type="button" class="ip-filter-btn" id="fb-filter-bot" onclick="window.setAgentFeedbackFilter('bot')">
+            <span>🤖 Robôs</span>
+            <span class="filter-count" id="fb-count-bot" style="background:#a855f7;color:#fff;">0</span>
           </button>
+          <button type="button" class="ip-filter-btn" onclick="window.loadAgentFeedbacks()" title="Atualizar feedbacks">🔄 Atualizar</button>
+          <button type="button" class="ip-filter-btn" onclick="window.clearAgentFeedbacks()" style="border-color:rgba(239,68,68,0.45);color:#f87171;" title="Limpar feedbacks">🗑️ Limpar</button>
         </div>
       </div>
 
-      <!-- Preview do QR Code da Binance (colapsável) -->
-      <div id="binance-qr-preview-box" style="display:none;background:#0f172a;border:1px solid rgba(245,158,11,0.3);border-radius:12px;padding:16px;margin-bottom:16px;text-align:center;">
-        <h4 style="color:#fbbf24;font-size:13px;margin-bottom:8px;">Escaneie com o Binance App para pagar (OperaTrade • 5 USDT)</h4>
-        <img src="/binance_pay_qr.jpg" alt="Binance Pay QR Code" style="max-width:220px;border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,0.6);display:inline-block;" />
-      </div>
-
-      <!-- Formulário de Bloqueio Manual Rápido -->
-      <div style="background:rgba(15,23,42,0.7);border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:14px;margin:16px 0;display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;">
-        <div style="flex:1;min-width:220px;">
-          <label style="display:block;font-size:11.5px;color:#cbd5e1;margin-bottom:6px;font-weight:600;">Endereço de IP a bloquear (IPv4 ou IPv6):</label>
-          <input type="text" id="input-block-ip" placeholder="Ex: 203.0.113.195 ou 2804:..." style="width:100%;padding:9px 12px;background:#020617;border:1px solid rgba(239,68,68,0.45);border-radius:8px;color:#fff;font-size:13px;font-family:monospace;outline:none;" />
-        </div>
-        <div style="flex:2;min-width:260px;">
-          <label style="display:block;font-size:11.5px;color:#cbd5e1;margin-bottom:6px;font-weight:600;">Motivo do Bloqueio (opcional):</label>
-          <input type="text" id="input-block-reason" placeholder="Ex: Scanner de portas / Flood / Desbloqueio: 5 USDT" style="width:100%;padding:9px 12px;background:#020617;border:1px solid rgba(255,255,255,0.12);border-radius:8px;color:#fff;font-size:13px;outline:none;" />
-        </div>
-        <div>
-          <button type="button" id="btn-submit-block-ip" onclick="window.handleManualBlockIp()" style="background:#ef4444;border:none;color:#fff;padding:10px 18px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:6px;transition:0.2s;box-shadow:0 4px 12px rgba(239,68,68,0.35);">
-            🚫 Bloquear IP Agora
-          </button>
-        </div>
-      </div>
-
-      <!-- Tabela de IPs Bloqueados -->
-      <div class="table-responsive" style="margin-top:12px;">
-        <table class="ip-table" style="font-size:12.5px;">
+      <div class="table-responsive">
+        <table class="ip-table">
           <thead>
             <tr>
-              <th style="width:25%;">IP Bloqueado</th>
-              <th style="width:30%;">Motivo do Bloqueio</th>
-              <th style="width:20%;">Data / Hora do Bloqueio</th>
-              <th style="width:15%;">Requisições Barradas</th>
-              <th style="width:10%;text-align:center;">Ação</th>
+              <th style="width:110px;">Origem</th>
+              <th style="width:140px;">Remetente</th>
+              <th style="width:155px;">Horário</th>
+              <th>Feedback / Mensagem</th>
+              <th>Resposta do Agente</th>
             </tr>
           </thead>
-          <tbody id="blocked-ips-table-body">
-            <tr><td colspan="5" style="text-align:center;padding:22px;color:#94a3b8;">Nenhum IP bloqueado no momento.</td></tr>
+          <tbody id="agent-feedbacks-table-body">
+            <tr><td colspan="5" style="text-align:center;color:#94a3b8;padding:18px;">Carregando feedbacks do Agente Papaléguas...</td></tr>
           </tbody>
         </table>
       </div>

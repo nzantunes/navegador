@@ -36,15 +36,18 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 14px 24px;
-  background: rgba(11, 17, 30, 0.88);
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 12px 20px;
+  width: 100%;
+  background: rgba(11, 17, 30, 0.92);
   backdrop-filter: blur(14px);
   border-bottom: 1px solid var(--card-border);
   position: sticky;
   top: 0;
   z-index: 100;
   transition: all 0.2s ease;
-  padding-top: max(14px, env(safe-area-inset-top));
+  padding-top: max(12px, env(safe-area-inset-top));
 }
 
 .admin-header-top {
@@ -165,7 +168,11 @@ body {
 .admin-header-actions {
   display: flex;
   align-items: center;
-  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .status-indicator {
@@ -702,13 +709,13 @@ body {
 
 /* Painel Principal (Dashboard) */
 .admin-main {
-  max-width: 1280px;
+  max-width: 1440px;
   width: 100%;
   margin: 0 auto;
-  padding: 24px 16px;
+  padding: 20px;
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 20px;
   flex: 1;
 }
 
@@ -732,6 +739,116 @@ body {
   font-weight: 900;
   color: #fff;
   letter-spacing: -0.3px;
+}
+
+.device-mode-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  background: rgba(56, 189, 248, 0.12);
+  color: #7dd3fc;
+  transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+
+.device-mode-badge:hover {
+  background: rgba(56, 189, 248, 0.22);
+  transform: translateY(-1px);
+}
+
+body.mode-mobile .device-mode-badge {
+  border-color: rgba(16, 185, 129, 0.45);
+  background: rgba(16, 185, 129, 0.14);
+  color: #34d399;
+}
+
+body.force-mobile .ip-table {
+  display: block;
+  width: 100%;
+  border: none;
+}
+
+body.force-mobile .ip-table thead {
+  display: none;
+}
+
+body.force-mobile .ip-table tbody {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+}
+
+body.force-mobile .ip-table tr.ip-row-card {
+  display: flex;
+  flex-direction: column;
+  background: rgba(15, 23, 42, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  padding: 14px;
+  gap: 10px;
+}
+
+body.force-mobile .ip-table td {
+  padding: 0;
+  border: none;
+  display: block;
+  width: 100%;
+}
+
+body.force-mobile .ip-table td.td-server,
+body.force-mobile .ip-table td.td-time {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+  font-size: 12px;
+}
+
+body.force-mobile .ip-table td.td-server::before,
+body.force-mobile .ip-table td.td-time::before {
+  content: attr(data-label);
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+body.force-pc .ip-table {
+  display: table !important;
+  width: 100%;
+}
+
+body.force-pc .ip-table thead {
+  display: table-header-group !important;
+}
+
+body.force-pc .ip-table tbody {
+  display: table-row-group !important;
+}
+
+body.force-pc .ip-table tr.ip-row-card {
+  display: table-row !important;
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+}
+
+body.force-pc .ip-table td {
+  display: table-cell !important;
+  width: auto !important;
+  padding: 12px 14px !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04) !important;
+}
+
+body.force-pc .ip-table td.td-server::before,
+body.force-pc .ip-table td.td-time::before {
+  content: none !important;
 }
 
 .welcome-subtitle {
@@ -949,14 +1066,23 @@ body {
 .table-responsive {
   width: 100%;
   overflow-x: auto;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 .ip-table {
   width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
   text-align: left;
   font-size: 13px;
 }
+
+.ip-table th:nth-child(1) { width: 22%; }
+.ip-table th:nth-child(2) { width: 14%; }
+.ip-table th:nth-child(3) { width: 26%; }
+.ip-table th:nth-child(4) { width: 12%; }
+.ip-table th:nth-child(5) { width: 26%; }
 
 .ip-table th {
   padding: 12px 14px;
@@ -970,13 +1096,51 @@ body {
 }
 
 .ip-table td {
-  padding: 12px 14px;
+  padding: 12px 12px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
   vertical-align: middle;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .ip-table tr:hover td {
   background: rgba(255, 255, 255, 0.02);
+}
+
+.server-name-badge {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+  font-family: monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: #7dd3fc;
+  background: rgba(56, 189, 248, 0.1);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  padding: 4px 9px;
+  border-radius: 6px;
+}
+
+.access-time-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  white-space: nowrap;
+}
+
+.access-time-hour {
+  font-family: monospace;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #e2e8f0;
+}
+
+.access-time-date {
+  font-size: 11px;
+  color: #94a3b8;
 }
 
 .ip-badge {
@@ -987,6 +1151,10 @@ body {
   padding: 3px 8px;
   border-radius: 6px;
   font-size: 12px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ip-badge.ip-badge-online {
@@ -1309,7 +1477,8 @@ body {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  max-width: 360px;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .urls-preview-chips {
@@ -1329,6 +1498,14 @@ body {
   align-items: center;
   gap: 5px;
   max-width: 100%;
+  overflow: hidden;
+}
+
+.url-chip-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 
 a.url-chip.linkable {
@@ -2348,6 +2525,7 @@ a.url-chip.linkable:hover .url-chip-path {
 
   .ip-table td.td-visits,
   .ip-table td.td-downloads,
+  .ip-table td.td-server,
   .ip-table td.td-time {
     display: flex;
     justify-content: space-between;
@@ -2358,6 +2536,7 @@ a.url-chip.linkable:hover .url-chip-path {
 
   .ip-table td.td-visits::before,
   .ip-table td.td-downloads::before,
+  .ip-table td.td-server::before,
   .ip-table td.td-time::before {
     content: attr(data-label);
     font-size: 10.5px;

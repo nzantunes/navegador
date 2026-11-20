@@ -2,8 +2,11 @@
  * Cache LRU (Least Recently Used) compatível com a interface Map.
  * Evita crescimento ilimitado de memória em servidores 24/7 e promove itens acessados.
  */
+const activeLruCaches = new Set();
+
 function createLruCache({ maxEntries = 500, ttlMs = 0 } = {}) {
-  const limit = Math.max(1, Number(maxEntries) || 500);
+  const baseLimit = Math.max(1, Number(maxEntries) || 500);
+  let limit = baseLimit;
   const ttl = Math.max(0, Number(ttlMs) || 0);
   const store = new Map();
 
@@ -13,9 +16,12 @@ function createLruCache({ maxEntries = 500, ttlMs = 0 } = {}) {
     return ts > 0 && (now - ts > ttl);
   }
 
-  return {
+  const cacheObj = {
     get size() {
       return store.size;
+    },
+    get maxEntries() {
+      return limit;
     },
     has(key) {
       if (!store.has(key)) return false;
@@ -77,10 +83,38 @@ function createLruCache({ maxEntries = 500, ttlMs = 0 } = {}) {
       }
       return removed;
     },
+    setScale(scaleRatio = 1) {
+      const ratio = Math.max(0.25, Math.min(2, Number(scaleRatio) || 1));
+      limit = Math.max(10, Math.round(baseLimit * ratio));
+      let evicted = 0;
+      while (store.size > limit) {
+        const oldestKey = store.keys().next().value;
+        if (oldestKey === undefined) break;
+        store.delete(oldestKey);
+        evicted += 1;
+      }
+      return evicted;
+    },
     [Symbol.iterator]() {
       return store[Symbol.iterator]();
     }
   };
+  activeLruCaches.add(cacheObj);
+  return cacheObj;
 }
 
-module.exports = { createLruCache };
+function applyHardwareTunerToCaches(recommendedLimit = 5000, shedLoad = false) {
+  const ratio = shedLoad ? 0.5 : (recommendedLimit >= 10000 ? 1.25 : 1.0);
+  let entriesBefore = 0;
+  let entriesAfter = 0;
+  let totalRemoved = 0;
+  for (const c of activeLruCaches) {
+    entriesBefore += c.size;
+    totalRemoved += c.pruneExpired();
+    totalRemoved += c.setScale(ratio);
+    entriesAfter += c.size;
+  }
+  return { cachesCount: activeLruCaches.size, entriesBefore, entriesAfter, totalRemoved, shedLoad, recommendedLimit };
+}
+
+module.exports = { createLruCache, applyHardwareTunerToCaches };

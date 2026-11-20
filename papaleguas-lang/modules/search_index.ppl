@@ -1,0 +1,77 @@
+@policy(max_loops=200, no_network=true, zero_traces=true)
+
+// Camada nativa de indexação e deduplicação de URLs em Papaléguas (.ppl)
+
+struct IndexEntry {
+  url_hash: u64,
+  bucket: u64,
+  priority: u64
+}
+
+export fn url_hash_fnv1a(url: str) -> u64 {
+  return hw.hash_fnv1a(url);
+}
+
+export fn url_bucket(url: str, num_buckets: u64) -> u64 {
+  if num_buckets == 0 {
+    return 0;
+  }
+  let h: u64 = hw.hash_fnv1a(url);
+  return h % num_buckets;
+}
+
+export fn batch_slot_score(url: str, clicks: u64, freshness_hours: u64) -> u64 {
+  let e: IndexEntry = IndexEntry {
+    url_hash: hw.hash_fnv1a(url),
+    bucket: (hw.hash_fnv1a(url) % 8),
+    priority: 10
+  };
+  let weights: [8]u64 = [20, 18, 16, 14, 12, 10, 8, 6];
+  let base: u64 = weights[e.bucket];
+  let fresh_bonus: u64 = 0;
+  if freshness_hours <= 24 {
+    fresh_bonus = 15;
+  } else if freshness_hours <= 168 {
+    fresh_bonus = 6;
+  }
+  return base + e.priority + min_u64(clicks, 50) + fresh_bonus;
+}
+
+export fn canonical_url_hash(url: str) -> u64 {
+  return str.hash_fnv1a_ci(str.trim(url));
+}
+
+export fn should_index_url(url: str, title_len: u64) -> bool {
+  if title_len < 3 {
+    return false;
+  }
+  let u: str = str.trim(url);
+  if str.len(u) < 12 {
+    return false;
+  }
+  if not str.starts_with_ci(u, "https://") and not str.starts_with_ci(u, "http://") {
+    return false;
+  }
+  if str.contains_ci(u, "doubleclick.net") or str.contains_ci(u, "googlesyndication.com") or str.contains_ci(u, "javascript:") {
+    return false;
+  }
+  return true;
+}
+
+export fn fast_dedup_hash(title: str, host: str) -> u64 {
+  let nt: str = str.to_lower(str.fold_diacritics(str.trim(title)));
+  let nh: str = str.to_lower(str.trim(host));
+  let combined: str = str.concat(str.concat(nh, "|"), nt);
+  return hw.hash_fnv1a(combined);
+}
+
+export fn is_fresh_cache_entry(age_ms: u64, ttl_ms: u64, pressure_pct: u64) -> bool {
+  if ttl_ms == 0 {
+    return false;
+  }
+  let eff_ttl: u64 = ttl_ms;
+  if pressure_pct >= 80 {
+    eff_ttl = ttl_ms + (ttl_ms / 2);
+  }
+  return age_ms < eff_ttl;
+}

@@ -10,6 +10,19 @@
 
 const path = require('path');
 const fs = require('fs');
+let pplRuntime = null;
+try { pplRuntime = require('../papaleguas-lang/runtime'); } catch (e) {}
+function getPplMod(name) {
+  return pplRuntime && typeof pplRuntime.loadNativeModule === 'function' ? pplRuntime.loadNativeModule(name) : null;
+}
+
+const OS_META_TABLE = {
+  ios: { osId: 'ios', osName: 'iPhone / iPad (iOS)', shortLabel: 'Baixar App iOS', icon: '🍎', downloadUrl: '/download/app?os=ios', fileName: 'Papaleguas-iOS.mobileconfig', badge: 'WebClip Nativo iOS • Tela Cheia', isMobile: true },
+  android: { osId: 'android', osName: 'Android (Smartphone / Tablet / TV)', shortLabel: 'Baixar App Android', icon: '🤖', downloadUrl: '/download/app?os=android', fileName: 'Papaleguas-Android-Installer.html', badge: 'App Nativo Android • Sem Anúncios', isMobile: true },
+  linux: { osId: 'linux', osName: 'Linux (Ubuntu / Debian / Mint / 64-bit)', shortLabel: 'Baixar p/ Linux', icon: '🐧', downloadUrl: '/download/app?os=linux', fileName: 'instalar-papaleguas-linux.sh', badge: 'Instalador Nativo Linux', isMobile: false },
+  macos: { osId: 'macos', osName: 'macOS (Apple Silicon / Intel)', shortLabel: 'Baixar p/ macOS', icon: '🍏', downloadUrl: '/download/app?os=macos', fileName: 'Instalar-Papaleguas-Mac.command', badge: 'Instalador Nativo macOS', isMobile: false },
+  windows: { osId: 'windows', osName: 'Windows 10 / 11 (64-bit)', shortLabel: 'Baixar p/ Windows', icon: '🪟', downloadUrl: '/download/app?os=windows', fileName: 'Instalar-Papaleguas-Windows.cmd', badge: 'Instalador Desktop Windows', isMobile: false }
+};
 
 let rustCore = null;
 let isRustActive = false;
@@ -129,6 +142,11 @@ module.exports = {
   },
 
   isPrivateIp(ip) {
+    const clean = String(ip || '').trim().replace(/^::ffff:/, '').toLowerCase();
+    const shield = getPplMod('shield_guard');
+    if (shield && typeof shield.is_private_ip === 'function') {
+      return Boolean(shield.is_private_ip(clean));
+    }
     if (isRustActive && rustCore) {
       try {
         return Boolean(rustCore.isPrivateIp(String(ip || '')));
@@ -138,42 +156,71 @@ module.exports = {
   },
 
   isSafeProxyHost(host) {
+    const clean = String(host || '').trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/^::ffff:/, '');
+    if (!clean || clean === '0.0.0.0') return false;
+    const shield = getPplMod('shield_guard');
+    if (shield && typeof shield.is_private_ip === 'function') {
+      return !Boolean(shield.is_private_ip(clean));
+    }
     if (isRustActive && rustCore) {
       try {
         return Boolean(rustCore.isSafeProxyHost(String(host || '')));
       } catch (e) {}
     }
-    const clean = String(host || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
-    if (!clean || clean === 'localhost' || clean === '0.0.0.0' || clean === '::1' || clean === '169.254.169.254') return false;
+    if (clean === 'localhost' || clean === '::1' || clean === '169.254.169.254') return false;
     return !jsIsPrivateIp(clean);
   },
 
   isTrackerOrAd(url) {
+    const lower = String(url || '').toLowerCase();
+    const urlFilter = getPplMod('url_filter');
+    if (urlFilter && typeof urlFilter.is_ad_domain_or_keyword === 'function' && urlFilter.is_ad_domain_or_keyword(lower)) {
+      return true;
+    }
     if (isRustActive && rustCore) {
       try {
         return Boolean(rustCore.isTrackerOrAd(String(url || '')));
       } catch (e) {}
     }
-    const lower = String(url || '').toLowerCase();
     return lower.includes('doubleclick.net') || lower.includes('google-analytics.com') || lower.includes('adnxs.com') || lower.includes('criteo.com');
   },
 
   stripTrackingParams(url) {
+    let cleaned = String(url || '');
     if (isRustActive && rustCore && typeof rustCore.stripTrackingParams === 'function') {
       try {
-        return rustCore.stripTrackingParams(String(url || ''));
+        cleaned = rustCore.stripTrackingParams(cleaned) || cleaned;
       } catch (e) {}
     }
-    return String(url || '');
+    if (cleaned.includes('?')) {
+      try {
+        const parsed = new URL(cleaned);
+        const dropRe = /^(utm_[a-z0-9_]+|fbclid|gclid|dclid|msclkid|yclid|mc_cid|mc_eid|_ga|_gl|igshid|twclid|ttclid)$/i;
+        let changed = false;
+        for (const key of Array.from(parsed.searchParams.keys())) {
+          if (dropRe.test(key)) {
+            parsed.searchParams.delete(key);
+            changed = true;
+          }
+        }
+        if (changed) cleaned = parsed.toString();
+      } catch (e) {}
+    }
+    return cleaned;
   },
 
   cleanHtmlText(html) {
+    const raw = String(html || '');
+    const rankMod = getPplMod('search_rank');
+    if (rankMod && typeof rankMod.sanitize_text === 'function' && raw.length <= 4000) {
+      return String(rankMod.sanitize_text(raw) || '');
+    }
     if (isRustActive && rustCore && typeof rustCore.cleanHtmlText === 'function') {
       try {
-        return rustCore.cleanHtmlText(String(html || ''));
+        return rustCore.cleanHtmlText(raw);
       } catch (e) {}
     }
-    return String(html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    return raw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
   },
 
   extractPageMetadataAndLinks(baseUrl, html) {
@@ -224,7 +271,14 @@ module.exports = {
   searchLocalIndex(query, limit = 25, onlyOnion = false) {
     if (isRustActive && rustCore && typeof rustCore.searchLocalIndex === 'function') {
       try {
-        return rustCore.searchLocalIndex(String(query || ''), Number(limit) || 25, Boolean(onlyOnion)) || [];
+        const max = Math.max(1, Number(limit) || 25);
+        const wantOnion = Boolean(onlyOnion);
+        const fetchLimit = wantOnion ? max : Math.min(100, max * 2);
+        const raw = rustCore.searchLocalIndex(String(query || ''), fetchLimit, wantOnion) || [];
+        const isOnion = (u) => /(?:^|\/\/|[./])[^/]*\.onion(?:[/:?#]|$)/i.test(String(u || ''));
+        return raw
+          .filter((h) => h && h.url && (wantOnion ? isOnion(h.url) : !isOnion(h.url)))
+          .slice(0, max);
       } catch (e) {}
     }
     return [];
@@ -242,22 +296,22 @@ module.exports = {
   },
 
   detectOsPlatform(userAgent = '', secChPlatform = '') {
+    const ua = String(userAgent || '').toLowerCase();
+    const secCh = String(secChPlatform || '').toLowerCase();
+    const urlFilter = getPplMod('url_filter');
+    if (urlFilter && typeof urlFilter.detect_os === 'function') {
+      const osId = String(urlFilter.detect_os(ua, secCh) || 'windows');
+      return OS_META_TABLE[osId] || OS_META_TABLE.windows;
+    }
     if (isRustActive && rustCore && typeof rustCore.detectOsPlatform === 'function') {
       try {
         return rustCore.detectOsPlatform(String(userAgent || ''), String(secChPlatform || ''));
       } catch (e) {}
     }
-    const ua = String(userAgent || '').toLowerCase();
-    if (/iphone|ipad|ipod/.test(ua)) {
-      return { osId: 'ios', osName: 'iPhone / iPad (iOS)', shortLabel: 'Baixar App iOS', icon: '🍎', downloadUrl: '/download/app?os=ios', fileName: 'Papaleguas-iOS.mobileconfig', badge: 'WebClip Nativo iOS • Tela Cheia', isMobile: true };
-    }
-    if (/android/.test(ua)) {
-      return { osId: 'android', osName: 'Android (Smartphone / Tablet / TV)', shortLabel: 'Baixar App Android', icon: '🤖', downloadUrl: '/download/app?os=android', fileName: 'Papaleguas-Android-Installer.html', badge: 'App Nativo Android • Sem Anúncios', isMobile: true };
-    }
-    if (/linux|x11|ubuntu/.test(ua)) {
-      return { osId: 'linux', osName: 'Linux (Ubuntu / Debian / Mint / 64-bit)', shortLabel: 'Baixar p/ Linux', icon: '🐧', downloadUrl: '/download/app?os=linux', fileName: 'instalar-papaleguas-linux.sh', badge: 'Instalador Nativo Linux', isMobile: false };
-    }
-    return { osId: 'windows', osName: 'Windows 10 / 11 (64-bit)', shortLabel: 'Baixar p/ Windows', icon: '🪟', downloadUrl: '/download/app?os=windows', fileName: 'Instalar-Papaleguas-Windows.cmd', badge: 'Instalador Desktop Windows', isMobile: false };
+    if (/iphone|ipad|ipod/.test(ua)) return OS_META_TABLE.ios;
+    if (/android/.test(ua)) return OS_META_TABLE.android;
+    if (/linux|x11|ubuntu/.test(ua)) return OS_META_TABLE.linux;
+    return OS_META_TABLE.windows;
   },
 
   checkRateLimit(ip, maxBurst = 120, refillPerSec = 20) {

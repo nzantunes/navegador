@@ -1,0 +1,88 @@
+@policy(max_loops=100, no_network=true, zero_traces=true)
+
+// Motor de Busca BM25 & Sanitização 100% nativo em PPL
+
+export fn bm25_tf_component(tf: u64, doc_len: u64, avg_doc_len: u64) -> f64 {
+  if tf == 0 {
+    return 0.0;
+  }
+  let k1: f64 = 1.5;
+  let b: f64 = 0.75;
+  let dl: f64 = doc_len;
+  let avgdl: f64 = avg_doc_len;
+  if avgdl <= 0.0 {
+    avgdl = 1.0;
+  }
+  let tf_f: f64 = tf;
+  let num: f64 = tf_f * (k1 + 1.0);
+  let norm: f64 = 1.0 - b + b * (dl / avgdl);
+  let den: f64 = tf_f + k1 * norm;
+  if den <= 0.0 {
+    return 0.0;
+  }
+  return num / den;
+}
+
+export fn bm25_idf_approx(doc_freq: u64, total_docs: u64) -> f64 {
+  if total_docs == 0 {
+    return 1.0;
+  }
+  let df: f64 = doc_freq;
+  let n: f64 = total_docs;
+  let ratio: f64 = (n - df + 0.5) / (df + 0.5);
+  if ratio <= 1.0 {
+    return 0.5;
+  }
+  if ratio <= 2.0 {
+    return 1.0;
+  }
+  if ratio <= 5.0 {
+    return 1.7;
+  }
+  if ratio <= 15.0 {
+    return 2.6;
+  }
+  if ratio <= 50.0 {
+    return 3.8;
+  }
+  return 4.9;
+}
+
+export fn bm25_term_score(tf: u64, doc_len: u64, avg_doc_len: u64, doc_freq: u64, total_docs: u64) -> f64 {
+  let idf: f64 = bm25_idf_approx(doc_freq, total_docs);
+  let tfc: f64 = bm25_tf_component(tf, doc_len, avg_doc_len);
+  return idf * tfc;
+}
+
+export fn score_document_match(title: str, url: str, snippet: str, query: str) -> i64 {
+  let q: str = str.trim(query);
+  if str.is_empty(q) {
+    return 0;
+  }
+  let score: i64 = 0;
+  if str.contains_ci(url, q) {
+    score += 32;
+  }
+  if str.contains_ci(title, q) {
+    score += 28;
+  }
+  if str.contains_ci(snippet, q) {
+    score += 12;
+  }
+  if str.starts_with_ci(url, "https://") {
+    score += 4;
+  }
+  let dots: u64 = str.count(url, ".");
+  if dots >= 5 {
+    score -= 8;
+  }
+  if str.len(url) > 150 {
+    score -= 6;
+  }
+  return score;
+}
+
+export fn clean_search_snippet(raw: str) -> str {
+  let stripped: str = str.strip_html(raw);
+  return str.trim(stripped);
+}

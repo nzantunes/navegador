@@ -18,6 +18,8 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { RateLimiter, ConcurrencyLimiter } = require('./rate-limit');
+let pplRuntime = null;
+try { pplRuntime = require('../../papaleguas-lang/runtime'); } catch (e) {}
 
 const COOKIE_NAME = 'pl_sid';
 const COOKIE_MAX_AGE_SEC = 30 * 24 * 3600;
@@ -42,6 +44,10 @@ function envInt(name, fallback) {
 function isPrivateIp(ip) {
   if (!ip) return true;
   const clean = String(ip).trim().replace(/^::ffff:/, '').toLowerCase();
+  const shieldMod = pplRuntime ? pplRuntime.loadNativeModule('shield_guard') : null;
+  if (shieldMod && typeof shieldMod.is_private_ip === 'function') {
+    return Boolean(shieldMod.is_private_ip(clean));
+  }
   if (clean === '::1' || clean === 'localhost' || clean.startsWith('127.')) return true;
   if (/^10\./.test(clean) || /^192\.168\./.test(clean) || /^169\.254\./.test(clean)) return true;
   const m = clean.match(/^172\.(\d{1,3})\./);
@@ -217,6 +223,44 @@ function createRequestGuard(opts = {}) {
 
     maybeIssueSessionCookie(req, res, pathname);
 
+    if (pplRuntime) {
+      try {
+        const shieldMod = pplRuntime.loadNativeModule('shield_guard');
+        const tunerMod = pplRuntime.loadNativeModule('auto_tuner');
+        const threshold = (tunerMod && typeof tunerMod.adaptive_block_threshold === 'function')
+          ? Number(tunerMod.adaptive_block_threshold()) || 100
+          : 100;
+        if (tunerMod && typeof tunerMod.active_profile_code === 'function') {
+          guardStats.profileCode = Number(tunerMod.active_profile_code()) || 0;
+        }
+        guardStats.adaptiveThreshold = threshold;
+        if (shieldMod && typeof shieldMod.is_scanner_path === 'function' && shieldMod.is_scanner_path(String(pathname || ''))) {
+          guardStats.pplBlocked += 1;
+          logBlock('ppl-scanner-path', who.ip);
+          if (!res.headersSent) {
+            res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+            res.end('403 Bloqueado pelo escudo anti-scanner Papaléguas (.ppl).');
+          }
+          return true;
+        }
+        if (shieldMod && typeof shieldMod.score_request === 'function') {
+          const trusted = isTrustedAppRequest(req);
+          const activeMedia = mediaConcurrency.activeCount ? mediaConcurrency.activeCount(who.ip) : 0;
+          const bucket = limits.global && limits.global.buckets ? limits.global.buckets.get(who.ip) : null;
+          const reqCount = bucket ? bucket.count : 0;
+          const riskScore = shieldMod.score_request(reqCount, activeMedia, false, trusted);
+          guardStats.pplScored += 1;
+          guardStats.lastScore = riskScore;
+          if (riskScore >= threshold && !trusted && (riskScore >= 100 ? (typeof shieldMod.should_block === 'function' && shieldMod.should_block(reqCount, activeMedia, false, false)) : true)) {
+            guardStats.pplBlocked += 1;
+            logBlock('ppl-shield', who.ip);
+            sendTooMany(res, 10, '429 Bloqueado pelo escudo nativo Papaléguas (.ppl).');
+            return true;
+          }
+        }
+      } catch (e) {}
+    }
+
     if (!ctx.nativeRateLimitActive) {
       const g = limits.global.hit(who.ip);
       if (!g.allowed) {
@@ -266,11 +310,14 @@ function createRequestGuard(opts = {}) {
     return false;
   }
 
+  const guardStats = { pplScored: 0, pplBlocked: 0, lastScore: 0, adaptiveThreshold: 100, profileCode: 0 };
+
   return {
     check,
     identifyRequester,
     hasValidSession,
     makeSessionCookieValue,
+    getPplShieldStats: () => Object.assign({}, guardStats),
     stop: () => clearInterval(pruneTimer),
     _limits: limits,
     _mediaConcurrency: mediaConcurrency

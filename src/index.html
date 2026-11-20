@@ -10,8 +10,7 @@
   <link rel="canonical" href="https://papaleguas.app/">
   <meta name="google-site-verification" content="SJH0DPmzrPqP6IQsWjyW-z1b_rAyECfY8s3XKWeyiD0" />
   <meta name="google-site-verification" content="google4acffdc77e16ecda" />
-  <!-- Google tag (gtag.js) + AdSense: carregamento adiado (1ª interação ou 7s após o load) para não travar a thread principal -->
-  <meta name="google-adsense-account" content="ca-pub-5788322050130808">
+  <!-- Google tag (gtag.js): carregamento adiado (1ª interação ou 7s após o load) para não travar a thread principal -->
   <script>
     window.dataLayer = window.dataLayer || [];
     function gtag(){dataLayer.push(arguments);}
@@ -33,7 +32,6 @@
         done = true;
         evs.forEach(function (e) { window.removeEventListener(e, loadThirdParty, { passive: true }); });
         addScript('https://www.googletagmanager.com/gtag/js?id=G-3PPDLGKC46', false);
-        addScript('https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-5788322050130808', true);
       }
       evs.forEach(function (e) { window.addEventListener(e, loadThirdParty, { passive: true }); });
       window.addEventListener('load', function () { setTimeout(loadThirdParty, 7000); });
@@ -59,7 +57,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="Papaléguas">
   <meta name="ngrok-skip-browser-warning" content="1">
-  <meta name="papaleguas-version" content="2026.11.07-v114">
+  <meta name="papaleguas-version" content="2026.11.18-v151">
   <!-- Feeds de Sindicatura Automática para Robôs, Agentes e Canais -->
   <link rel="alternate" type="application/rss+xml" title="Papaléguas BaixaTube RSS Feed" href="https://papaleguas.app/feed.xml">
   <link rel="alternate" type="application/feed+json" title="Papaléguas BaixaTube JSON Feed" href="https://papaleguas.app/feed.json">
@@ -124,13 +122,21 @@
       }
     })();
   </script>
-  <link rel="stylesheet" href="styles.css?v=46">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@300;400;500;600;700&display=swap">
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@300;400;500;600;700&display=swap" media="print" onload="this.media='all'">
-  <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@300;400;500;600;700&display=swap"></noscript>
-  <script defer src="hybrid-bridge.js"></script>
+  <style>
+    html,body{margin:0;padding:0;background:#0b0d14;color:#f1f5f9;font-family:Outfit,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;height:100%;overflow:hidden}
+    .browser-container{display:flex;flex-direction:column;height:100vh;width:100vw;background:#0b0d14}
+    .browser-header,.browser-toolbar{display:flex;align-items:center;background:#111522}
+    .webviews-container{flex:1;position:relative;min-height:0;background:#060913}
+    .hidden,[hidden]{display:none!important}
+  </style>
+  <link rel="preload" as="style" href="styles.css?v=53" fetchpriority="high">
+  <link rel="stylesheet" href="styles.css?v=53" media="print" onload="this.media='all'">
+  <noscript><link rel="stylesheet" href="styles.css?v=53"></noscript>
+  <link rel="dns-prefetch" href="https://fonts.googleapis.com">
+  <link rel="dns-prefetch" href="https://fonts.gstatic.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
+  <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap"></noscript>
+  <script defer src="hybrid-bridge.js?v=112"></script>
 </head>
 <body>
   <!-- Barra de progresso de navegação e carregamento de links -->
@@ -237,6 +243,9 @@
         <button class="go-btn" id="btn-go" title="Ir">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
         </button>
+        <button class="bookmark-btn" id="btn-reader-mode" title="Modo Leitura Limpo (Sem anúncios / distrações)">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>
+        </button>
         <button class="bookmark-btn" id="btn-bookmark" title="Adicionar Favorito">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" id="bookmark-icon"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>
         </button>
@@ -244,31 +253,13 @@
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
         </button>
       </div>
-      <div class="url-suggest-panel" id="url-suggest-panel" hidden>
+      <div class="url-suggest-panel" id="url-suggest-panel" style="display:none !important;" hidden>
         <div class="url-suggest-list" id="url-suggest-list"></div>
-        <div class="url-suggest-status" id="url-suggest-status" hidden>Carregando mais sugestões…</div>
+        <div class="url-suggest-status" id="url-suggest-status" hidden></div>
       </div>
       </div>
 
       <div class="toolbar-actions">
-        <button class="tor-toggle-btn active" id="btn-toggle-tor" title="Rede Tor Ativa (Proteção Permanente Obrigatória)">
-          <span class="tor-toggle-dot"></span>
-          <span id="tor-toggle-label">Tor: Conectado</span>
-        </button>
-        <button class="icon-action-btn adblock-btn" id="btn-adblock" title="Bloqueador de Anúncios Desativado. Clique para ativar.">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
-          <span id="adblock-label">Anúncios Permitidos</span>
-        </button>
-
-        <button class="icon-action-btn mobile-mode-btn" id="btn-mobile-mode" title="Reconhecimento automático Celular / PC">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="3" ry="3"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
-          <span id="mobile-mode-label">Auto</span>
-        </button>
-
-        <button class="icon-action-btn install-app-btn" id="btn-install-app" title="Baixar e Instalar App no Celular com ícone Papaléguas">
-          <img src="icon-192.png" class="papaleguas-btn-icon" alt="Papaléguas" loading="lazy" decoding="async" onerror="this.onerror=null;this.src='papaleguas_icon.png';" />
-          <span id="install-app-label">Baixar App</span>
-        </button>
         <button class="icon-action-btn spotify-btn" id="btn-spotify" title="Músicas">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="music-btn-icon">
             <path d="M9 18V5l12-2v13"></path>
@@ -304,14 +295,18 @@
     <!-- BOOKMARKS BAR -->
     <div class="quick-shortcuts-bar" id="quick-shortcuts-bar">
       <div class="tabs-menu-wrap" id="tabs-menu-wrap">
-        <button class="shortcut-item-btn add-bookmark-btn" id="btn-add-bookmark" title="Abas abertas e favoritos">
+        <button class="shortcut-item-btn add-bookmark-btn" id="btn-add-bookmark" title="Abas abertas e favoritos (Ctrl+K)">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
           <span>Adicionar</span>
+          <span class="tabs-count-badge" id="tabs-count-badge" style="font-size:10px;padding:1px 6px;border-radius:999px;background:rgba(56,189,248,0.2);color:#38bdf8;font-weight:700;">1</span>
         </button>
         <div class="tabs-menu" id="tabs-menu" hidden>
           <div class="tabs-menu-head">
             <span>Abas abertas</span>
-            <button type="button" class="tabs-menu-new" id="tabs-menu-new">Nova aba</button>
+            <div style="display:flex;gap:6px;">
+              <button type="button" class="tabs-menu-new" id="btn-open-cmd-palette" title="Central de Comandos (Ctrl+K)">⚡ Comandos</button>
+              <button type="button" class="tabs-menu-new" id="tabs-menu-new">Nova aba</button>
+            </div>
           </div>
           <div class="tabs-menu-list" id="tabs-menu-list"></div>
           <button type="button" class="tabs-menu-save-all" id="tabs-menu-save-all">Salvar todas como favoritas</button>
@@ -325,14 +320,14 @@
     <div class="circuit-modal hidden" id="install-app-modal">
       <div class="circuit-header">
         <div style="display:flex;align-items:center;gap:10px;">
-          <img src="icon-192.png" alt="Papaléguas" loading="lazy" decoding="async" style="width:26px;height:26px;border-radius:8px;object-fit:cover;box-shadow:0 0 10px rgba(56,189,248,0.5);" onerror="this.onerror=null;this.src='papaleguas_icon.png';" />
+          <img src="icon-192.png" alt="Papaléguas" width="26" height="26" loading="lazy" decoding="async" style="width:26px;height:26px;border-radius:8px;object-fit:cover;box-shadow:0 0 10px rgba(56,189,248,0.5);" onerror="this.onerror=null;this.src='papaleguas_icon.png';" />
           <h3 id="install-modal-title" style="font-size:15px;margin:0;">Baixar Super Navegador Papaléguas</h3>
         </div>
         <button class="close-modal-btn" id="close-install-modal-btn">&times;</button>
       </div>
       <div class="circuit-content" style="padding:16px;">
         <div style="display:flex;align-items:center;gap:14px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:14px;padding:12px;margin-bottom:12px;">
-          <img src="icon-192.png" alt="Papaléguas" loading="lazy" decoding="async" style="width:52px;height:52px;border-radius:12px;box-shadow:0 4px 16px rgba(2,132,199,0.35);flex-shrink:0;" onerror="this.onerror=null;this.src='papaleguas_icon.png';" />
+          <img src="icon-192.png" alt="Papaléguas" width="52" height="52" loading="lazy" decoding="async" style="width:52px;height:52px;border-radius:12px;box-shadow:0 4px 16px rgba(2,132,199,0.35);flex-shrink:0;" onerror="this.onerror=null;this.src='papaleguas_icon.png';" />
           <div>
             <h4 style="margin:0 0 4px 0;font-size:14.5px;color:#f8fafc;font-weight:700;">Super Navegador Papaléguas <span id="install-modal-app-version" style="font-size:10.5px;color:#10b981;margin-left:4px;font-weight:bold;background:rgba(16,185,129,0.18);padding:2px 7px;border-radius:6px;border:1px solid rgba(16,185,129,0.35);">Rust Engine v2.0</span></h4>
             <p id="install-detected-os-banner" style="margin:0;font-size:12px;color:#38bdf8;font-weight:600;line-height:1.35;">🔍 Detectando seu sistema operacional...</p>
@@ -418,6 +413,9 @@
             <span id="install-step-3">O <strong>Super Navegador Papaléguas</strong> ficará salvo com ícone oficial na sua Área de Trabalho ou Tela Inicial!</span>
           </div>
         </div>
+      </div>
+      <div style="flex-shrink:0;padding:10px 16px;border-top:1px solid rgba(148,163,184,0.16);background:#0f1320;display:flex;justify-content:flex-end;">
+        <button type="button" id="close-install-modal-footer-btn" onclick="document.getElementById('install-app-modal').classList.add('hidden')" style="padding:7px 18px;border-radius:8px;background:rgba(239,68,68,0.2);border:1px solid rgba(239,68,68,0.5);color:#fecaca;font-size:12.5px;font-weight:700;cursor:pointer;">✕ Fechar</button>
       </div>
     </div>
 
@@ -613,7 +611,7 @@
     <div class="global-music-mini-player hidden" id="global-music-mini-player">
       <div class="gm-drag-header" id="gm-drag-header" title="Segure e arraste para posicionar onde quiser na tela">
         <div class="gm-brand">
-          <img src="papaleguas_icon.png" class="gm-brand-icon" alt="" loading="lazy" decoding="async" onerror="if(!this.dataset.retry){this.dataset.retry='1';this.src='/papaleguas_icon.png';}" />
+          <img src="icon-192.png" class="gm-brand-icon" alt="" width="20" height="20" loading="lazy" decoding="async" onerror="if(!this.dataset.retry){this.dataset.retry='1';this.src='/icon-192.png';}" />
         </div>
         <div class="gm-window-actions">
           <button class="gm-action-btn" id="gm-btn-maximize" title="Maximizar / Ir para a aba da música">
@@ -625,7 +623,7 @@
         </div>
       </div>
       <div class="gm-content">
-        <img src="papaleguas_icon.png" class="gm-track-thumb" id="gm-track-thumb" alt="Capa da música" loading="lazy" decoding="async" onerror="if(!this.dataset.retry){this.dataset.retry='1';this.src='/papaleguas_icon.png';}" />
+        <img src="icon-192.png" class="gm-track-thumb" id="gm-track-thumb" alt="Capa da música" width="42" height="42" loading="lazy" decoding="async" onerror="if(!this.dataset.retry){this.dataset.retry='1';this.src='/icon-192.png';}" />
         <div class="gm-track-details">
           <div class="gm-track-title" id="gm-track-title">--</div>
           <div class="gm-track-artist" id="gm-track-artist">Nenhuma faixa tocando</div>
@@ -656,7 +654,7 @@
         </div>
       </div>
       <div class="gyt-video-box">
-        <img id="gyt-thumb" class="gyt-thumb" alt="Vídeo" loading="lazy" decoding="async">
+        <img id="gyt-thumb" class="gyt-thumb" alt="Vídeo" width="240" height="135" loading="lazy" decoding="async">
         <iframe id="gyt-iframe" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe>
       </div>
       <div class="gyt-meta">
@@ -668,10 +666,6 @@
         </div>
       </div>
     </div>
-    <button type="button" class="fs-home-btn" id="fs-home-btn" title="Minimizar (Restaurar janela)">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M10 14l-7 7"/></svg>
-      <span>Minimizar</span>
-    </button>
     <!-- Botão Flutuante Central de Histórico (Voltar / Avançar sem atrapalhar a visão) -->
     <div class="floating-nav-pill is-hidden" id="floating-nav-pill" role="toolbar" aria-label="Navegação rápida de página" hidden>
       <button type="button" class="floating-nav-btn floating-nav-back" id="floating-nav-back" title="Voltar para a página anterior (Alt + Seta Esquerda)">
@@ -704,6 +698,37 @@
 
   </div>
 
+  <!-- Modal Global: Modo Leitura Limpo -->
+  <div class="circuit-modal hidden" id="reader-mode-modal" style="max-width:780px;width:94vw;">
+    <div class="circuit-header">
+      <div style="display:flex;align-items:center;gap:8px;min-width:0;">
+        <span style="font-size:11px;font-weight:700;padding:3px 8px;border-radius:6px;background:rgba(56,189,248,0.2);color:#38bdf8;">📖 MODO LEITURA</span>
+        <h3 id="reader-modal-title" style="font-size:14px;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Artigo sem anúncios</h3>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <button type="button" id="reader-font-dec" style="padding:3px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.06);color:#e2e8f0;font-size:11.5px;font-weight:700;cursor:pointer;">A-</button>
+        <button type="button" id="reader-font-inc" style="padding:3px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.06);color:#e2e8f0;font-size:11.5px;font-weight:700;cursor:pointer;">A+</button>
+        <button class="close-modal-btn" id="close-reader-modal-btn">&times;</button>
+      </div>
+    </div>
+    <div class="circuit-content" id="reader-modal-body" style="padding:18px;max-height:74vh;overflow-y:auto;line-height:1.72;font-size:16px;color:#e2e8f0;"></div>
+  </div>
+
+  <!-- Modal Global: Command Palette (Ctrl+K) -->
+  <div class="circuit-modal hidden" id="command-palette-modal" style="max-width:560px;width:92vw;">
+    <div class="circuit-header">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span style="font-size:15px;">⚡</span>
+        <h3 style="font-size:14px;margin:0;">Central de Comandos Rápidos (Ctrl+K)</h3>
+      </div>
+      <button class="close-modal-btn" id="close-cmd-palette-btn">&times;</button>
+    </div>
+    <div class="circuit-content" style="padding:14px;">
+      <input type="text" id="cmd-palette-input" placeholder="Buscar abas abertas, favoritos ou comandos rápidos..." autocomplete="off" spellcheck="false" style="width:100%;padding:10px 12px;border-radius:10px;border:1px solid rgba(56,189,248,0.4);background:rgba(15,23,42,0.9);color:#fff;font-size:13.5px;margin-bottom:10px;outline:none;" />
+      <div id="cmd-palette-list" style="max-height:56vh;overflow-y:auto;display:flex;flex-direction:column;gap:6px;"></div>
+    </div>
+  </div>
+
   <!-- Aba de pesquisa em tela cheia: abre ao clicar no campo de busca -->
   <div class="search-fs" id="search-fs" hidden>
     <div class="search-fs-top">
@@ -725,6 +750,15 @@
         </button>
       </div>
       <span class="search-fs-net" id="search-fs-net">Conexão direta</span>
+    </div>
+    <div class="search-fs-modes" id="search-fs-modes" role="tablist" aria-label="Tipo de pesquisa antes de buscar">
+      <button type="button" class="search-fs-mode-pill is-active" data-mode="all" title="Pesquisar em tudo">🌟 Tudo</button>
+      <button type="button" class="search-fs-mode-pill" data-mode="web" title="Busca rápida na Web via Motor Papaléguas (PPL)">⚡ Web (PPL)</button>
+      <button type="button" class="search-fs-mode-pill" data-mode="images" title="Buscar apenas imagens">🖼️ Imagens</button>
+      <button type="button" class="search-fs-mode-pill" data-mode="videos" title="Buscar apenas vídeos em vários sites">🎬 Vídeos</button>
+      <button type="button" class="search-fs-mode-pill" data-mode="pdf" title="Buscar apenas arquivos e documentos PDF">📄 PDF</button>
+      <button type="button" class="search-fs-mode-pill" data-mode="ipcam" title="Buscar câmeras IP e webcams públicas acessíveis">📹 Câmera IP</button>
+      <button type="button" class="search-fs-mode-pill" data-mode="tor" title="Buscar apenas sites .onion (rede Tor)">🧅 .onion</button>
     </div>
     <div class="search-fs-body" id="search-fs-body">
       <section class="search-fs-section" id="search-fs-recent-box" style="display:none !important;" hidden></section>
@@ -842,10 +876,12 @@
     })();
   </script>
   <script defer src="auto-update.js?v=136"></script>
-  <script defer src="fab-drag.js?v=108"></script>
+  <script defer src="fab-drag.js?v=109"></script>
   <script defer src="client-cast.js?v=108"></script>
+  <script defer src="ppl-net-crypto.js?v=2"></script>
+  <script defer src="ppl-client-offload.js?v=1"></script>
   <script defer src="cast-hub.js?v=108"></script>
-  <script defer src="renderer.js?v=108"></script>
+  <script defer src="renderer.js?v=115"></script>
   <script defer src="i18n-ip.js?v=108"></script>
 </body>
 </html>

@@ -912,6 +912,47 @@ body {
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+.search-fs-modes {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(15, 23, 42, 0.55);
+}
+
+.search-fs-modes::-webkit-scrollbar {
+  display: none;
+}
+
+.search-fs-mode-pill {
+  flex: 0 0 auto;
+  padding: 6px 13px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.05);
+  color: #cbd5e1;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.16s ease;
+  white-space: nowrap;
+}
+
+.search-fs-mode-pill:hover {
+  border-color: rgba(0, 240, 255, 0.5);
+  color: #fff;
+}
+
+.search-fs-mode-pill.is-active {
+  background: rgba(0, 240, 255, 0.18);
+  border-color: #00f0ff;
+  color: #fff;
+  box-shadow: 0 0 12px rgba(0, 240, 255, 0.25);
+}
+
 .search-fs-close {
   width: 38px;
   height: 38px;
@@ -2365,9 +2406,9 @@ body {
 }
 
 .page-tor-loading {
-  position: fixed !important;
+  position: absolute !important;
   inset: 0 !important;
-  z-index: 2147483640 !important;
+  z-index: 100 !important;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2676,12 +2717,8 @@ body.phone-landscape-fs .webviews-container.mobile-mode {
   background: #000 !important;
 }
 
-html.phone-landscape-fs webview,
-html.phone-landscape-fs .web-client-iframe,
 html.phone-landscape-fs webview.active,
 html.phone-landscape-fs .web-client-iframe.active,
-body.phone-landscape-fs webview,
-body.phone-landscape-fs .web-client-iframe,
 body.phone-landscape-fs webview.active,
 body.phone-landscape-fs .web-client-iframe.active {
   position: fixed !important;
@@ -2696,11 +2733,16 @@ body.phone-landscape-fs .web-client-iframe.active {
   display: block !important;
   z-index: 2147483001 !important;
 }
-
-html.phone-landscape-fs .fs-home-btn,
-body.phone-landscape-fs .fs-home-btn {
-  display: inline-flex !important;
+html.phone-landscape-fs webview:not(.active):not(.is-audio-background),
+html.phone-landscape-fs .web-client-iframe:not(.active):not(.is-audio-background),
+body.phone-landscape-fs webview:not(.active):not(.is-audio-background),
+body.phone-landscape-fs .web-client-iframe:not(.active):not(.is-audio-background) {
+  display: none !important;
+  z-index: -1 !important;
+  pointer-events: none !important;
 }
+
+/* Botão Minimizar / Home removido */
 
 /* Media Query automática quando o celular está na horizontal (altura <= 640px) */
 @media screen and (orientation: landscape) and (max-height: 640px) {
@@ -2947,16 +2989,6 @@ body.phone-landscape-fs .fs-home-btn {
     display: block !important;
     z-index: 2147483001 !important;
   }
-
-
-  html.client-phone.portal-home .fs-home-btn,
-  body.client-phone.portal-home .fs-home-btn,
-  html.client-phone.video-true-fs .fs-home-btn,
-  body.client-phone.video-true-fs .fs-home-btn,
-  html.mobile-sim-active.portal-home .fs-home-btn,
-  body.mobile-sim-active.portal-home .fs-home-btn {
-    display: inline-flex !important;
-  }
 }
 
 /* Aberto no Chrome / link público: some a “janela falsa” e fica cara de app */
@@ -2993,7 +3025,8 @@ html.client-hosted #btn-win-close {
 }
 
 #install-app-modal:not(.hidden) {
-  display: block !important;
+  display: flex !important;
+  flex-direction: column !important;
 }
 
 html.client-hosted .tabs-container,
@@ -3018,10 +3051,11 @@ html.client-on-tunnel #cf-badge {
   display: none !important;
 }
 
-html.client-hosted .browser-header {
-  -webkit-app-region: no-drag;
-  padding: 6px 10px 0 10px;
-  background: #080a10;
+html.client-hosted .browser-header,
+html.client-standalone .browser-header,
+html.client-phone .browser-header,
+body.client-phone .browser-header {
+  display: none !important;
 }
 
 html.client-hosted .browser-toolbar {
@@ -6008,15 +6042,13 @@ body.client-phone:not(.fullscreen-video-locked):not(.video-true-fs) .browser-too
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  padding: 4px 6px;
+  padding: 5px 8px;
   border-radius: 999px;
-  background: rgba(15, 23, 42, 0.48);
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.38), 0 0 1px rgba(255, 255, 255, 0.2);
-  opacity: 0.38; /* Visual translúcido suave que não atrapalha a leitura do conteúdo */
-  transition: opacity 0.25s ease, background 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease, transform 0.2s ease;
+  background: #0f172a;
+  border: 1px solid #334155;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.6), 0 0 1px rgba(255, 255, 255, 0.25);
+  opacity: 1;
+  transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
   user-select: none;
   -webkit-user-select: none;
   touch-action: none;
@@ -6027,9 +6059,9 @@ body.client-phone:not(.fullscreen-video-locked):not(.video-true-fs) .browser-too
 .floating-nav-pill.is-active,
 .floating-nav-pill:active {
   opacity: 1;
-  background: rgba(15, 23, 42, 0.92);
-  border-color: rgba(56, 189, 248, 0.55);
-  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.55), 0 0 20px rgba(56, 189, 248, 0.3);
+  background: #1e293b;
+  border-color: #38bdf8;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.65), 0 0 18px rgba(56, 189, 248, 0.35);
 }
 
 .floating-nav-pill.is-dragging {
@@ -6101,14 +6133,16 @@ body.client-phone:not(.fullscreen-video-locked):not(.video-true-fs) .browser-too
   }
 }
 
+.fs-home-btn,
+#fs-home-btn,
 html.video-true-fs .fs-home-btn,
 html:fullscreen .fs-home-btn,
 html:-webkit-full-screen .fs-home-btn,
 html.portal-home .fs-home-btn {
-  display: inline-flex !important;
-  visibility: visible !important;
-  opacity: 1 !important;
-  pointer-events: auto !important;
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
 }
 html.video-true-fs .webviews-container,
 html.video-true-fs .webviews-container.mobile-mode {
@@ -6125,8 +6159,6 @@ html.video-true-fs .webviews-container.mobile-mode {
   z-index: 2147483000 !important;
   background: #000 !important;
 }
-html.video-true-fs webview,
-html.video-true-fs .web-client-iframe,
 html.video-true-fs webview.active,
 html.video-true-fs .web-client-iframe.active {
   position: fixed !important;
@@ -6140,6 +6172,12 @@ html.video-true-fs .web-client-iframe.active {
   border-radius: 0 !important;
   display: block !important;
   z-index: 2147483001 !important;
+}
+html.video-true-fs webview:not(.active):not(.is-audio-background),
+html.video-true-fs .web-client-iframe:not(.active):not(.is-audio-background) {
+  display: none !important;
+  z-index: -1 !important;
+  pointer-events: none !important;
 }
 
 /* ==========================================================================
@@ -6384,16 +6422,56 @@ html.video-true-fs .web-client-iframe.active {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  width: 90%;
-  max-width: 440px;
+  width: 92%;
+  max-width: 450px;
+  max-height: 88vh;
+  max-height: 88dvh;
   background: #111420;
   border: 1px solid rgba(56, 189, 248, 0.35);
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.8), 0 0 25px rgba(2, 132, 199, 0.25);
   border-radius: 14px;
-  z-index: 99999;
+  z-index: 2147483645;
   overflow: hidden;
   backdrop-filter: blur(16px);
   animation: installModalPop 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+#install-app-modal .circuit-header {
+  flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: #111420;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+#install-app-modal .circuit-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+#close-install-modal-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: rgba(239, 68, 68, 0.22);
+  border: 1px solid rgba(239, 68, 68, 0.55);
+  color: #fecaca;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+
+#close-install-modal-btn:hover {
+  background: rgba(239, 68, 68, 0.45);
+  color: #ffffff;
 }
 
 @keyframes installModalPop {

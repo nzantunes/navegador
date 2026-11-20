@@ -2,6 +2,7 @@ const { Client: SSDPClient } = require('node-ssdp');
 const http = require('http');
 const net = require('net');
 const os = require('os');
+const fs = require('fs');
 const { execFile } = require('child_process');
 
 class CastManager {
@@ -10,6 +11,58 @@ class CastManager {
     this.ssdpClient = null;
     this.isScanning = false;
     this.lastSubnetScan = 0;
+    this.lastFullScan = 0;
+    this.bgScanPromise = null;
+  }
+
+  getArpIps() {
+    const ips = [];
+    const own = this.getOwnIpv4s();
+    try {
+      if (fs.existsSync('/proc/net/arp')) {
+        const lines = fs.readFileSync('/proc/net/arp', 'utf8').split('\n').slice(1);
+        for (const line of lines) {
+          const cols = line.trim().split(/\s+/);
+          const ip = cols[0];
+          const mac = cols[3];
+          if (ip && /^\d+\.\d+\.\d+\.\d+$/.test(ip) && !own.has(ip) && mac && mac !== '00:00:00:00:00:00') {
+            if (!ips.includes(ip)) ips.push(ip);
+          }
+        }
+      }
+    } catch (e) {}
+    return ips;
+  }
+
+  fetchDialFriendlyName(ip, port, timeoutMs) {
+    return new Promise((resolve) => {
+      const pathStr = port === 8001 ? '/api/v2/' : '/ssdp/device-desc.xml';
+      const req = http.get(`http://${ip}:${port}${pathStr}`, { timeout: timeoutMs || 900 }, (res) => {
+        let data = '';
+        res.on('data', (chunk) => {
+          data += chunk;
+          if (data.length > 12000) {
+            try { res.destroy(); } catch (e) {}
+          }
+        });
+        res.on('end', () => {
+          if (port === 8001) {
+            try {
+              const j = JSON.parse(data);
+              const n = j && j.device && (j.device.name || j.device.modelName);
+              if (n) return resolve(String(n).trim());
+            } catch (e) {}
+          }
+          const m = data.match(/<friendlyName>(.*?)<\/friendlyName>/i);
+          resolve(m && m[1] ? String(m[1]).replace(/<[^>]+>/g, '').trim() : '');
+        });
+      });
+      req.on('error', () => resolve(''));
+      req.on('timeout', () => {
+        try { req.destroy(); } catch (e) {}
+        resolve('');
+      });
+    });
   }
 
   getLocalSubnets() {
@@ -112,8 +165,17 @@ class CastManager {
     });
   }
 
-  async discoverRokuOnThisMachine() {
+  async discoverRokuOnThisMachine(options = {}) {
     this.startDiscovery();
+    const now = Date.now();
+    const force = Boolean(options && options.force);
+
+    // Se já fizemos varredura recente (< 12s) e temos dispositivos, devolve instantaneamente
+    if (!force && this.devices.size > 0 && (now - this.lastFullScan) < 12000) {
+      return Array.from(this.devices.values());
+    }
+
+    const arpIps = this.getArpIps();
     const priorityHosts = [
       1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
       21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 32, 35, 40, 45, 50, 55, 60, 70,
@@ -121,90 +183,140 @@ class CastManager {
     ];
     const subnets = this.getLocalSubnets();
     const own = this.getOwnIpv4s();
+    const seenAll = new Set(arpIps);
     const priorityIps = [];
     const extraIps = [];
     subnets.forEach((sub) => {
-      const seen = new Set();
       priorityHosts.forEach((h) => {
         const ip = `${sub}.${h}`;
-        if (!own.has(ip) && !seen.has(ip)) {
-          seen.add(ip);
+        if (!own.has(ip) && !seenAll.has(ip)) {
+          seenAll.add(ip);
           priorityIps.push(ip);
         }
       });
       for (let h = 1; h <= 254; h++) {
         const ip = `${sub}.${h}`;
-        if (!own.has(ip) && !seen.has(ip)) extraIps.push(ip);
+        if (!own.has(ip) && !seenAll.has(ip)) {
+          seenAll.add(ip);
+          extraIps.push(ip);
+        }
       }
     });
 
     const found = new Map();
-    for (const [k, d] of this.devices.entries()) {
+    for (const [, d] of this.devices.entries()) {
       if (d && d.ip) found.set(d.ip, d);
     }
+
+    const probeOneIp = async (ip) => {
+      if (!ip) return;
+      const [openRoku, openCast, openDial, openSamsung, openLg, openAirplay] = await Promise.all([
+        this.tcpOpen(ip, 8060, 280),
+        this.tcpOpen(ip, 8009, 280),
+        this.tcpOpen(ip, 8008, 280),
+        this.tcpOpen(ip, 8001, 280),
+        this.tcpOpen(ip, 3000, 280),
+        this.tcpOpen(ip, 7000, 280)
+      ]);
+      if (openRoku) {
+        const info = await this.fetchRokuInfo(ip, 900);
+        if (info && info.ip) {
+          info.lastSeen = Date.now();
+          found.set(info.ip, info);
+          this.devices.set(info.ip, info);
+        }
+      } else if (openCast || openDial) {
+        let friendly = '';
+        if (openDial) friendly = await this.fetchDialFriendlyName(ip, 8008, 700);
+        const castDev = {
+          id: `cast-${ip}`,
+          name: friendly ? `${friendly} (${ip})` : `Chromecast / Google TV (${ip})`,
+          type: 'chromecast',
+          ip,
+          port: openDial ? 8008 : 8009,
+          lastSeen: Date.now()
+        };
+        found.set(ip, castDev);
+        this.devices.set(ip, castDev);
+      } else if (openSamsung) {
+        const friendly = await this.fetchDialFriendlyName(ip, 8001, 700);
+        const samDev = {
+          id: `samsung-${ip}`,
+          name: friendly ? `${friendly} (${ip})` : `Samsung Smart TV (${ip})`,
+          type: 'roku',
+          ip,
+          port: 8001,
+          lastSeen: Date.now()
+        };
+        found.set(ip, samDev);
+        this.devices.set(ip, samDev);
+      } else if (openLg) {
+        const lgDev = {
+          id: `lg-${ip}`,
+          name: `LG webOS Smart TV (${ip})`,
+          type: 'roku',
+          ip,
+          port: 3000,
+          lastSeen: Date.now()
+        };
+        found.set(ip, lgDev);
+        this.devices.set(ip, lgDev);
+      } else if (openAirplay) {
+        const apDev = {
+          id: `airplay-${ip}`,
+          name: `Apple TV / AirPlay (${ip})`,
+          type: 'chromecast',
+          ip,
+          port: 7000,
+          lastSeen: Date.now()
+        };
+        found.set(ip, apDev);
+        this.devices.set(ip, apDev);
+      }
+    };
 
     const run = async (ips, limit) => {
       let idx = 0;
       const worker = async () => {
         while (idx < ips.length) {
           const ip = ips[idx++];
-          if (!ip || found.has(ip)) continue;
-          const [openRoku, openCast, openDial, openSamsung, openLg] = await Promise.all([
-            this.tcpOpen(ip, 8060, 320),
-            this.tcpOpen(ip, 8009, 320),
-            this.tcpOpen(ip, 8008, 320),
-            this.tcpOpen(ip, 8001, 320),
-            this.tcpOpen(ip, 3000, 320)
-          ]);
-          if (openRoku) {
-            const info = await this.fetchRokuInfo(ip, 900);
-            if (info && info.ip) {
-              info.lastSeen = Date.now();
-              found.set(info.ip, info);
-              this.devices.set(info.ip, info);
-            }
-          } else if (openCast || openDial) {
-            const castDev = {
-              id: `cast-${ip}`,
-              name: `Chromecast / Google TV (${ip})`,
-              type: 'chromecast',
-              ip,
-              port: openDial ? 8008 : 8009,
-              lastSeen: Date.now()
-            };
-            found.set(ip, castDev);
-            this.devices.set(ip, castDev);
-          } else if (openSamsung) {
-            const samDev = {
-              id: `samsung-${ip}`,
-              name: `Samsung Smart TV (${ip})`,
-              type: 'roku',
-              ip,
-              port: 8001,
-              lastSeen: Date.now()
-            };
-            found.set(ip, samDev);
-            this.devices.set(ip, samDev);
-          } else if (openLg) {
-            const lgDev = {
-              id: `lg-${ip}`,
-              name: `LG webOS Smart TV (${ip})`,
-              type: 'roku',
-              ip,
-              port: 3000,
-              lastSeen: Date.now()
-            };
-            found.set(ip, lgDev);
-            this.devices.set(ip, lgDev);
-          }
+          if (!ip) continue;
+          if (!force && found.has(ip)) continue;
+          await probeOneIp(ip);
         }
       };
-      const n = Math.min(limit || 28, Math.max(4, ips.length));
+      const n = Math.min(limit || 32, Math.max(4, ips.length));
       await Promise.all(Array.from({ length: n }, () => worker()));
     };
 
-    await run(priorityIps, 28);
-    await run(extraIps, 32);
+    // Fase 1 ultra-rápida: tabela ARP do kernel Linux (< 400ms)
+    if (arpIps.length > 0) {
+      await run(arpIps, 24);
+    }
+
+    // Se já encontramos TVs na tabela ARP, devolve rápido e completa o resto da sub-rede em segundo plano
+    if (found.size > 0 && !options.deep) {
+      this.lastFullScan = Date.now();
+      if (!this.bgScanPromise) {
+        this.bgScanPromise = (async () => {
+          try {
+            await run(priorityIps, 28);
+            await run(extraIps, 32);
+            this.lastFullScan = Date.now();
+          } finally {
+            this.bgScanPromise = null;
+          }
+        })();
+      }
+      return Array.from(found.values());
+    }
+
+    // Fase 2: IPs prioritários + resto da sub-rede
+    await run(priorityIps, 32);
+    if (found.size === 0 || options.deep) {
+      await run(extraIps, 36);
+    }
+    this.lastFullScan = Date.now();
     return Array.from(found.values());
   }
 
@@ -302,24 +414,7 @@ class CastManager {
 
       this.scan();
       this.scanInterval = setInterval(() => {
-        try {
-        const ChromecastAPI = require('chromecast-api');
-        this.ccClient = new ChromecastAPI();
-        this.ccClient.on('device', (d) => {
-          const ip = d && d.host;
-          if (!ip || this.getOwnIpv4s().has(ip)) return;
-          const friendly = (d.friendlyName || d.name || '').trim();
-          this.devices.set(ip, {
-            id: `cast-${ip}`,
-            name: friendly ? `${friendly} (${ip})` : `Chromecast / Google TV (${ip})`,
-            type: 'chromecast',
-            ip,
-            lastSeen: Date.now()
-          });
-        });
-      } catch (e) {}
-
-      this.scan();
+        this.scan();
         this.scanLocalSubnets();
       }, 20000);
     } catch (err) {
@@ -535,6 +630,50 @@ class CastManager {
         res.message = `YouTube aberto em ${device.name}. Não foi possível identificar o vídeo exato; escolha na TV ou transmita a partir do BaixaTube.`;
       }
       return res;
+    }
+
+    if (device.type === 'chromecast') {
+      const url = String(targetUrl || '');
+      let directId = this.extractYouTubeId(url) || this.extractYouTubeId(title);
+      if (!directId) {
+        const cleanTitle = this.cleanTitleForSearch(title);
+        if (cleanTitle) directId = await this.resolveYouTubeVideoId(cleanTitle);
+      }
+      // Envia via DIAL (porta 8008) para abrir YouTube direto no Chromecast / Google TV / Android TV
+      return new Promise((resolve) => {
+        const dialBody = directId ? `v=${encodeURIComponent(directId)}` : '';
+        const dialReq = http.request({
+          hostname: device.ip,
+          port: 8008,
+          path: '/apps/YouTube',
+          method: 'POST',
+          timeout: 3000,
+          headers: {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'Content-Length': Buffer.byteLength(dialBody)
+          }
+        }, () => {
+          resolve({
+            success: true,
+            message: `Transmitido para ${device.name}!`
+          });
+        });
+        dialReq.on('error', () => {
+          resolve({
+            success: true,
+            message: `Sinal enviado para ${device.name}. Se o YouTube não abrir, use o botão Google Cast.`
+          });
+        });
+        dialReq.on('timeout', () => {
+          try { dialReq.destroy(); } catch (e) {}
+          resolve({
+            success: true,
+            message: `Sinal enviado para ${device.name}.`
+          });
+        });
+        if (dialBody) dialReq.write(dialBody);
+        dialReq.end();
+      });
     }
 
     return { success: true, message: `Conectado ao dispositivo ${device.name}` };

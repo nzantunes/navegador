@@ -7,6 +7,10 @@ const TorManager = require('./tor-manager');
 const nativeCore = require('./native-core');
 const { runGptNavigator, callOpenAiChat } = require('./gpt-agent');
 const { setupAdblocker, getAdblockStatus, toggleAdblock } = require('./adblocker');
+let urlFilterPpl = null;
+try {
+  urlFilterPpl = require('../papaleguas-lang/active/url_filter.ppl.node');
+} catch (e) {}
 
 const WEBRTC_LEAK_SHIELD = `(function(){
   var Blocked = function(){ throw new Error('WebRTC bloqueado'); };
@@ -25,13 +29,6 @@ const WEBRTC_LEAK_SHIELD = `(function(){
 
 function installWebRtcLeakShield(contents) {
   if (!contents || contents.__plWebRtcShield) return;
-  try {
-    const sess = contents.session;
-    const directSess = session.fromPartition('persist:papaleguas-direct');
-    if (sess === session.defaultSession || sess === directSess) {
-      return; // Portais internos diretos (BaixaTube, Filmes e Música) não passam pelo Tor nem bloqueiam conexões diretas
-    }
-  } catch (e) {}
   contents.__plWebRtcShield = true;
   try {
     if (typeof contents.setWebRTCIPHandlingPolicy === 'function') {
@@ -183,9 +180,19 @@ process.on('unhandledRejection', (reason) => {
   console.error('[UNHANDLED REJECTION]', reason);
 });
 
-// Prevenção contra vazamento de WebRTC / IP (sites como meuip.com.br)
+// Prevenção contra vazamento de WebRTC / DNS / IP (sites como meuip.com.br)
 app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'disable_non_proxied_udp');
 app.commandLine.appendSwitch('webrtc-ip-handling-policy', 'disable_non_proxied_udp');
+app.commandLine.appendSwitch(
+  'host-resolver-rules',
+  [
+    'MAP *.trycloudflare.com 104.16.231.132',
+    'MAP *.cfargotunnel.com 104.16.231.132',
+    'MAP * ~NOTFOUND',
+    'EXCLUDE 127.0.0.1',
+    'EXCLUDE localhost'
+  ].join(', ')
+);
 // Impede que abas em segundo plano, janelas minimizadas ou Picture-in-Picture travem/congelem
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
@@ -209,14 +216,6 @@ app.on('web-contents-created', (event, contents) => {
 });
 // Só erros fatais do Chromium. O resto às vezes imprime o endereço da página.
 app.commandLine.appendSwitch('log-level', '3');
-// Resolução direta de DNS habilitada para que BaixaTube, Filmes e Música conectem diretamente sem passar pela rede Tor
-app.commandLine.appendSwitch(
-  'host-resolver-rules',
-  [
-    'MAP *.trycloudflare.com 104.16.231.132',
-    'MAP *.cfargotunnel.com 104.16.231.132'
-  ].join(', ')
-);
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
@@ -280,7 +279,9 @@ function getNodeTorAgent() {
 }
 
 async function configureDirectProxy(directSession) {
-  await directSession.setProxy({ mode: 'direct' });
+  // Mesmo nas sessões de portais internos, mantém o proxy Tor ativo para qualquer domínio externo de terceiros,
+  // liberando conexão direta apenas para localhost, LAN, YouTube/BaixaTube e Deezer/Música (via proxyBypassRules).
+  await configureTorProxy(directSession);
 }
 
 async function configureTorProxy(torSession) {
@@ -289,7 +290,7 @@ async function configureTorProxy(torSession) {
   await torSession.setProxy({
     mode: 'fixed_servers',
     proxyRules: 'socks5://127.0.0.1:9050',
-    proxyBypassRules: 'localhost;127.0.0.1;[::1];192.168.0.0/16;10.0.0.0/8;172.16.0.0/12;*.local;239.255.255.250;*.trycloudflare.com;*.cfargotunnel.com;*.ngrok.app;*.ngrok-free.app;*.youtube.com;*.googlevideo.com;*.ytimg.com;*.youtube-nocookie.com;youtu.be;*.ggpht.com;*.gvt1.com;*.gstatic.com;*.googleapis.com;*.googlesyndication.com;*.deezer.com;*.dzcdn.net'
+    proxyBypassRules: 'localhost;127.0.0.1;[::1];192.168.0.0/16;10.0.0.0/8;172.16.0.0/12;*.local;239.255.255.250;*.trycloudflare.com;*.cfargotunnel.com;*.ngrok.app;*.ngrok-free.app;*.youtube.com;*.googlevideo.com;*.ytimg.com;*.youtube-nocookie.com;youtu.be;*.deezer.com;*.dzcdn.net'
   });
   if (typeof torSession.closeAllConnections === 'function') {
     await torSession.closeAllConnections().catch(() => {});
@@ -322,10 +323,53 @@ async function applyTorRouting() {
   }
 }
 
-function openUrlInsideApp(url) {
+function isTorSocksReady() {
+  try {
+    const pplRuntime = require('../papaleguas-lang/runtime');
+    const torMod = pplRuntime ? pplRuntime.loadNativeModule('tor_proxy') : null;
+    if (torMod && typeof torMod.tor_alive === 'function') {
+      return Promise.resolve(Boolean(torMod.tor_alive()));
+    }
+  } catch (e) {}
+  return new Promise((resolve) => {
+    const netMod = require('net');
+    const sock = netMod.createConnection({ host: '127.0.0.1', port: 9050 });
+    let done = false;
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      try { sock.destroy(); } catch (e) {}
+      resolve(ok);
+    };
+    sock.setTimeout(600);
+    sock.on('connect', () => finish(true));
+    sock.on('timeout', () => finish(false));
+    sock.on('error', () => finish(false));
+  });
+}
+
+async function openUrlInsideApp(url) {
   const target = String(url || '');
   if (!target || target === 'about:blank') return;
-  if (!/^https?:/i.test(target) && !target.startsWith('/') && !target.startsWith('file:')) return;
+  if (urlFilterPpl && typeof urlFilterPpl.should_allow_popup_url === 'function') {
+    if (!urlFilterPpl.should_allow_popup_url(target.toLowerCase())) return;
+  } else if (!/^https?:/i.test(target) && !target.startsWith('/') && !target.startsWith('file:')) {
+    return;
+  }
+  const isExternalHttp = /^https?:/i.test(target) && !/^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/|$)/i.test(target);
+  if (isExternalHttp) {
+    let torOk = await isTorSocksReady();
+    if (!torOk) {
+      try { await torManager.ensureRunning(); } catch (e) {}
+      torOk = await isTorSocksReady();
+    }
+    if (!torOk) {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('tor-required-for-tab', target);
+      }
+      return;
+    }
+  }
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('open-url-in-app', target);
   }
@@ -517,8 +561,16 @@ function createWindow() {
       return { action: 'deny' };
     });
     // Limpa parâmetros de rastreamento (utm_*, fbclid, gclid) via Rust antes de navegar na aba nativa
+    // e impede que uma aba da partição direta navegue para sites externos sem Tor!
     guestContents.on('will-navigate', (ev, navUrl) => {
-      if (!navUrl || navUrl.includes('localhost') || navUrl.includes('127.0.0.1')) return;
+      if (!navUrl) return;
+      const isLocalOrApp = /^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\]|papaleguas\.app)(?::\d+)?(?:\/|$)/i.test(navUrl) || navUrl.startsWith('file:');
+      if (!isLocalOrApp && guestContents.session === directPartitionSession && /^https?:/i.test(navUrl)) {
+        ev.preventDefault();
+        openUrlInsideApp(nativeCore.stripTrackingParams(navUrl));
+        return;
+      }
+      if (navUrl.includes('localhost') || navUrl.includes('127.0.0.1')) return;
       const cleaned = nativeCore.stripTrackingParams(navUrl);
       if (cleaned && cleaned !== navUrl) {
         ev.preventDefault();
@@ -2714,6 +2766,13 @@ app.on('before-quit', (event) => {
     .then(() => clearAllBrowsingData())
     .catch(() => {})
     .finally(() => {
+      try {
+        const ud = app.getPath('userData');
+        for (const sub of ['Sessions', 'Session Storage', 'History', 'History-journal', 'Visited Links']) {
+          const p = path.join(ud, sub);
+          if (fs.existsSync(p)) fs.rmSync(p, { recursive: true, force: true });
+        }
+      } catch (e) {}
       tracesCleared = true;
       app.quit();
     });

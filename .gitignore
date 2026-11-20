@@ -20,3 +20,12 @@ __pycache__/
 *.pyc
 *.pyo
 .agent_backups/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+papaleguas-lang/active/
+papaleguas-lang/dist/
+papaleguas-lang/staging/
+papaleguas-lang/rollback/
+papaleguas-lang/build/

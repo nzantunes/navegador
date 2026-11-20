@@ -92,11 +92,13 @@
       moved = false;
     }
 
+    var dragThreshold = typeof opts.dragThreshold === 'number' ? opts.dragThreshold : 7;
+
     function onMove(e) {
       if (!dragging || e.pointerId !== pid) return;
       var dx = e.clientX - startX;
       var dy = e.clientY - startY;
-      if (!moved && Math.hypot(dx, dy) < 7) return;
+      if (!moved && Math.hypot(dx, dy) < dragThreshold) return;
       if (!moved) {
         moved = true;
         try { el.setPointerCapture(pid); } catch (err) {}

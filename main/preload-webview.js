@@ -87,7 +87,14 @@ if (document.documentElement) bindPopupRelay();
 document.addEventListener('DOMContentLoaded', bindPopupRelay);
 
 function linkHref(link) {
-  return (link && (link.getAttribute('data-direct') || link.href)) || '';
+  let target = (link && (link.getAttribute('data-direct') || link.getAttribute('data-url') || link.href || link.getAttribute('href'))) || '';
+  if (target.startsWith('/proxy?url=') || target.includes('/proxy?url=')) {
+    try {
+      const u = new URL(target, window.location.origin).searchParams.get('url');
+      if (u) target = u;
+    } catch (e) {}
+  }
+  return target;
 }
 
 function linkOpensNewContext(link) {
@@ -107,7 +114,9 @@ const isInternalPage = window.location.protocol === 'file:' ||
   window.location.hostname.endsWith('.lhr.life') ||
   window.location.port === '8080' ||
   window.location.pathname.includes('newtab.html') ||
-  window.location.pathname.startsWith('/search');
+  window.location.pathname.startsWith('/search') ||
+  window.location.pathname.startsWith('/ipcam-live') ||
+  window.location.pathname.startsWith('/video-watch');
 
 if (!isInternalPage) {
   try {
@@ -240,8 +249,8 @@ window.addEventListener('DOMContentLoaded', () => {
 // Em site externo, o clique não pode navegar este documento: o app abre a URL
 // num webview novo e esta página fica no cache do botão voltar.
 function openLinkInside(e, link) {
-  const href = linkHref(link);
-  if (!/^https?:/i.test(href) && !href.startsWith('file://')) return false;
+  let href = linkHref(link);
+  if (!/^https?:/i.test(href) && !href.startsWith('file://') && !href.startsWith('/proxy')) return false;
 
   const ytFromClick = youtubeIdFromUrl(href);
   if (ytFromClick) {
@@ -261,16 +270,18 @@ function openLinkInside(e, link) {
 
 window.addEventListener('auxclick', (e) => {
   if (e.button !== 1) return;
+  if (window.location.pathname && window.location.pathname.startsWith('/search')) return;
   const link = e.target && e.target.closest ? e.target.closest('a,area') : null;
   if (!link || link.hasAttribute('download')) return;
   openLinkInside(e, link);
 }, true);
 
 window.addEventListener('click', (e) => {
+  if (window.location.pathname && window.location.pathname.startsWith('/search')) return;
   const link = e.target && e.target.closest ? e.target.closest('a,area') : null;
   if (!link || link.hasAttribute('download')) return;
   const href = linkHref(link);
-  if (!/^https?:/i.test(href) && !href.startsWith('file://')) return;
+  if (!/^https?:/i.test(href) && !href.startsWith('file://') && !href.startsWith('/proxy')) return;
 
   const modified = e.button === 1 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey;
   if (modified || linkOpensNewContext(link) || link.classList.contains('gpt-link') || link.getAttribute('data-external') === 'true') {
@@ -900,9 +911,11 @@ function youtubeIdFromUrl(raw) {
     // 1. YouTube padrão, embed, shorts ou youtu.be, ou rota interna baixatube
     const m = rawStr.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?|shorts)\/|.*[?&]v=)|youtu\.be\/|baixatube(?:\.html)?\?.*[?&]v=)([^"&?\/\s]{11})/i);
     if (m && m[1]) return m[1];
-    // 2. Parâmetro v= de 11 caracteres em qualquer rota interna ou externa
-    const vMatch = rawStr.match(/[?&]v=([^"&?\/\s]{11})/i);
-    if (vMatch && vMatch[1]) return vMatch[1];
+    // 2. Parâmetro v= de 11 caracteres apenas em rotas de vídeo
+    if (/(?:youtube\.com|youtu\.be|youtube-nocookie\.com|\/(?:baixatube|youtube|watch)(?:[/?#.]|$))/i.test(rawStr)) {
+      const vMatch = rawStr.match(/[?&]v=([^"&?\/\s]{11})/i);
+      if (vMatch && vMatch[1]) return vMatch[1];
+    }
     // 3. Rota /v/11chars
     const vRoute = rawStr.match(/\/v\/([a-zA-Z0-9_-]{11})/i);
     if (vRoute && vRoute[1]) return vRoute[1];
@@ -934,7 +947,7 @@ function isOwnAppPage(href) {
     const u = new URL(href, window.location.href);
     const path = u.pathname || '/';
     if (/newtab\.html|musica\.html/i.test(path)) return true;
-    if (/^\/(youtube|filmes|musica|search|baixatube|ip-check)(\/|$)/.test(path)) return true;
+    if (/^\/(youtube|filmes|musica|search|baixatube|ip-check|ipcam-live|video-watch)(\/|$)/.test(path)) return true;
     if (path === '/' || path === '/index.html' || path === '/src/index.html') return true;
   } catch (e) {}
   return false;
